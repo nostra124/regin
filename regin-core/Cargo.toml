@@ -1,0 +1,19 @@
+[package]
+name = "regin-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+futures-util = { workspace = true }
+tokio-stream = { workspace = true }
