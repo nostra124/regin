@@ -1,0 +1,21 @@
+[Unit]
+Description=Regin Monitoring Daemon
+After=network.target
+
+[Service]
+Type=exec
+User=exedev
+Group=exedev
+WorkingDirectory=/home/exedev
+ExecStart=/home/exedev/regin/target/release/regind
+Restart=on-failure
+RestartSec=10
+Environment=HOME=/home/exedev
+Environment=RUST_LOG=info
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=regind
+
+[Install]
+WantedBy=multi-user.target
