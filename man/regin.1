@@ -1,0 +1,335 @@
+.\" regin.1 — man page for regin(1)
+.\"
+.\" Copyright 2025 The Regin Authors
+.\"
+.TH REGIN 1 "2025-06-17" "regin" "User Commands"
+.
+.SH NAME
+regin \- AI-powered Linux server administration agent
+.
+.SH SYNOPSIS
+.B regin
+.B chat
+.br
+.B regin
+.B task
+.I command
+.RI [ args ]
+.br
+.B regin
+.B runs
+.RB [ \-\-skill
+.IR NAME ]
+.RB [ \-\-limit
+.IR N ]
+.br
+.B regin
+.B config
+.I command
+.RI [ args ]
+.br
+.B regin
+.B memory
+.I command
+.RI [ args ]
+.br
+.B regin
+.B ping
+.
+.SH DESCRIPTION
+.B regin
+is an LLM-backed agent for server monitoring, auditing, and operations.
+It provides an interactive session with tool access (shell, file I/O,
+web search) and a task system for scheduled and ad-hoc server
+administration work.
+.PP
+Named after the dwarf smith from the V\(:olsunga saga.
+.PP
+The daemon
+.RB ( regind )
+starts automatically on first CLI use.
+All configuration and state are stored in SQLite; no config files are
+needed.
+.
+.SH COMMANDS
+.
+.SS Chat
+.TP
+.B regin chat
+Start an interactive agent session.
+The agent has access to the following tools:
+.BR bash ,
+.BR read_file ,
+.BR write_file ,
+.BR edit_file ,
+and
+.BR web_search .
+Context is loaded from
+.I ~/.config/regin/context.md
+(global) and
+.I .repo/regin/context.md
+(repo-local).
+.IP
+Session commands available during chat:
+.RS
+.TP
+.B /new
+Start a new conversation.
+.TP
+.B /history
+Show conversation history.
+.TP
+.B /quit
+Exit the session.
+.RE
+.
+.SS Tasks
+.TP
+.BI "regin task list"
+List all tasks (system and user).
+.TP
+.BI "regin task show " name
+Show the task prompt and supporting files for
+.IR name .
+.TP
+.BI "regin task exec " "name " \fR[ schedule \fR]
+Run the task
+.I name
+once.
+If
+.I schedule
+is given, also schedule the task for repeated execution.
+Valid schedule values are
+.BR hourly ,
+.BR daily ,
+.BR weekly ,
+.BR monthly ,
+or a custom interval of the form
+.BI every\ X m\fR/\fIX h\fR/\fIX d
+(e.g.,
+.BR "every 30m" ,
+.BR "every 6h" ,
+.BR "every 2d" ).
+.TP
+.BI "regin task unschedule " name
+Remove the schedule for task
+.IR name .
+.TP
+.B regin task schedules
+List all active task schedules.
+.
+.SS Runs
+.TP
+.BR "regin runs" " [" \-\-skill \ \fINAME\fR] " [" \-\-limit \ \fIN\fR]
+Show task run history.
+Optionally filter by skill
+.I NAME
+or limit the output to
+.I N
+entries.
+.
+.SS Configuration
+.TP
+.B regin config list
+List all settings and their current values.
+.TP
+.BI "regin config get " key
+Get the value of a setting.
+.TP
+.BI "regin config set " "key value"
+Set a configuration value.
+Setting
+.B daemon.enabled=true
+installs a user systemd unit and runs
+.BR "loginctl enable-linger" .
+.
+.SS Memory
+.TP
+.BR "regin memory list" " [" \-\-category \ \fICAT\fR]
+List stored memories, optionally filtered by category
+.IR CAT .
+.TP
+.BI "regin memory search " query
+Search memories by
+.IR query .
+.TP
+.BI "regin memory save " "category content"
+Save a new memory.
+Valid categories are:
+.BR fact ,
+.BR preference ,
+.BR pattern ,
+.BR project ,
+.BR skill ,
+.BR person .
+.TP
+.BI "regin memory update " "id content"
+Update an existing memory identified by
+.IR id .
+.TP
+.BI "regin memory delete " id
+Delete the memory identified by
+.IR id .
+.
+.SS Daemon
+.TP
+.B regin ping
+Check whether the
+.B regind
+daemon is running and responsive.
+.
+.SH OPTIONS
+.TP
+.BR \-\-skill \ \fINAME
+(\fBregin runs\fR)
+Filter run history to the named skill.
+.TP
+.BR \-\-limit \ \fIN
+(\fBregin runs\fR)
+Limit run history output to
+.I N
+entries.
+.TP
+.BR \-\-category \ \fICAT
+(\fBregin memory list\fR)
+Filter memories by category.
+.
+.SH CONFIGURATION
+The following settings are recognised by
+.BR "regin config" :
+.TP
+.B nanogpt.api_key
+API key for the NanoGPT backend.
+Required.
+.TP
+.B nanogpt.model
+LLM model to use.
+Default:
+.BR claude-sonnet-4-20250514 .
+.TP
+.B nanogpt.base_url
+Base URL for the NanoGPT API endpoint.
+.TP
+.B daemon.enabled
+When set to
+.BR true ,
+installs a user systemd service unit for
+.B regind
+and enables lingering via
+.BR loginctl (1).
+.
+.SH FILES
+.TP
+.I ~/.local/share/regin/regin.db
+SQLite database containing all configuration and state.
+.TP
+.I $XDG_RUNTIME_DIR/regin/regind.sock
+Unix domain socket used for CLI-to-daemon communication.
+.TP
+.I ~/.config/regin/context.md
+Global context file loaded at the start of every chat session.
+.TP
+.I .repo/regin/context.md
+Repository-local context file, loaded when present.
+.TP
+.I /usr/share/regin/skills/
+System skills shipped with the package.
+.TP
+.I ~/.config/regin/skills/
+User-defined skills (override system skills of the same name).
+.
+.SH ENVIRONMENT
+.TP
+.B XDG_RUNTIME_DIR
+Base directory for the daemon socket.
+Typically set by
+.BR systemd-logind (8).
+.TP
+.B RUST_LOG
+Controls log verbosity for both
+.B regin
+and
+.BR regind .
+See the
+.B tracing-subscriber
+EnvFilter documentation for syntax.
+.
+.SH EXAMPLES
+Set up API access and start a chat session:
+.PP
+.RS
+.nf
+$ regin config set nanogpt.api_key YOUR_KEY
+$ regin chat
+.fi
+.RE
+.PP
+Run the
+.B security-audit
+task once:
+.PP
+.RS
+.nf
+$ regin task exec security-audit
+.fi
+.RE
+.PP
+Schedule a task to run every six hours:
+.PP
+.RS
+.nf
+$ regin task exec disk-check "every 6h"
+.fi
+.RE
+.PP
+Schedule a daily task:
+.PP
+.RS
+.nf
+$ regin task exec log-summary daily
+.fi
+.RE
+.PP
+View recent task runs, limited to 5:
+.PP
+.RS
+.nf
+$ regin runs --limit 5
+.fi
+.RE
+.PP
+Save a memory and search for it later:
+.PP
+.RS
+.nf
+$ regin memory save fact "Production DB is on port 5432"
+$ regin memory search "database port"
+.fi
+.RE
+.PP
+Check daemon status:
+.PP
+.RS
+.nf
+$ regin ping
+.fi
+.RE
+.
+.SH ARCHITECTURE
+The
+.B regin
+CLI communicates with the
+.B regind
+daemon over a Unix domain socket.
+The daemon is started automatically on first CLI invocation and manages
+all agent sessions, scheduled tasks, and background operations.
+All persistent state is kept in a single SQLite database.
+.
+.SH SEE ALSO
+.BR systemctl (1),
+.BR loginctl (1),
+.BR systemd-logind (8),
+.BR sqlite3 (1)
+.
+.SH AUTHORS
+The Regin Authors.

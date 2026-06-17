@@ -15,11 +15,5 @@ serde_json = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-chrono = { workspace = true }
 anyhow = { workspace = true }
 crossterm = { workspace = true }
-ratatui = { workspace = true }
-dirs = { workspace = true }
-futures-util = { workspace = true }
-rusqlite = { workspace = true }
-uuid = { workspace = true }

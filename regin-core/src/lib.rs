@@ -1,5 +1,8 @@
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod llm;
+pub mod protocol;
 pub mod skills;
+pub mod tools;
 pub mod types;

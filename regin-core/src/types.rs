@@ -59,3 +59,32 @@ pub struct TaskRun {
     pub started_at: String,
     pub finished_at: String,
 }
+
+/// Summary info about a skill, for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// "system" or "user"
+    pub source: String,
+}
+
+/// A scheduled task run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schedule {
+    pub id: String,
+    pub skill: String,
+    pub interval: String,
+    pub next_run: String,
+    pub last_run: Option<String>,
+}
+
+/// A memory entry — self-managed knowledge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memory {
+    pub id: String,
+    pub category: String,
+    pub content: String,
+    pub created_at: String,
+    pub updated_at: String,
+}

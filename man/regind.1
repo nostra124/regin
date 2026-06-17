@@ -1,0 +1,185 @@
+.\" Man page for regind(1)
+.\"
+.\" Copyright (c) 2024 Regin contributors
+.\"
+.TH REGIND 1 "2025-06-17" "Regin" "Regin Manual"
+.
+.SH NAME
+regind \- daemon for the Regin AI-powered server administration agent
+.
+.SH SYNOPSIS
+.B regind
+.
+.SH DESCRIPTION
+.B regind
+is the daemon component of
+.BR Regin ,
+an AI-powered Linux server administration agent.
+It runs as a long-lived background process, listening for requests from the
+.BR regin (1)
+CLI over a Unix domain socket using a newline-delimited JSON IPC protocol.
+.PP
+The daemon manages a SQLite database that stores settings, conversations,
+memories, task run history, and scheduled tasks.
+When a task is submitted,
+.B regind
+executes it using an LLM-powered agent that has access to a set of tools
+including
+.BR bash (1)
+execution, file I/O, and web search.
+.PP
+Scheduled tasks are checked every 30 seconds and executed in the background
+when their trigger time is reached.
+.PP
+Context is loaded from two optional files at startup and injected into the
+LLM system prompt:
+.RS
+.TP
+.I ~/.config/regin/context.md
+User-level context available to all tasks.
+.TP
+.I .repo/regin/context.md
+Repository-level context for project-specific knowledge.
+.RE
+.PP
+Memories stored in the database are also loaded and provided as system
+context to the LLM.
+.PP
+API settings for the NanoGPT backend are read from the SQLite database;
+no external configuration files are required.
+.
+.SH USAGE
+In most cases
+.B regind
+does not need to be started manually.
+The
+.BR regin (1)
+CLI will start it automatically on first use if it is not already running.
+.PP
+To run the daemon explicitly:
+.PP
+.RS
+.nf
+$ regind
+.fi
+.RE
+.PP
+No arguments are required.
+.
+.SS Systemd user service
+The daemon can be installed as a
+.BR systemd (1)
+user service so that it starts at boot and survives logout:
+.PP
+.RS
+.nf
+$ regin config set daemon.enabled true
+.fi
+.RE
+.PP
+This also enables
+.B loginctl linger
+for the invoking user, ensuring the service persists after the user
+session ends.
+.
+.SH AGENT TOOLS
+During task execution, the LLM agent has access to the following tools:
+.TP
+.B bash
+Execute shell commands and return their output.
+.TP
+.B read_file
+Read the contents of a file on disk.
+.TP
+.B write_file
+Write content to a file, creating it if necessary.
+.TP
+.B edit_file
+Make targeted edits to an existing file.
+.TP
+.B web_search
+Search the web and return results.
+.
+.SH PROTOCOL
+Communication between
+.BR regin (1)
+and
+.B regind
+uses newline-delimited JSON (JSON Lines) over a Unix domain socket.
+Each line is a self-contained JSON object with a
+.B type
+field that identifies the message kind.
+Messages are either
+.I Request
+objects (sent by the CLI) or
+.I Response
+objects (sent by the daemon).
+.
+.SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/regin/regind.sock
+Unix domain socket for IPC.
+Falls back to
+.I ~/.local/state/regin/regind.sock
+if
+.B XDG_RUNTIME_DIR
+is not set.
+Removed on graceful shutdown.
+.TP
+.I ~/.local/share/regin/regin.db
+SQLite database storing settings, conversations, memories, task runs, and
+scheduled tasks.
+.TP
+.I ~/.config/regin/context.md
+Optional user-level context file loaded into the LLM system prompt.
+.TP
+.I .repo/regin/context.md
+Optional repository-level context file loaded into the LLM system prompt.
+.TP
+.I /usr/share/regin/skills/
+System-wide skill definitions.
+.TP
+.I ~/.config/regin/skills/
+User-specific skill definitions.
+.
+.SH ENVIRONMENT
+.TP
+.B XDG_RUNTIME_DIR
+Base directory for the Unix socket.
+If unset,
+.I ~/.local/state/regin/
+is used instead.
+.TP
+.B RUST_LOG
+Controls log verbosity.
+Defaults to
+.BR info .
+See the
+.B tracing-subscriber
+EnvFilter documentation for the full syntax (e.g.,
+.IR debug ,
+.IR regind=trace ).
+.
+.SH SIGNALS
+.TP
+.B SIGTERM
+Graceful shutdown.
+The daemon removes the socket file and exits.
+.TP
+.B SIGINT
+Same as
+.BR SIGTERM .
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Clean shutdown after receiving a signal.
+.TP
+.B >0
+An error occurred during startup or operation.
+.
+.SH SEE ALSO
+.BR regin (1)
+.
+.SH AUTHORS
+Regin contributors.
