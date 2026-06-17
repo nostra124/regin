@@ -37,3 +37,19 @@ toolchain**. Read it at the start of every session; append to it at the end.
   `.repo/project/skills/` (canonical, verbatim), `.repo/project/audit/rules/`,
   an empty `.repo/project/issues/` ticket scaffold, and a regin-specific
   `.repo/project/profile.md`. No dvalin work-tickets were copied.
+
+### 2026-06-17 — MILESTONE-0.2.0 planned (operations discipline)
+- Verified items 1–6 of the operations request already exist in code (config in
+  SQLite, `config list/get/set`, api_key in SQLite, `daemon.enabled` lingering
+  systemd service, unrestricted tools). Only real gap: `ensure_daemon()` spawns a
+  loose `regind` instead of registering the systemd service → BUG-001.
+- Filed the plan as MILESTONE-0.2.0 with DISC-001 (ITIL ops agent), DISC-002
+  (Hermes tiered+reflective memory), FEAT-001..007, BUG-001. User decisions:
+  Hermes = self-reflective + tiered episodic; ITIL = SQLite records + methodology
+  docs; approach = plan-as-milestone first, then one ticket = one PR.
+- DISC-003 captures "regin as a dvalin dwarf" (future, not in 0.2.0): recommended
+  A→B→C layering — JSON-API ticket escalation → ops executor plugin → dwarf-pool
+  membership. Hard constraint: keep regin's LLM inside the executor (dvalin's
+  no-LLM engine invariant). Closing DISC-003 spawns FEATs in BOTH repos.
+- Nothing implemented yet — next step is to start the milestone, foundation
+  tickets first (FEAT-002 data model, FEAT-005 episodic tier).
