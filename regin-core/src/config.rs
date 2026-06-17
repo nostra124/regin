@@ -36,11 +36,26 @@ impl Config {
         Ok(config_dir.join("regin").join("config.toml"))
     }
 
-    /// Load configuration from the default path, or create a default config file
-    /// if it does not exist.
+    /// System-wide config path: /etc/regin/config.toml
+    pub fn system_path() -> PathBuf {
+        PathBuf::from("/etc/regin/config.toml")
+    }
+
+    /// Load configuration, checking paths in order:
+    /// 1. ~/.config/regin/config.toml (if it exists)
+    /// 2. /etc/regin/config.toml (if it exists)
+    /// 3. Create default at ~/.config/regin/config.toml
     pub fn load() -> Result<Self> {
-        let path = Self::default_path()?;
-        Self::load_from(&path)
+        let user_path = Self::default_path()?;
+        if user_path.exists() {
+            return Self::load_from(&user_path);
+        }
+        let sys_path = Self::system_path();
+        if sys_path.exists() {
+            return Self::load_from(&sys_path);
+        }
+        // Neither exists — create default user config
+        Self::load_from(&user_path)
     }
 
     /// Load configuration from a specific file path. If the file doesn't exist,

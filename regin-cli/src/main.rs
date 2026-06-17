@@ -20,6 +20,10 @@ use rusqlite::Connection;
 #[derive(Parser)]
 #[command(name = "regin", version, about = "Regin – your personal AI agent")]
 struct Cli {
+    /// Path to config file (default: ~/.config/regin/config.toml or /etc/regin/config.toml)
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -76,16 +80,17 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let config_path = cli.config;
 
     match cli.command {
-        Commands::Chat => cmd_chat().await,
+        Commands::Chat => cmd_chat(config_path.as_deref()).await,
         Commands::Skill { action } => match action {
-            SkillAction::List => cmd_skill_list(),
-            SkillAction::Run { name } => cmd_skill_run(&name).await,
-            SkillAction::Show { name } => cmd_skill_show(&name),
+            SkillAction::List => cmd_skill_list(config_path.as_deref()),
+            SkillAction::Run { name } => cmd_skill_run(&name, config_path.as_deref()).await,
+            SkillAction::Show { name } => cmd_skill_show(&name, config_path.as_deref()),
         },
-        Commands::Runs { skill, limit } => cmd_runs(skill.as_deref(), limit),
-        Commands::Config => cmd_config(),
+        Commands::Runs { skill, limit } => cmd_runs(skill.as_deref(), limit, config_path.as_deref()),
+        Commands::Config => cmd_config(config_path.as_deref()),
     }
 }
 
@@ -97,8 +102,11 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn load_cfg() -> Result<Config> {
-    Config::load().context("Failed to load configuration")
+fn load_cfg(path: Option<&std::path::Path>) -> Result<Config> {
+    match path {
+        Some(p) => Config::load_from(p).with_context(|| format!("Failed to load config from {}", p.display())),
+        None => Config::load().context("Failed to load configuration"),
+    }
 }
 
 fn open_db(cfg: &Config) -> Result<Connection> {
@@ -127,8 +135,8 @@ fn println_color(text: &str, color: Color) {
 // Commands
 // ---------------------------------------------------------------------------
 
-async fn cmd_chat() -> Result<()> {
-    let cfg = load_cfg()?;
+async fn cmd_chat(config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
     let conn = open_db(&cfg)?;
     let client = make_client(&cfg);
 
@@ -250,8 +258,8 @@ async fn cmd_chat() -> Result<()> {
     Ok(())
 }
 
-fn cmd_skill_list() -> Result<()> {
-    let cfg = load_cfg()?;
+fn cmd_skill_list(config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
     let skills = skills::list_skills(&cfg.skills_dir_expanded())?;
 
     if skills.is_empty() {
@@ -270,8 +278,8 @@ fn cmd_skill_list() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_skill_run(name: &str) -> Result<()> {
-    let cfg = load_cfg()?;
+async fn cmd_skill_run(name: &str, config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
     let conn = open_db(&cfg)?;
     let client = make_client(&cfg);
     let skill = skills::load_skill(&cfg.skills_dir_expanded(), name)?;
@@ -286,8 +294,8 @@ async fn cmd_skill_run(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_skill_show(name: &str) -> Result<()> {
-    let cfg = load_cfg()?;
+fn cmd_skill_show(name: &str, config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
     let skill = skills::load_skill(&cfg.skills_dir_expanded(), name)?;
 
     println_color(&format!("Skill: {}", skill.name), Color::Cyan);
@@ -308,8 +316,8 @@ fn cmd_skill_show(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_runs(skill: Option<&str>, limit: usize) -> Result<()> {
-    let cfg = load_cfg()?;
+fn cmd_runs(skill: Option<&str>, limit: usize, config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
     let conn = open_db(&cfg)?;
 
     // The core API requires a skill name; if none given list all skills then
@@ -362,8 +370,8 @@ fn cmd_runs(skill: Option<&str>, limit: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_config() -> Result<()> {
-    let cfg = load_cfg()?;
+fn cmd_config(config_path: Option<&std::path::Path>) -> Result<()> {
+    let cfg = load_cfg(config_path)?;
 
     let redacted_key = if cfg.nanogpt_api_key.len() > 8 {
         format!("{}…{}", &cfg.nanogpt_api_key[..4], &cfg.nanogpt_api_key[cfg.nanogpt_api_key.len() - 4..])

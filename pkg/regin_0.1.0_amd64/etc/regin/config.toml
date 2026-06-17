@@ -1,0 +1,20 @@
+# Regin configuration
+# See: regin config
+
+# NanoGPT API key (required)
+nanogpt_api_key = ""
+
+# LLM model to use
+nanogpt_model = "claude-sonnet-4-20250514"
+
+# NanoGPT API base URL
+nanogpt_base_url = "https://nano-gpt.com/api/v1"
+
+# SQLite database path
+db_path = "/var/lib/regin/regin.db"
+
+# Skills directory
+skills_dir = "/var/lib/regin/skills"
+
+# Interval between scheduled skill runs (seconds)
+schedule_interval_secs = 3600
