@@ -2,7 +2,7 @@
 id: DISC-004
 type: discovery
 priority: high
-status: open
+status: done
 complexity: L
 spawned_features: ~
 ---

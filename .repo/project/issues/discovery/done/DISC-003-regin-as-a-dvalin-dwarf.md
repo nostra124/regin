@@ -2,7 +2,7 @@
 id: DISC-003
 type: discovery
 priority: medium
-status: open
+status: done
 complexity: L
 spawned_features: ~
 ---

@@ -464,6 +464,17 @@ enum ProblemAction {
     Link { problem_id: String, incident_id: String },
     /// Promote a problem to a known error with a root cause.
     KnownError { id: String, root_cause: String },
+    /// Escalate a problem to dvalin as a BUG/FEAT (structured bus message).
+    Escalate {
+        /// Problem id
+        id: String,
+        /// Ticket kind to request
+        #[arg(long = "as", default_value = "bug")]
+        kind: String,
+        /// dvalin exec address to escalate to (else REGIN_ESCALATION_TO, else cio@hq)
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Close a problem.
     Close { id: String },
 }
@@ -534,6 +545,7 @@ async fn main() -> Result<()> {
             ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
             ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
             ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
         },
         Commands::Context { action } => match action {
@@ -623,6 +635,38 @@ async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
         }
     }
     println!("regin foreman: handled {handled} cave-task(s)");
+    Ok(())
+}
+
+async fn cmd_problem_escalate(id: &str, kind: &str, to: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::escalation::{body, build, EscalationKind};
+
+    let ekind = EscalationKind::parse(kind)?;
+    // fetch the problem so the escalation carries its title + (root-cause) description
+    let problem = match rpc(&Request::ProblemShow { id: id.to_string() }).await? {
+        Response::Problems { problems } => problems.into_iter().next()
+            .ok_or_else(|| anyhow!("no problem {id}"))?,
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("unexpected: {other:?}")),
+    };
+    let description = problem.root_cause.clone().unwrap_or_else(|| problem.description.clone());
+
+    let client = BusClient::from_env()?;
+    let target = to
+        .or_else(|| std::env::var("REGIN_ESCALATION_TO").ok())
+        .unwrap_or_else(|| "cio@hq".to_string());
+    let esc = build(&problem.id, &problem.title, &description, ekind, client.address());
+    client.send(&target, KIND_STRUCTURED, &body(&esc)?, Some(&esc.ref_id))?;
+
+    // record the escalation on the regin side (a memory note keyed for recall)
+    let note = format!(
+        "Escalated problem {} to dvalin as {} (ref {}) -> {target}",
+        esc.problem_id, esc.ticket, esc.ref_id
+    );
+    let _ = rpc(&Request::MemorySave { category: "escalation".into(), content: note.clone() }).await;
+    println!("regin: {note}");
+    println!("(dvalin will reply with the ticket id, correlated by {})", esc.ref_id);
     Ok(())
 }
 

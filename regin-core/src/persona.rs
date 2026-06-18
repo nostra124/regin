@@ -9,7 +9,6 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 /// The tools regin can hold a ceiling over (mirrors `tools::execute_tool`).
 pub const ALL_TOOLS: &[&str] = &["bash", "read_file", "write_file", "edit_file", "web_search"];

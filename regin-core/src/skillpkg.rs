@@ -71,10 +71,10 @@ impl Package {
         };
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.join("skill.md").is_file() {
-                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
-                    out.push((name.to_string(), p));
-                }
+            if p.join("skill.md").is_file()
+                && let Some(name) = p.file_name().and_then(|n| n.to_str()).map(String::from)
+            {
+                out.push((name, p));
             }
         }
         out.sort_by(|a, b| a.0.cmp(&b.0));

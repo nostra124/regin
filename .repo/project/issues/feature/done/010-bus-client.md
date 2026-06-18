@@ -1,7 +1,7 @@
 ---
 id: FEAT-010
 type: feature
-status: open
+status: done
 milestone: 0.3.0
 disc: DISC-004
 ---
