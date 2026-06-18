@@ -77,6 +77,14 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS repo_skills (
+            repo_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (repo_key, name)
+        );
+
         CREATE TABLE IF NOT EXISTS schedules (
             id TEXT PRIMARY KEY,
             skill_name TEXT NOT NULL UNIQUE,
@@ -580,6 +588,54 @@ pub fn repo_context_set(conn: &Connection, repo_key: &str, content: &str) -> Res
         "INSERT INTO repo_context (repo_key, content, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(repo_key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
         params![repo_key, content, &now],
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Per-repo skills (FEAT-009)
+// ---------------------------------------------------------------------------
+
+/// Save (upsert) a per-repo skill keyed by repo path.
+pub fn repo_skill_save(conn: &Connection, repo_key: &str, name: &str, content: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO repo_skills (repo_key, name, content, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(repo_key, name) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+        params![repo_key, name, content, &now],
+    )?;
+    Ok(())
+}
+
+/// List a repo's per-repo skills as (name, content), name-sorted.
+pub fn repo_skill_list(conn: &Connection, repo_key: &str) -> Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT name, content FROM repo_skills WHERE repo_key = ?1 ORDER BY name")?;
+    let rows = stmt
+        .query_map(params![repo_key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Get a single per-repo skill's content.
+pub fn repo_skill_get(conn: &Connection, repo_key: &str, name: &str) -> Result<Option<String>> {
+    let r: std::result::Result<String, _> = conn.query_row(
+        "SELECT content FROM repo_skills WHERE repo_key = ?1 AND name = ?2",
+        params![repo_key, name],
+        |row| row.get(0),
+    );
+    match r {
+        Ok(c) => Ok(Some(c)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Delete a per-repo skill.
+pub fn repo_skill_delete(conn: &Connection, repo_key: &str, name: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM repo_skills WHERE repo_key = ?1 AND name = ?2",
+        params![repo_key, name],
     )?;
     Ok(())
 }

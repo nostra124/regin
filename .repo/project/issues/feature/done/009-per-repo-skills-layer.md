@@ -3,8 +3,8 @@ id: FEAT-009
 type: feature
 priority: medium
 complexity: M
-phase: open
-status: open
+phase: done
+status: done
 spawned_from: FEAT-008
 depends_on: FEAT-008
 ---
