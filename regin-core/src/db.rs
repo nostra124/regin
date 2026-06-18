@@ -855,6 +855,125 @@ pub fn episode_prune(conn: &Connection, before: &str) -> Result<usize> {
     Ok(n)
 }
 
+// ---------------------------------------------------------------------------
+// Monitoring evaluation -> incidents/problems (FEAT-004)
+// ---------------------------------------------------------------------------
+
+/// The most recent *active* (open|investigating) incident for a skill, if any.
+pub fn incident_active_for_skill(conn: &Connection, skill_name: &str) -> Result<Option<Incident>> {
+    let sql = format!(
+        "SELECT {INCIDENT_COLS} FROM incidents
+         WHERE skill_name = ?1 AND status IN ('open','investigating')
+         ORDER BY opened_at DESC LIMIT 1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![skill_name], row_to_incident)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+/// All incidents for a skill, across all statuses (newest first).
+pub fn incidents_for_skill(conn: &Connection, skill_name: &str) -> Result<Vec<Incident>> {
+    let sql = format!("SELECT {INCIDENT_COLS} FROM incidents WHERE skill_name = ?1 ORDER BY opened_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![skill_name], row_to_incident)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Bump an incident's updated_at without changing its status.
+pub fn incident_touch(conn: &Connection, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute("UPDATE incidents SET updated_at = ?1 WHERE id = ?2", params![&now, id])?;
+    Ok(())
+}
+
+/// Outcome of evaluating a monitoring (scheduled task) result.
+#[derive(Debug, Clone, Default)]
+pub struct MonitorOutcome {
+    /// The incident opened or updated, if the run failed.
+    pub incident_id: Option<String>,
+    /// Whether a *new* incident was created (vs. an existing one updated).
+    pub created_incident: bool,
+    /// The problem opened/linked when the recurrence threshold was reached.
+    pub problem_id: Option<String>,
+}
+
+/// Evaluate a scheduled run's result. Deterministic first pass:
+/// - `success` is a no-op.
+/// - a non-success run opens an incident for the skill, *unless* an active
+///   incident already exists for it (then that incident is updated — no
+///   duplicate).
+/// - when the number of incidents for the skill reaches `recurrence_threshold`,
+///   a problem is opened (or the existing one reused) and the incidents linked.
+///
+/// The signature is the skill name (one "shape" per skill); this can be refined
+/// later with an error fingerprint.
+pub fn monitor_evaluate(
+    conn: &Connection,
+    skill_name: &str,
+    status: &str,
+    output: &str,
+    severity: &str,
+    recurrence_threshold: usize,
+) -> Result<MonitorOutcome> {
+    if status == "success" {
+        return Ok(MonitorOutcome::default());
+    }
+
+    let (incident_id, created_incident) = match incident_active_for_skill(conn, skill_name)? {
+        Some(existing) => {
+            incident_touch(conn, &existing.id)?;
+            (existing.id, false)
+        }
+        None => {
+            let preview: String = output.chars().take(200).collect();
+            let inc = incident_open(
+                conn,
+                &format!("{skill_name} failed"),
+                &preview,
+                severity,
+                "monitor",
+                Some(skill_name),
+            )?;
+            episode_record(
+                conn,
+                "incident",
+                Some(&inc.id),
+                &format!("monitor opened incident for `{skill_name}`"),
+                Some(&preview),
+            )?;
+            (inc.id, true)
+        }
+    };
+
+    let all = incidents_for_skill(conn, skill_name)?;
+    let problem_id = if recurrence_threshold > 0 && all.len() >= recurrence_threshold {
+        let pid = match all.iter().find_map(|i| i.problem_id.clone()) {
+            Some(existing) => existing,
+            None => {
+                problem_open(
+                    conn,
+                    &format!("recurring failures: {skill_name}"),
+                    &format!("{} incidents recorded for `{skill_name}`", all.len()),
+                )?
+                .id
+            }
+        };
+        for i in &all {
+            link_incident_to_problem(conn, &pid, &i.id)?;
+        }
+        Some(pid)
+    } else {
+        None
+    };
+
+    Ok(MonitorOutcome { incident_id: Some(incident_id), created_incident, problem_id })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,5 +1123,63 @@ mod tests {
         // pruning with an old cutoff deletes nothing further
         let past = (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339();
         assert_eq!(episode_prune(&conn, &past).unwrap(), 0);
+    }
+
+    #[test]
+    fn monitor_success_is_noop() {
+        let conn = test_conn();
+        let out = monitor_evaluate(&conn, "disk-usage", "success", "all good", "medium", 3).unwrap();
+        assert!(out.incident_id.is_none());
+        assert!(!out.created_incident);
+        assert_eq!(incidents_for_skill(&conn, "disk-usage").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn monitor_dedups_while_incident_open() {
+        let conn = test_conn();
+        let first = monitor_evaluate(&conn, "nightly", "error", "boom", "high", 3).unwrap();
+        assert!(first.created_incident);
+        assert!(first.problem_id.is_none());
+
+        // second failure while the incident is still open -> same incident, no dup
+        let second = monitor_evaluate(&conn, "nightly", "error", "boom again", "high", 3).unwrap();
+        assert!(!second.created_incident);
+        assert_eq!(second.incident_id, first.incident_id);
+        assert_eq!(incidents_for_skill(&conn, "nightly").unwrap().len(), 1);
+        assert!(second.problem_id.is_none(), "one incident is below threshold");
+
+        // an episode was recorded for the opened incident
+        assert!(episode_count(&conn) >= 1);
+    }
+
+    #[test]
+    fn monitor_recurrence_opens_and_links_problem() {
+        let conn = test_conn();
+        // three distinct incidents (closed between failures so a new one opens each time)
+        let o1 = monitor_evaluate(&conn, "flapper", "error", "x", "low", 3).unwrap();
+        incident_close(&conn, o1.incident_id.as_ref().unwrap()).unwrap();
+        let o2 = monitor_evaluate(&conn, "flapper", "error", "x", "low", 3).unwrap();
+        incident_close(&conn, o2.incident_id.as_ref().unwrap()).unwrap();
+        assert!(o1.problem_id.is_none() && o2.problem_id.is_none());
+
+        let o3 = monitor_evaluate(&conn, "flapper", "error", "x", "low", 3).unwrap();
+        let pid = o3.problem_id.expect("threshold reached -> problem opened");
+
+        // all three incidents are linked to the one problem
+        let mut linked = problem_incident_ids(&conn, &pid).unwrap();
+        let mut expected: Vec<String> = incidents_for_skill(&conn, "flapper")
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        linked.sort();
+        expected.sort();
+        assert_eq!(linked, expected);
+        assert_eq!(problem_list(&conn, None).unwrap().len(), 1, "exactly one problem");
+
+        // a fourth failure reuses the same problem (no second problem)
+        let o4 = monitor_evaluate(&conn, "flapper", "error", "x", "low", 3).unwrap();
+        assert_eq!(o4.problem_id.as_deref(), Some(pid.as_str()));
+        assert_eq!(problem_list(&conn, None).unwrap().len(), 1);
     }
 }
