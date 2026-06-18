@@ -179,6 +179,9 @@ enum Commands {
         action: BusAction,
     },
 
+    /// Show the active role persona (REGIN_PERSONA) and its capability ceiling.
+    Persona,
+
     /// Check if the daemon (regind) is running.
     Ping,
 }
@@ -510,6 +513,7 @@ async fn main() -> Result<()> {
             BusAction::Send { to, body, structured, ref_id } => cmd_bus_send(&to, &body, structured, ref_id.as_deref()),
             BusAction::Inbox { peek } => cmd_bus_inbox(peek),
         },
+        Commands::Persona => cmd_persona(),
         Commands::Ping => cmd_ping().await,
     }
 }
@@ -537,6 +541,29 @@ fn cmd_bus_inbox(peek: bool) -> Result<()> {
     for m in &msgs {
         let r = m.ref_id.as_deref().map(|r| format!(" [{r}]")).unwrap_or_default();
         println!("{} → {} ({}){}: {}", m.sender, m.recipient, m.kind, r, m.body);
+    }
+    Ok(())
+}
+
+fn cmd_persona() -> Result<()> {
+    use regin_core::persona::{Persona, ALL_TOOLS};
+    match Persona::from_env()? {
+        Some(p) => {
+            println!("role:  {}", p.role);
+            if !p.title.is_empty() {
+                println!("title: {}", p.title);
+            }
+            let ceiling = if p.tools.is_empty() {
+                format!("(unscoped — all tools: {})", ALL_TOOLS.join(", "))
+            } else {
+                p.tools.join(", ")
+            };
+            println!("tools: {ceiling}");
+            if !p.prompt.is_empty() {
+                println!("\n{}", p.prompt);
+            }
+        }
+        None => println!("regin: no persona configured (REGIN_PERSONA unset) — running unscoped"),
     }
     Ok(())
 }

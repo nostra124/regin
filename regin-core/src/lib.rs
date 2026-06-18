@@ -3,6 +3,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod llm;
+pub mod persona;
 pub mod protocol;
 pub mod reflect;
 pub mod repo;
