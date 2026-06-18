@@ -1,0 +1,93 @@
+---
+id: DISC-005
+type: discovery
+priority: medium
+status: open
+complexity: L
+spawned_features: ~
+---
+
+# DISC-005 — Role personas: configuring a regin to *be* a CEO / dev-lead / worker
+
+> regin-side counterpart of dvalin **DISC-030**. dvalin defines the org role model
+> and capability vocabulary; this DISC explores how a **regin instance** is
+> configured and skilled to embody a given role.
+
+## Describe
+
+dvalin will run a standing organization of named roles — executive (CEO, CFO,
+CIO/CTO) and delivery (per-repo development lead, marketing lead, support lead),
+plus the worker tier. Most non-worker roles are realized as **regin agents**.
+The same regin binary must be able to *become* any of these roles purely by
+**configuration + capability (= tool) scoping + persona/skills**, without
+forking the codebase.
+
+This DISC explores the regin side: what a **role persona** consists of, how it
+maps onto regin's existing primitives (settings in SQLite, skills, memory, tools),
+and how capability scoping is enforced so a role only wields its allowed tools.
+
+## Positioning: regin is a specialist (not "blue-collar")
+
+regin's character is the **specialist**: it holds a **specific, long-term role**
+in the organization and **specializes** in it, following a strict **ITIL** regime
+internally so its self-improvement stays disciplined and **aligned with the
+overall workflow**. This is independent of org rank — a regin can anchor an
+executive seat (CFO, CIO) just as well as a per-repo dev lead or cave foreman;
+the common thread is a **standing, disciplined, organization-internal** post, not
+a "collar". Two consequences:
+
+- **Self-extension via sudo.** regin has sudo in its cave, so a persona is *not*
+  limited to a fixed tool list — regin can **build/install any tool its job
+  needs**. Capability scoping is therefore an **authorization ceiling per role**
+  (what it's *allowed* to wield), not a packaging limit; within the ceiling regin
+  bootstraps whatever it requires. This squares with the earlier "no special
+  restrictions unless via user authorization" decision — here the role profile
+  *is* that authorization.
+- **Complement, not overlap, with raven (the generalist).** A parallel agent,
+  **raven**, is the **generalist** runtime — a desktop companion with a richer
+  toolset (e.g. Playwright **browser** automation) but **fine-grained per-tool
+  authorizations**. raven suits **general, research-intensive, outward-facing**
+  work (interactions with the world *outside* the organization); regin suits
+  **specialized, disciplined, organization-internal** work. A regin persona may
+  **delegate** outward research to raven rather than absorbing it. This DISC
+  scopes the regin (specialist) personas; raven personas are dvalin DISC-030's
+  concern.
+
+## To explore / decide
+
+- **Persona definition** — what makes a regin a "dev-lead for repo X" vs a "CFO":
+  a role profile (identity/address `role@cave`, baseline rules, skill set, memory
+  scope, reporting lines, default channels) — likely a regin config object +
+  role-specific skills.
+- **Capability = tool scoping** — map dvalin's capability vocabulary onto regin's
+  concrete tools (command-exec, file r/w, web, messaging, repo ops, release
+  actions). A role's capability set is the **ceiling**; regin must enforce it
+  (e.g. a CFO persona cannot push to a repo). How regin restricts its own tool
+  surface per role (ties to the earlier "no special restrictions unless via user
+  authorization" decision — here authorization is the role profile).
+- **Skills per role** — which skills each persona ships with (an exec gets
+  reporting/prioritization/approval skills; a dev-lead gets triage/decompose/
+  review/escalate skills; a worker tier is the CLI agents the dev-lead supervises).
+- **Authority** — what a persona may approve, expressed so dvalin can treat it as
+  a workflow gate (e.g. dev-lead approves a PR; CIO approves a release).
+- **Memory scope** — per-role memory (a dev-lead's memory is repo-scoped; an exec's
+  is org-scoped) and how the Hermes self-improving loop (DISC-002) is partitioned
+  by role.
+- **Address & channels** — the persona's bus identity and the default channels it
+  joins (exec channel, per-repo dev channel) per DISC-029/030.
+
+## Deliverable
+
+A regin **role-persona spec** (config + skills + capability scope + memory scope +
+authority) for at least: CEO, CFO, CIO/CTO, **CAO (Chief Agentic Officer — the
+agent workforce steward)**, and per-repo development lead — aligned 1:1 with dvalin
+DISC-030's role × capability matrix (all exec seats anchor on regin; raven is the
+delegated "reach") — that spawns FEATs for the persona loader, per-role
+capability enforcement, and the per-role skill bundles.
+
+## Spawned features (to derive on close)
+
+- Role-persona config + loader (identity, rules, skills, channels, reporting)
+- Per-role capability/tool enforcement (allow-ceiling from the role profile)
+- Per-role skill bundles (exec vs dev-lead vs support …)
+- Per-role memory scoping + Hermes partitioning (DISC-002)
