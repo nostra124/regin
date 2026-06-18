@@ -79,9 +79,11 @@ a "collar". Two consequences:
 ## Deliverable
 
 A regin **role-persona spec** (config + skills + capability scope + memory scope +
-authority) for at least: CEO, CFO, CIO/CTO, per-repo development lead — aligned
-1:1 with dvalin DISC-030's role × capability matrix — that spawns FEATs for the
-persona loader, per-role capability enforcement, and the per-role skill bundles.
+authority) for at least: CEO, CFO, CIO/CTO, **Agentic Resources (AR — the agent
+workforce steward)**, and per-repo development lead — aligned 1:1 with dvalin
+DISC-030's role × capability matrix (all exec seats anchor on regin; raven is the
+delegated "reach") — that spawns FEATs for the persona loader, per-role
+capability enforcement, and the per-role skill bundles.
 
 ## Spawned features (to derive on close)
 
