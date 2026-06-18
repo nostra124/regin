@@ -88,3 +88,58 @@ pub struct Memory {
     pub created_at: String,
     pub updated_at: String,
 }
+
+// ---------------------------------------------------------------------------
+// ITIL records (FEAT-002)
+// ---------------------------------------------------------------------------
+
+/// An incident: an unplanned interruption or degradation.
+/// status: open | investigating | resolved | closed
+/// source: manual | monitor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Incident {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub severity: String,
+    pub status: String,
+    pub source: String,
+    /// Skill that produced this incident, when source = monitor.
+    pub skill_name: Option<String>,
+    /// The problem this incident was linked to, if any.
+    pub problem_id: Option<String>,
+    pub opened_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+    pub resolution: Option<String>,
+}
+
+/// A change: a deliberate modification to a system.
+/// status: planned | applied | closed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Change {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    /// The incident this change remediates, if any.
+    pub incident_id: Option<String>,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub created_at: String,
+    pub applied_at: Option<String>,
+}
+
+/// A problem: the underlying cause behind one or more incidents.
+/// status: open | known_error | closed
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Problem {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub root_cause: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub closed_at: Option<String>,
+}
