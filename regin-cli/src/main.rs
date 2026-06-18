@@ -231,6 +231,25 @@ enum TaskAction {
 
     /// List all active task schedules.
     Schedules,
+
+    /// Create a new task (skill) in the user skills dir.
+    ///
+    /// Scaffolds a template skill.md, or — with --from-prompt — has the agent
+    /// draft it (requires nanogpt.api_key). Refuses to overwrite an existing
+    /// user skill unless --force.
+    Create {
+        /// Task (skill) name
+        name: String,
+        /// Have the agent draft the skill from this goal
+        #[arg(long = "from-prompt", value_name = "GOAL")]
+        from_prompt: Option<String>,
+        /// Overwrite an existing user skill of the same name
+        #[arg(long)]
+        force: bool,
+        /// Open $EDITOR on the new skill.md
+        #[arg(long)]
+        edit: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -401,6 +420,9 @@ async fn main() -> Result<()> {
             TaskAction::Exec { name, schedule } => cmd_task_exec(&name, schedule.as_deref()).await,
             TaskAction::Unschedule { name } => cmd_task_unschedule(&name).await,
             TaskAction::Schedules => cmd_task_schedules().await,
+            TaskAction::Create { name, from_prompt, force, edit } => {
+                cmd_task_create(&name, from_prompt, force, edit).await
+            }
         },
         Commands::Runs { skill, limit } => cmd_runs(skill.as_deref(), limit).await,
         Commands::Config { action } => match action {
@@ -964,6 +986,37 @@ async fn cmd_memory_update(id: &str, content: &str) -> Result<()> {
 async fn cmd_memory_delete(id: &str) -> Result<()> {
     match rpc(&Request::MemoryDelete { id: id.into() }).await? {
         Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_task_create(
+    name: &str,
+    from_prompt: Option<String>,
+    force: bool,
+    edit: bool,
+) -> Result<()> {
+    match rpc(&Request::TaskCreate { name: name.into(), from_prompt, force }).await? {
+        Response::SkillCreated { path, shadows_system } => {
+            println_color(&format!("✓ Created skill '{name}' at {path}"), Color::Green);
+            if shadows_system {
+                println_color(
+                    &format!("  note: this user skill shadows a system skill named '{name}'"),
+                    Color::Yellow,
+                );
+            }
+            if edit {
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
+                std::process::Command::new(editor)
+                    .arg(&path)
+                    .status()
+                    .map_err(|e| anyhow!("Failed to open editor: {e}"))?;
+            } else {
+                println_color(&format!("  edit it: $EDITOR {path}"), Color::DarkGrey);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())

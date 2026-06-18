@@ -5,8 +5,8 @@ priority: medium
 complexity: M
 estimate_tokens: 40k-80k
 estimate_time: 45-90min
-phase: open
-status: open
+phase: done
+status: done
 ---
 
 # Skill (task) creation flow

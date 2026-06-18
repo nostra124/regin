@@ -30,6 +30,11 @@ pub enum Request {
     #[serde(rename = "task_schedules")]
     TaskSchedules,
 
+    /// Create a new user skill. With `from_prompt`, the agent drafts the skill.md;
+    /// otherwise a template is scaffolded. Refuses overwrite unless `force`.
+    #[serde(rename = "task_create")]
+    TaskCreate { name: String, from_prompt: Option<String>, force: bool },
+
     #[serde(rename = "runs_list")]
     RunsList { skill: Option<String>, limit: u32 },
 
@@ -202,6 +207,9 @@ pub enum Response {
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },
+
+    #[serde(rename = "skill_created")]
+    SkillCreated { path: String, shadows_system: bool },
 }
 
 #[cfg(test)]
