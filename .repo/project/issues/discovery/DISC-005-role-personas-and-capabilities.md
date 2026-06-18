@@ -26,6 +26,28 @@ This DISC explores the regin side: what a **role persona** consists of, how it
 maps onto regin's existing primitives (settings in SQLite, skills, memory, tools),
 and how capability scoping is enforced so a role only wields its allowed tools.
 
+## Positioning: regin is a blue-collar delivery worker
+
+regin's character is **discipline + autonomy within a domain** — the
+**blue-collar** delivery worker (and cave foreman). It is deliberately *not* a
+maximal-capability generalist; its strength is doing a bounded job reliably,
+permanently, and to process. Two consequences:
+
+- **Self-extension via sudo.** regin has sudo in its cave, so a persona is *not*
+  limited to a fixed tool list — regin can **build/install any tool its job
+  needs**. Capability scoping is therefore an **authorization ceiling per role**
+  (what it's *allowed* to wield), not a packaging limit; within the ceiling regin
+  bootstraps whatever it requires. This squares with the earlier "no special
+  restrictions unless via user authorization" decision — here the role profile
+  *is* that authorization.
+- **Complement, not overlap, with raven (white-collar).** A parallel agent,
+  **raven**, is the **white-collar** worker runtime — a desktop companion with
+  much richer capabilities out of the box (e.g. Playwright **browser**
+  automation). White-collar / knowledge-work-heavy or browser/desktop-driven
+  roles target the **raven** runtime; disciplined domain delivery targets
+  **regin**. This DISC scopes the regin (blue-collar) personas; raven personas
+  are dvalin DISC-030's concern. The role→runtime split keeps regin focused.
+
 ## To explore / decide
 
 - **Persona definition** — what makes a regin a "dev-lead for repo X" vs a "CFO":
