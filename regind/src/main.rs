@@ -474,7 +474,31 @@ async fn schedule_checker(state: Arc<AppState>) {
                 Err(e) => { error!(skill = %sched.skill, "Run: {e}"); ("error".to_string(), format!("{e}")) }
             };
             let finished_at = chrono::Utc::now().to_rfc3339();
-            { let db = state.db.lock().expect("DB poisoned"); let _ = db::save_task_run(&db, &sched.skill, &status, &output, &started_at, &finished_at); }
+            {
+                let db = state.db.lock().expect("DB poisoned");
+                let _ = db::save_task_run(&db, &sched.skill, &status, &output, &started_at, &finished_at);
+                // FEAT-004: evaluate the result; gated by monitor.auto_incident.
+                // Fails safe — a bad evaluation never breaks the scheduler loop.
+                let auto = db::setting_get(&db, "monitor.auto_incident").map(|v| v == "true").unwrap_or(false);
+                if auto {
+                    let severity = db::setting_get(&db, "monitor.severity").unwrap_or_else(|_| "medium".into());
+                    let threshold = db::setting_get(&db, "monitor.recurrence_threshold")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                        .unwrap_or(3);
+                    match db::monitor_evaluate(&db, &sched.skill, &status, &output, &severity, threshold) {
+                        Ok(o) => {
+                            if o.created_incident {
+                                info!(skill = %sched.skill, incident = ?o.incident_id, "monitor opened incident");
+                            }
+                            if let Some(p) = &o.problem_id {
+                                warn!(skill = %sched.skill, problem = %p, "monitor: recurrence -> problem");
+                            }
+                        }
+                        Err(e) => error!(skill = %sched.skill, "monitor_evaluate: {e}"),
+                    }
+                }
+            }
             let last_run = chrono::Utc::now().to_rfc3339();
             if let Ok(next) = compute_next_run(&sched.interval) {
                 let db = state.db.lock().expect("DB poisoned");
