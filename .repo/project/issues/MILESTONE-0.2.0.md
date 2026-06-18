@@ -24,7 +24,7 @@ FEAT-007 are independent quick(er) wins.
 | FEAT-002 | ITIL data model in SQLite | — | **done** |
 | FEAT-003 | ITIL CLI verb families (incident/change/problem) | FEAT-002 | open |
 | FEAT-004 | Monitoring evaluation → auto incidents; recurrence → problems | FEAT-002 | open |
-| FEAT-005 | Episodic memory tier | — | open |
+| FEAT-005 | Episodic memory tier | — | **done** |
 | FEAT-006 | Reflective distillation (episodic → semantic) | FEAT-005 | open |
 | FEAT-007 | Skill (task) creation flow | — | open |
 | FEAT-008 | Per-repo additions (context/memories/skills) in XDG store, keyed by repo path | — | open |
