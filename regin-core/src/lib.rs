@@ -10,3 +10,4 @@ pub mod repo;
 pub mod skills;
 pub mod tools;
 pub mod types;
+pub mod worker;
