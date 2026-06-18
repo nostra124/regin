@@ -219,8 +219,32 @@ enum Commands {
         action: SkillAction,
     },
 
+    /// Deputy mode: assign · show · brief · activate · handback (continuity).
+    Deputy {
+        #[command(subcommand)]
+        action: DeputyAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum DeputyAction {
+    /// Assign this regin as the deputy of a role held by a primary
+    Assign { role: String, primary: String },
+    /// Show the current deputy assignment + state + brief
+    Show,
+    /// Set the standing continuity brief (maintained by the primary)
+    Brief { text: String },
+    /// Activate on failover (requires --confirmed by the supervisor)
+    Activate {
+        /// Supervisor confirmation of the failover
+        #[arg(long)]
+        confirmed: bool,
+    },
+    /// Hand back to the primary when it returns
+    Handback,
 }
 
 #[derive(Subcommand)]
@@ -610,6 +634,7 @@ async fn main() -> Result<()> {
             SkillAction::Install { dir } => cmd_skill_install(&dir),
             SkillAction::Packages => cmd_skill_packages(),
         },
+        Commands::Deputy { action } => cmd_deputy(action),
         Commands::Ping => cmd_ping().await,
     }
 }
@@ -711,6 +736,39 @@ async fn cmd_problem_escalate(id: &str, kind: &str, to: Option<String>) -> Resul
     let _ = rpc(&Request::MemorySave { category: "escalation".into(), content: note.clone() }).await;
     println!("regin: {note}");
     println!("(dvalin will reply with the ticket id, correlated by {})", esc.ref_id);
+    Ok(())
+}
+
+fn cmd_deputy(action: DeputyAction) -> Result<()> {
+    use regin_core::deputy::DeputyStore;
+    let store = DeputyStore::from_env()?;
+    match action {
+        DeputyAction::Assign { role, primary } => {
+            let r = store.assign(&role, &primary)?;
+            println!("regin: deputy of {} (primary {}) — {:?}", r.role, r.primary, r.state);
+        }
+        DeputyAction::Show => match store.load()? {
+            Some(r) => {
+                println!("role:    {}", r.role);
+                println!("primary: {}", r.primary);
+                println!("state:   {:?}", r.state);
+                println!("brief:   {}", if r.brief.is_empty() { "(none)" } else { &r.brief });
+            }
+            None => println!("regin: no deputy assignment"),
+        },
+        DeputyAction::Brief { text } => {
+            store.set_brief(&text)?;
+            println!("regin: continuity brief updated");
+        }
+        DeputyAction::Activate { confirmed } => {
+            let r = store.activate(confirmed)?;
+            println!("regin: deputy ACTIVATED for {} — {:?}", r.role, r.state);
+        }
+        DeputyAction::Handback => {
+            let r = store.handback()?;
+            println!("regin: handed back to primary {} — {:?}", r.primary, r.state);
+        }
+    }
     Ok(())
 }
 

@@ -67,20 +67,20 @@ pub fn compile(agenda: &[String], reports: &[Report], open_itil: usize) -> Minut
     let mut action_items = Vec::new();
     for r in reports {
         for line in r.body.lines() {
-            if let Some(rest) = line.trim().strip_prefix("ACTION ") {
-                if let Some((assignee, desc)) = rest.split_once(':') {
-                    let assignee = assignee.trim();
-                    let (assignee, gated) = match assignee.strip_suffix('!') {
-                        Some(a) => (a.trim(), true),
-                        None => (assignee, false),
-                    };
-                    if !assignee.is_empty() {
-                        action_items.push(ActionItem {
-                            assignee: assignee.to_string(),
-                            description: desc.trim().to_string(),
-                            needs_owner_approval: gated,
-                        });
-                    }
+            if let Some(rest) = line.trim().strip_prefix("ACTION ")
+                && let Some((assignee, desc)) = rest.split_once(':')
+            {
+                let assignee = assignee.trim();
+                let (assignee, gated) = match assignee.strip_suffix('!') {
+                    Some(a) => (a.trim(), true),
+                    None => (assignee, false),
+                };
+                if !assignee.is_empty() {
+                    action_items.push(ActionItem {
+                        assignee: assignee.to_string(),
+                        description: desc.trim().to_string(),
+                        needs_owner_approval: gated,
+                    });
                 }
             }
         }
