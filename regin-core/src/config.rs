@@ -11,6 +11,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("nanogpt.model", "claude-sonnet-4-20250514", "LLM model"),
     ("nanogpt.base_url", "https://nano-gpt.com/api/v1", "NanoGPT API base URL"),
     ("daemon.enabled", "false", "Keep daemon running permanently via user systemd"),
+    ("daemon.auto_register", "true", "On first use, auto-register the systemd user service (set false to only spawn transiently)"),
     ("memory.episodic_retention_days", "30", "Days to retain reflected episodic memories"),
     ("monitor.auto_incident", "false", "Auto-open incidents from failed scheduled runs"),
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),

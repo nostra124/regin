@@ -5,8 +5,8 @@ priority: medium
 complexity: S
 estimate_tokens: 20k-40k
 estimate_time: 30-60min
-phase: open
-status: open
+phase: done
+status: done
 ---
 
 # Chat (and first use) should register + start the systemd user service, not just spawn a loose process
