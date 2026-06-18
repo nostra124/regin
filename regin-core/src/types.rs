@@ -87,6 +87,22 @@ pub struct Memory {
     pub content: String,
     pub created_at: String,
     pub updated_at: String,
+    /// Reinforcement count: how strongly this memory is held (FEAT-006).
+    #[serde(default = "one")]
+    pub strength: i64,
+    /// When reflection last reinforced this memory.
+    #[serde(default)]
+    pub last_seen: Option<String>,
+    /// `human` (hand-saved, never auto-decayed) or `reflection` (auto-distilled).
+    #[serde(default = "human_source")]
+    pub source: String,
+}
+
+fn one() -> i64 {
+    1
+}
+fn human_source() -> String {
+    "human".to_string()
 }
 
 // ---------------------------------------------------------------------------

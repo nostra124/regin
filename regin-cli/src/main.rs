@@ -312,6 +312,9 @@ enum MemoryAction {
         /// Memory ID
         id: String,
     },
+
+    /// Run a Hermes reflection pass now: distil recent episodes into memories.
+    Reflect,
 }
 
 #[derive(Subcommand)]
@@ -436,6 +439,7 @@ async fn main() -> Result<()> {
             MemoryAction::Save { category, content } => cmd_memory_save(&category, &content).await,
             MemoryAction::Update { id, content } => cmd_memory_update(&id, &content).await,
             MemoryAction::Delete { id } => cmd_memory_delete(&id).await,
+            MemoryAction::Reflect => cmd_memory_reflect().await,
         },
         Commands::Incident { action } => match action {
             IncidentAction::Open { title, severity, desc } => {
@@ -1001,6 +1005,12 @@ async fn cmd_memory_list(category: Option<&str>) -> Result<()> {
                 print_color(&format!("  {}", &m.id[..m.id.len().min(8)]), Color::DarkGrey);
                 print_color(&format!("  [{:<10}] ", m.category), Color::Cyan);
                 println!("{}", m.content);
+                if m.source == "reflection" {
+                    println_color(
+                        &format!("            ⟳ reflection · strength {}", m.strength),
+                        Color::DarkGrey,
+                    );
+                }
             }
         }
         other => return Err(anyhow!("Unexpected: {other:?}")),
@@ -1092,6 +1102,22 @@ async fn cmd_context_show() -> Result<()> {
                 Some(c) => println!("{c}"),
                 None => println_color("  (no context stored — set one with: regin context set '<text>')", Color::DarkGrey),
             }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_memory_reflect() -> Result<()> {
+    match rpc(&Request::MemoryReflect).await? {
+        Response::ReflectStats { episodes, reinforced, created, decayed } => {
+            println_color(
+                &format!(
+                    "✓ Reflection: {episodes} episodes → {reinforced} reinforced, {created} new, {decayed} decayed"
+                ),
+                Color::Green,
+            );
         }
         Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),

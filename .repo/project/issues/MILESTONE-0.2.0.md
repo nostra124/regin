@@ -18,14 +18,14 @@ FEAT-007 are independent quick(er) wins.
 
 | ID | Title | Depends on | Status |
 |----|-------|------------|--------|
-| DISC-001 | Regin as an ITIL operations agent | — | open |
-| DISC-002 | Hermes: self-improving, tiered memory | — | open |
+| DISC-001 | Regin as an ITIL operations agent | — | **done** |
+| DISC-002 | Hermes: self-improving, tiered memory | — | **done** |
 | BUG-001 | Chat auto-registers the systemd user service | — | **done** |
 | FEAT-002 | ITIL data model in SQLite | — | **done** |
 | FEAT-003 | ITIL CLI verb families (incident/change/problem) | FEAT-002 | **done** |
 | FEAT-004 | Monitoring evaluation → auto incidents; recurrence → problems | FEAT-002 | **done** |
 | FEAT-005 | Episodic memory tier | — | **done** |
-| FEAT-006 | Reflective distillation (episodic → semantic) | FEAT-005 | open |
+| FEAT-006 | Reflective distillation (episodic → semantic) | FEAT-005 | **done** |
 | FEAT-007 | Skill (task) creation flow | — | **done** |
 | FEAT-008 | Per-repo additions (context/memories) in XDG store, keyed by repo path | — | **done** |
 | FEAT-009 | Per-repo skills layer in XDG store (split from FEAT-008) | FEAT-008 | open |

@@ -65,7 +65,10 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             content TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            repo_key TEXT
+            repo_key TEXT,
+            strength INTEGER NOT NULL DEFAULT 1,
+            last_seen TEXT,
+            source TEXT NOT NULL DEFAULT 'human'
         );
 
         CREATE TABLE IF NOT EXISTS repo_context (
@@ -139,18 +142,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create database tables")?;
 
-    // Migration: add memories.repo_key to pre-FEAT-008 databases (idempotent).
-    let has_repo_key: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'repo_key'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map(|c| c > 0)
-        .unwrap_or(false);
-    if !has_repo_key {
-        conn.execute("ALTER TABLE memories ADD COLUMN repo_key TEXT", [])?;
-    }
+    // Migrations: add memories columns to pre-existing databases (idempotent).
+    add_column_if_missing(conn, "memories", "repo_key", "TEXT")?;
+    add_column_if_missing(conn, "memories", "strength", "INTEGER NOT NULL DEFAULT 1")?;
+    add_column_if_missing(conn, "memories", "last_seen", "TEXT")?;
+    add_column_if_missing(conn, "memories", "source", "TEXT NOT NULL DEFAULT 'human'")?;
 
     // Seed defaults for any missing settings
     for (key, default, _desc) in crate::config::SETTINGS {
@@ -160,6 +156,22 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+/// Add `column` to `table` if it does not already exist (idempotent migration).
+fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            params![column],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
     Ok(())
 }
 
@@ -360,6 +372,22 @@ pub fn get_all_task_runs(conn: &Connection, limit: usize) -> Result<Vec<TaskRun>
 // Memories
 // ---------------------------------------------------------------------------
 
+const MEMORY_COLS: &str =
+    "id, category, content, created_at, updated_at, strength, last_seen, source";
+
+fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
+    Ok(Memory {
+        id: row.get(0)?,
+        category: row.get(1)?,
+        content: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+        strength: row.get(5)?,
+        last_seen: row.get(6)?,
+        source: row.get(7)?,
+    })
+}
+
 pub fn memory_save(conn: &Connection, category: &str, content: &str) -> Result<Memory> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
@@ -368,7 +396,16 @@ pub fn memory_save(conn: &Connection, category: &str, content: &str) -> Result<M
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![&id, category, content, &now, &now],
     )?;
-    Ok(Memory { id, category: category.into(), content: content.into(), created_at: now.clone(), updated_at: now })
+    Ok(Memory {
+        id,
+        category: category.into(),
+        content: content.into(),
+        created_at: now.clone(),
+        updated_at: now,
+        strength: 1,
+        last_seen: None,
+        source: "human".into(),
+    })
 }
 
 pub fn memory_update(conn: &Connection, id: &str, content: &str) -> Result<()> {
@@ -386,27 +423,19 @@ pub fn memory_delete(conn: &Connection, id: &str) -> Result<()> {
 }
 
 pub fn memory_list(conn: &Connection, category: Option<&str>) -> Result<Vec<Memory>> {
-    let (sql, p): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match category {
+    let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match category {
         Some(cat) => (
-            "SELECT id, category, content, created_at, updated_at FROM memories WHERE category = ?1 ORDER BY updated_at DESC",
+            format!("SELECT {MEMORY_COLS} FROM memories WHERE category = ?1 ORDER BY strength DESC, updated_at DESC"),
             vec![Box::new(cat.to_string())],
         ),
         None => (
-            "SELECT id, category, content, created_at, updated_at FROM memories ORDER BY category, updated_at DESC",
+            format!("SELECT {MEMORY_COLS} FROM memories ORDER BY category, strength DESC, updated_at DESC"),
             vec![],
         ),
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(p.iter()), |row| {
-            Ok(Memory {
-                id: row.get(0)?,
-                category: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
+        .query_map(rusqlite::params_from_iter(p.iter()), row_to_memory)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -425,36 +454,107 @@ pub fn memory_save_scoped(
          VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
         params![&id, category, content, &now, repo_key],
     )?;
-    Ok(Memory { id, category: category.into(), content: content.into(), created_at: now.clone(), updated_at: now })
+    Ok(Memory {
+        id,
+        category: category.into(),
+        content: content.into(),
+        created_at: now.clone(),
+        updated_at: now,
+        strength: 1,
+        last_seen: None,
+        source: "human".into(),
+    })
+}
+
+/// Insert a memory distilled by reflection (source = reflection, FEAT-006).
+pub fn memory_save_reflection(conn: &Connection, category: &str, content: &str) -> Result<Memory> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO memories (id, category, content, created_at, updated_at, strength, last_seen, source)
+         VALUES (?1, ?2, ?3, ?4, ?4, 1, ?4, 'reflection')",
+        params![&id, category, content, &now],
+    )?;
+    Ok(Memory {
+        id,
+        category: category.into(),
+        content: content.into(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        strength: 1,
+        last_seen: Some(now),
+        source: "reflection".into(),
+    })
+}
+
+/// Reinforce a memory: strength += 1, last_seen = now.
+pub fn memory_reinforce(conn: &Connection, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE memories SET strength = strength + 1, last_seen = ?1, updated_at = ?1 WHERE id = ?2",
+        params![&now, id],
+    )?;
+    Ok(())
+}
+
+/// Find an existing memory with the same category and (trimmed, case-insensitive)
+/// content — the merge target for a reflection proposal. Returns its id.
+pub fn memory_find_similar(conn: &Connection, category: &str, content: &str) -> Result<Option<String>> {
+    let needle = content.trim().to_lowercase();
+    let r: std::result::Result<String, _> = conn.query_row(
+        "SELECT id FROM memories
+         WHERE category = ?1 AND lower(trim(content)) = ?2
+         ORDER BY strength DESC LIMIT 1",
+        params![category, needle],
+        |row| row.get(0),
+    );
+    match r {
+        Ok(id) => Ok(Some(id)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Decay reflection memories not seen since `before`: strength -= 1, then drop
+/// any that reach 0. `human` memories are never touched. Returns the number
+/// dropped.
+pub fn memory_decay(conn: &Connection, before: &str) -> Result<usize> {
+    conn.execute(
+        "UPDATE memories SET strength = strength - 1
+         WHERE source = 'reflection' AND strength > 0
+           AND (last_seen IS NULL OR last_seen < ?1)",
+        params![before],
+    )?;
+    let dropped = conn.execute(
+        "DELETE FROM memories WHERE source = 'reflection' AND strength <= 0",
+        [],
+    )?;
+    Ok(dropped)
 }
 
 /// Memories applicable to a repo: globals (`repo_key IS NULL`) plus the repo's
 /// own. With `None`, only globals. Used for context injection (FEAT-008) so a
 /// repo's memories never leak into another.
 pub fn memory_list_for_repo(conn: &Connection, repo_key: Option<&str>) -> Result<Vec<Memory>> {
-    let (sql, p): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match repo_key {
+    let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match repo_key {
         Some(k) => (
-            "SELECT id, category, content, created_at, updated_at FROM memories
-             WHERE repo_key IS NULL OR repo_key = ?1 ORDER BY category, updated_at DESC",
+            format!(
+                "SELECT {MEMORY_COLS} FROM memories
+                 WHERE repo_key IS NULL OR repo_key = ?1 ORDER BY strength DESC, updated_at DESC"
+            ),
             vec![Box::new(k.to_string())],
         ),
         None => (
-            "SELECT id, category, content, created_at, updated_at FROM memories
-             WHERE repo_key IS NULL ORDER BY category, updated_at DESC",
+            format!(
+                "SELECT {MEMORY_COLS} FROM memories
+                 WHERE repo_key IS NULL ORDER BY strength DESC, updated_at DESC"
+            ),
             vec![],
         ),
     };
-    let mut stmt = conn.prepare(sql)?;
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(p.iter()), |row| {
-            Ok(Memory {
-                id: row.get(0)?,
-                category: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
+        .query_map(rusqlite::params_from_iter(p.iter()), row_to_memory)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -486,20 +586,13 @@ pub fn repo_context_set(conn: &Connection, repo_key: &str, content: &str) -> Res
 
 pub fn memory_search(conn: &Connection, query: &str) -> Result<Vec<Memory>> {
     let pattern = format!("%{query}%");
-    let mut stmt = conn.prepare(
-        "SELECT id, category, content, created_at, updated_at FROM memories
-         WHERE content LIKE ?1 OR category LIKE ?1 ORDER BY updated_at DESC LIMIT 50",
-    )?;
+    let sql = format!(
+        "SELECT {MEMORY_COLS} FROM memories
+         WHERE content LIKE ?1 OR category LIKE ?1 ORDER BY strength DESC, updated_at DESC LIMIT 50"
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map(params![&pattern], |row| {
-            Ok(Memory {
-                id: row.get(0)?,
-                category: row.get(1)?,
-                content: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-            })
-        })?
+        .query_map(params![&pattern], row_to_memory)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -1232,6 +1325,59 @@ mod tests {
 
         let g: Vec<_> = memory_list_for_repo(&conn, None).unwrap().into_iter().map(|m| m.content).collect();
         assert_eq!(g, vec!["global fact".to_string()], "global scope sees only globals");
+    }
+
+    #[test]
+    fn reflection_reinforce_decay_and_human_protection() {
+        let conn = test_conn();
+        // human memory: never decayed
+        let h = memory_save(&conn, "preference", "always use apt").unwrap();
+        // reflection memory
+        let r = memory_save_reflection(&conn, "pattern", "/var/log fills weekly").unwrap();
+        assert_eq!(r.source, "reflection");
+        assert_eq!(r.strength, 1);
+
+        // similar lookup matches case/space-insensitively
+        let found = memory_find_similar(&conn, "pattern", "  /VAR/log fills weekly ").unwrap();
+        assert_eq!(found.as_deref(), Some(r.id.as_str()));
+        assert!(memory_find_similar(&conn, "fact", "nope").unwrap().is_none());
+
+        // reinforce raises strength
+        memory_reinforce(&conn, &r.id).unwrap();
+        let got = memory_list(&conn, None).unwrap();
+        let rr = got.iter().find(|m| m.id == r.id).unwrap();
+        assert_eq!(rr.strength, 2);
+
+        // decay: cutoff in the future -> reflection loses 1 (2 -> 1), survives;
+        // human untouched.
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        assert_eq!(memory_decay(&conn, &future).unwrap(), 0);
+        let after = memory_list(&conn, None).unwrap();
+        assert_eq!(after.iter().find(|m| m.id == r.id).unwrap().strength, 1);
+        assert_eq!(after.iter().find(|m| m.id == h.id).unwrap().strength, 1, "human strength unchanged");
+
+        // decay again -> reflection hits 0 and is dropped; human remains
+        assert_eq!(memory_decay(&conn, &future).unwrap(), 1);
+        let end = memory_list(&conn, None).unwrap();
+        assert!(end.iter().all(|m| m.id != r.id), "reflection memory dropped at strength 0");
+        assert!(end.iter().any(|m| m.id == h.id), "human memory protected");
+    }
+
+    #[test]
+    fn apply_reflection_reinforces_or_creates() {
+        let conn = test_conn();
+        memory_save_reflection(&conn, "pattern", "disk pressure on db01").unwrap();
+        let proposals = vec![
+            crate::reflect::ReflectionProposal { category: "pattern".into(), content: "disk pressure on db01".into() }, // matches -> reinforce
+            crate::reflect::ReflectionProposal { category: "fact".into(), content: "db01 runs postgres 16".into() },    // new -> create
+        ];
+        let stats = crate::reflect::apply_reflection(&conn, &proposals).unwrap();
+        assert_eq!(stats.reinforced, 1);
+        assert_eq!(stats.created, 1);
+        // the matched one now has strength 2, and a new fact exists
+        let mems = memory_list(&conn, None).unwrap();
+        assert_eq!(mems.iter().find(|m| m.content == "disk pressure on db01").unwrap().strength, 2);
+        assert!(mems.iter().any(|m| m.category == "fact" && m.content == "db01 runs postgres 16"));
     }
 
     #[test]

@@ -77,6 +77,10 @@ pub enum Request {
     #[serde(rename = "memory_delete")]
     MemoryDelete { id: String },
 
+    /// Run one Hermes reflection pass now (FEAT-006).
+    #[serde(rename = "memory_reflect")]
+    MemoryReflect,
+
     // --- Per-repo context (FEAT-008) ---
     #[serde(rename = "context_show")]
     ContextShow { cwd: Option<String> },
@@ -210,6 +214,9 @@ pub enum Response {
 
     #[serde(rename = "skill_created")]
     SkillCreated { path: String, shadows_system: bool },
+
+    #[serde(rename = "reflect_stats")]
+    ReflectStats { episodes: u32, reinforced: u32, created: u32, decayed: u32 },
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 id: DISC-002
 type: discovery
 priority: high
-status: open
+status: done
 complexity: M
 spawned_features: [FEAT-005, FEAT-006]
 ---
