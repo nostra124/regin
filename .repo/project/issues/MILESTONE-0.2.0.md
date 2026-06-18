@@ -22,7 +22,7 @@ FEAT-007 are independent quick(er) wins.
 | DISC-002 | Hermes: self-improving, tiered memory | — | open |
 | BUG-001 | Chat auto-registers the systemd user service | — | open |
 | FEAT-002 | ITIL data model in SQLite | — | **done** |
-| FEAT-003 | ITIL CLI verb families (incident/change/problem) | FEAT-002 | open |
+| FEAT-003 | ITIL CLI verb families (incident/change/problem) | FEAT-002 | **done** |
 | FEAT-004 | Monitoring evaluation → auto incidents; recurrence → problems | FEAT-002 | open |
 | FEAT-005 | Episodic memory tier | — | **done** |
 | FEAT-006 | Reflective distillation (episodic → semantic) | FEAT-005 | open |

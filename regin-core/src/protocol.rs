@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{ChatMessage, Conversation, Memory, Schedule, SkillInfo, TaskRun};
+use crate::types::{
+    Change, ChatMessage, Conversation, Incident, Memory, Problem, Schedule, SkillInfo, TaskRun,
+};
 
 /// Request from CLI to daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +71,52 @@ pub enum Request {
 
     #[serde(rename = "memory_delete")]
     MemoryDelete { id: String },
+
+    // --- ITIL: Incidents ---
+    #[serde(rename = "incident_open")]
+    IncidentOpen { title: String, description: String, severity: String },
+    #[serde(rename = "incident_list")]
+    IncidentList { status: Option<String> },
+    #[serde(rename = "incident_show")]
+    IncidentShow { id: String },
+    #[serde(rename = "incident_update")]
+    IncidentUpdate { id: String, status: String },
+    #[serde(rename = "incident_resolve")]
+    IncidentResolve { id: String, resolution: String },
+    #[serde(rename = "incident_close")]
+    IncidentClose { id: String },
+
+    // --- ITIL: Changes ---
+    #[serde(rename = "change_record")]
+    ChangeRecord {
+        title: String,
+        description: String,
+        incident_id: Option<String>,
+        before: Option<String>,
+        after: Option<String>,
+    },
+    #[serde(rename = "change_list")]
+    ChangeList,
+    #[serde(rename = "change_show")]
+    ChangeShow { id: String },
+    #[serde(rename = "change_apply")]
+    ChangeApply { id: String },
+    #[serde(rename = "change_close")]
+    ChangeClose { id: String },
+
+    // --- ITIL: Problems ---
+    #[serde(rename = "problem_open")]
+    ProblemOpen { title: String, description: String },
+    #[serde(rename = "problem_list")]
+    ProblemList { status: Option<String> },
+    #[serde(rename = "problem_show")]
+    ProblemShow { id: String },
+    #[serde(rename = "problem_link")]
+    ProblemLink { problem_id: String, incident_id: String },
+    #[serde(rename = "problem_known_error")]
+    ProblemKnownError { id: String, root_cause: String },
+    #[serde(rename = "problem_close")]
+    ProblemClose { id: String },
 }
 
 /// Response from daemon to CLI.
@@ -134,4 +182,51 @@ pub enum Response {
 
     #[serde(rename = "memory_list")]
     MemoryList { memories: Vec<Memory> },
+
+    // --- ITIL ---
+    #[serde(rename = "incidents")]
+    Incidents { incidents: Vec<Incident> },
+
+    #[serde(rename = "changes")]
+    Changes { changes: Vec<Change> },
+
+    #[serde(rename = "problems")]
+    Problems { problems: Vec<Problem> },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req_roundtrip(r: &Request) {
+        let j = serde_json::to_string(r).unwrap();
+        let back: Request = serde_json::from_str(&j).unwrap();
+        assert_eq!(format!("{r:?}"), format!("{back:?}"));
+    }
+
+    #[test]
+    fn itil_requests_roundtrip() {
+        req_roundtrip(&Request::IncidentOpen {
+            title: "t".into(),
+            description: "d".into(),
+            severity: "high".into(),
+        });
+        req_roundtrip(&Request::IncidentList { status: Some("open".into()) });
+        req_roundtrip(&Request::IncidentResolve { id: "x".into(), resolution: "fixed".into() });
+        req_roundtrip(&Request::ChangeRecord {
+            title: "c".into(),
+            description: "".into(),
+            incident_id: Some("i".into()),
+            before: None,
+            after: Some("up".into()),
+        });
+        req_roundtrip(&Request::ProblemLink { problem_id: "p".into(), incident_id: "i".into() });
+        req_roundtrip(&Request::ProblemKnownError { id: "p".into(), root_cause: "rc".into() });
+    }
+
+    #[test]
+    fn itil_request_tag_is_stable() {
+        let j = serde_json::to_string(&Request::IncidentClose { id: "abc".into() }).unwrap();
+        assert!(j.contains("\"type\":\"incident_close\""), "got {j}");
+    }
 }
