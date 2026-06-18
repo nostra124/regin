@@ -64,6 +64,13 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             category TEXT NOT NULL,
             content TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            repo_key TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS repo_context (
+            repo_key TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
 
@@ -131,6 +138,19 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         );",
     )
     .context("Failed to create database tables")?;
+
+    // Migration: add memories.repo_key to pre-FEAT-008 databases (idempotent).
+    let has_repo_key: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'repo_key'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if !has_repo_key {
+        conn.execute("ALTER TABLE memories ADD COLUMN repo_key TEXT", [])?;
+    }
 
     // Seed defaults for any missing settings
     for (key, default, _desc) in crate::config::SETTINGS {
@@ -389,6 +409,79 @@ pub fn memory_list(conn: &Connection, category: Option<&str>) -> Result<Vec<Memo
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// Save a memory scoped to a repo (`repo_key = Some`) or global (`None`).
+pub fn memory_save_scoped(
+    conn: &Connection,
+    category: &str,
+    content: &str,
+    repo_key: Option<&str>,
+) -> Result<Memory> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO memories (id, category, content, created_at, updated_at, repo_key)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+        params![&id, category, content, &now, repo_key],
+    )?;
+    Ok(Memory { id, category: category.into(), content: content.into(), created_at: now.clone(), updated_at: now })
+}
+
+/// Memories applicable to a repo: globals (`repo_key IS NULL`) plus the repo's
+/// own. With `None`, only globals. Used for context injection (FEAT-008) so a
+/// repo's memories never leak into another.
+pub fn memory_list_for_repo(conn: &Connection, repo_key: Option<&str>) -> Result<Vec<Memory>> {
+    let (sql, p): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match repo_key {
+        Some(k) => (
+            "SELECT id, category, content, created_at, updated_at FROM memories
+             WHERE repo_key IS NULL OR repo_key = ?1 ORDER BY category, updated_at DESC",
+            vec![Box::new(k.to_string())],
+        ),
+        None => (
+            "SELECT id, category, content, created_at, updated_at FROM memories
+             WHERE repo_key IS NULL ORDER BY category, updated_at DESC",
+            vec![],
+        ),
+    };
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(p.iter()), |row| {
+            Ok(Memory {
+                id: row.get(0)?,
+                category: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Get the stored per-repo context for a repo key, if any.
+pub fn repo_context_get(conn: &Connection, repo_key: &str) -> Result<Option<String>> {
+    let r: std::result::Result<String, _> = conn.query_row(
+        "SELECT content FROM repo_context WHERE repo_key = ?1",
+        params![repo_key],
+        |row| row.get(0),
+    );
+    match r {
+        Ok(c) => Ok(Some(c)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Set (upsert) the per-repo context for a repo key.
+pub fn repo_context_set(conn: &Connection, repo_key: &str, content: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO repo_context (repo_key, content, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(repo_key) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+        params![repo_key, content, &now],
+    )?;
+    Ok(())
 }
 
 pub fn memory_search(conn: &Connection, query: &str) -> Result<Vec<Memory>> {
@@ -1123,6 +1216,33 @@ mod tests {
         // pruning with an old cutoff deletes nothing further
         let past = (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339();
         assert_eq!(episode_prune(&conn, &past).unwrap(), 0);
+    }
+
+    #[test]
+    fn per_repo_memories_do_not_leak() {
+        let conn = test_conn();
+        memory_save_scoped(&conn, "fact", "global fact", None).unwrap();
+        memory_save_scoped(&conn, "fact", "repo A fact", Some("/repos/a")).unwrap();
+        memory_save_scoped(&conn, "fact", "repo B fact", Some("/repos/b")).unwrap();
+
+        let a: Vec<_> = memory_list_for_repo(&conn, Some("/repos/a")).unwrap().into_iter().map(|m| m.content).collect();
+        assert!(a.contains(&"global fact".to_string()));
+        assert!(a.contains(&"repo A fact".to_string()));
+        assert!(!a.contains(&"repo B fact".to_string()), "repo B must not leak into repo A");
+
+        let g: Vec<_> = memory_list_for_repo(&conn, None).unwrap().into_iter().map(|m| m.content).collect();
+        assert_eq!(g, vec!["global fact".to_string()], "global scope sees only globals");
+    }
+
+    #[test]
+    fn repo_context_set_get_upsert() {
+        let conn = test_conn();
+        assert!(repo_context_get(&conn, "/repos/a").unwrap().is_none());
+        repo_context_set(&conn, "/repos/a", "first").unwrap();
+        assert_eq!(repo_context_get(&conn, "/repos/a").unwrap().as_deref(), Some("first"));
+        repo_context_set(&conn, "/repos/a", "second").unwrap();
+        assert_eq!(repo_context_get(&conn, "/repos/a").unwrap().as_deref(), Some("second"));
+        assert!(repo_context_get(&conn, "/repos/other").unwrap().is_none());
     }
 
     #[test]

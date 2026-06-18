@@ -1,54 +1,34 @@
-//! Build system context from layered context files and memories.
-//!
-//! Context loading order:
-//! 1. ~/.config/regin/context.md (global user context)
-//! 2. <cwd>/.repo/regin/context.md (repo-local context)
-//! 3. All memories from the database
+//! Build system context from the global user context file, the per-repo context
+//! (stored in regin's own DB, keyed by repo path — FEAT-008), and memories.
 
 use crate::types::Memory;
-use std::path::{Path, PathBuf};
 use tracing::debug;
 
-/// Paths to check for context files.
-fn context_paths(cwd: Option<&str>) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-
-    // 1. Global user context
-    if let Some(config) = dirs::config_dir() {
-        paths.push(config.join("regin").join("context.md"));
+/// The global user context file (`~/.config/regin/context.md`), if non-empty.
+fn global_user_context() -> Option<String> {
+    let path = dirs::config_dir()?.join("regin").join("context.md");
+    match std::fs::read_to_string(&path) {
+        Ok(c) if !c.trim().is_empty() => {
+            debug!("Loaded global user context: {}", path.display());
+            Some(c)
+        }
+        _ => None,
     }
-
-    // 2. Repo-local context
-    if let Some(dir) = cwd {
-        paths.push(Path::new(dir).join(".repo").join("regin").join("context.md"));
-    }
-
-    paths
 }
 
-/// Read context files (silently skip missing/unreadable).
-fn load_context_files(cwd: Option<&str>) -> Vec<(String, String)> {
-    let mut parts = Vec::new();
-    for path in context_paths(cwd) {
-        match std::fs::read_to_string(&path) {
-            Ok(content) if !content.trim().is_empty() => {
-                debug!("Loaded context: {}", path.display());
-                let label = if path.to_string_lossy().contains(".repo") {
-                    "repo context"
-                } else {
-                    "user context"
-                };
-                parts.push((label.to_string(), content));
-            }
-            _ => {}
+/// Build a system prompt from the global user context, the per-repo context
+/// (already resolved from the store by the caller), and memories.
+pub fn build_system_prompt(repo_context: Option<&str>, memories: &[Memory]) -> Option<String> {
+    let mut files: Vec<(&str, String)> = Vec::new();
+    if let Some(g) = global_user_context() {
+        files.push(("user context", g));
+    }
+    if let Some(rc) = repo_context {
+        if !rc.trim().is_empty() {
+            files.push(("repo context", rc.to_string()));
         }
     }
-    parts
-}
 
-/// Build a system prompt from context files + memories.
-pub fn build_system_prompt(cwd: Option<&str>, memories: &[Memory]) -> Option<String> {
-    let files = load_context_files(cwd);
     if files.is_empty() && memories.is_empty() {
         return None;
     }
