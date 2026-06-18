@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::types::{Conversation, Memory, Message, Schedule, TaskRun};
+use crate::types::{Change, Conversation, Incident, Memory, Message, Problem, Schedule, TaskRun};
 
 /// Initialize the SQLite database at the given path, creating tables if needed.
 pub fn init_db(path: &Path) -> Result<Connection> {
@@ -15,6 +15,17 @@ pub fn init_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)
         .with_context(|| format!("Failed to open database: {}", path.display()))?;
 
+    init_schema(&conn)?;
+
+    info!("Database initialized at {}", path.display());
+    Ok(conn)
+}
+
+/// Apply the full schema (idempotent) and seed default settings.
+///
+/// Split out from [`init_db`] so it can run against an in-memory connection in
+/// tests.
+pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -61,6 +72,50 @@ pub fn init_db(path: &Path) -> Result<Connection> {
             next_run TEXT NOT NULL,
             last_run TEXT,
             created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS incidents (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            status TEXT NOT NULL,
+            source TEXT NOT NULL,
+            skill_name TEXT,
+            problem_id TEXT,
+            opened_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            resolved_at TEXT,
+            resolution TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS changes (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            incident_id TEXT,
+            before_state TEXT,
+            after_state TEXT,
+            created_at TEXT NOT NULL,
+            applied_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS problems (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            root_cause TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            closed_at TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS problem_incidents (
+            problem_id TEXT NOT NULL,
+            incident_id TEXT NOT NULL,
+            PRIMARY KEY (problem_id, incident_id)
         );",
     )
     .context("Failed to create database tables")?;
@@ -73,8 +128,7 @@ pub fn init_db(path: &Path) -> Result<Connection> {
         )?;
     }
 
-    info!("Database initialized at {}", path.display());
-    Ok(conn)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -431,4 +485,393 @@ pub fn update_schedule_after_run(
         params![last_run, next_run, skill_name],
     )?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ITIL: Incidents (FEAT-002)
+// ---------------------------------------------------------------------------
+
+const INCIDENT_COLS: &str =
+    "id, title, description, severity, status, source, skill_name, problem_id, \
+     opened_at, updated_at, resolved_at, resolution";
+
+fn row_to_incident(row: &rusqlite::Row) -> rusqlite::Result<Incident> {
+    Ok(Incident {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        severity: row.get(3)?,
+        status: row.get(4)?,
+        source: row.get(5)?,
+        skill_name: row.get(6)?,
+        problem_id: row.get(7)?,
+        opened_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        resolved_at: row.get(10)?,
+        resolution: row.get(11)?,
+    })
+}
+
+/// Open a new incident (status = open).
+pub fn incident_open(
+    conn: &Connection,
+    title: &str,
+    description: &str,
+    severity: &str,
+    source: &str,
+    skill_name: Option<&str>,
+) -> Result<Incident> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO incidents
+            (id, title, description, severity, status, source, skill_name, problem_id,
+             opened_at, updated_at, resolved_at, resolution)
+         VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, NULL, ?7, ?7, NULL, NULL)",
+        params![&id, title, description, severity, source, skill_name, &now],
+    )?;
+    debug!(id, title, "Incident opened");
+    incident_get(conn, &id)?.context("incident vanished after insert")
+}
+
+pub fn incident_get(conn: &Connection, id: &str) -> Result<Option<Incident>> {
+    let sql = format!("SELECT {INCIDENT_COLS} FROM incidents WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![id], row_to_incident)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn incident_list(conn: &Connection, status: Option<&str>) -> Result<Vec<Incident>> {
+    let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match status {
+        Some(s) => (
+            format!("SELECT {INCIDENT_COLS} FROM incidents WHERE status = ?1 ORDER BY opened_at DESC"),
+            vec![Box::new(s.to_string())],
+        ),
+        None => (
+            format!("SELECT {INCIDENT_COLS} FROM incidents ORDER BY opened_at DESC"),
+            vec![],
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(p.iter()), row_to_incident)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Set an incident's status (e.g. open -> investigating); bumps updated_at.
+pub fn incident_set_status(conn: &Connection, id: &str, status: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE incidents SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, &now, id],
+    )?;
+    Ok(())
+}
+
+/// Resolve an incident: status = resolved, record the resolution + timestamp.
+pub fn incident_resolve(conn: &Connection, id: &str, resolution: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE incidents
+         SET status = 'resolved', resolution = ?1, resolved_at = ?2, updated_at = ?2
+         WHERE id = ?3",
+        params![resolution, &now, id],
+    )?;
+    Ok(())
+}
+
+/// Close an incident (status = closed).
+pub fn incident_close(conn: &Connection, id: &str) -> Result<()> {
+    incident_set_status(conn, id, "closed")
+}
+
+// ---------------------------------------------------------------------------
+// ITIL: Changes (FEAT-002)
+// ---------------------------------------------------------------------------
+
+const CHANGE_COLS: &str =
+    "id, title, description, status, incident_id, before_state, after_state, created_at, applied_at";
+
+fn row_to_change(row: &rusqlite::Row) -> rusqlite::Result<Change> {
+    Ok(Change {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        status: row.get(3)?,
+        incident_id: row.get(4)?,
+        before: row.get(5)?,
+        after: row.get(6)?,
+        created_at: row.get(7)?,
+        applied_at: row.get(8)?,
+    })
+}
+
+/// Record a change (status = planned).
+pub fn change_record(
+    conn: &Connection,
+    title: &str,
+    description: &str,
+    incident_id: Option<&str>,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Result<Change> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO changes
+            (id, title, description, status, incident_id, before_state, after_state, created_at, applied_at)
+         VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, ?7, NULL)",
+        params![&id, title, description, incident_id, before, after, &now],
+    )?;
+    change_get(conn, &id)?.context("change vanished after insert")
+}
+
+pub fn change_get(conn: &Connection, id: &str) -> Result<Option<Change>> {
+    let sql = format!("SELECT {CHANGE_COLS} FROM changes WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![id], row_to_change)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn change_list(conn: &Connection) -> Result<Vec<Change>> {
+    let sql = format!("SELECT {CHANGE_COLS} FROM changes ORDER BY created_at DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map([], row_to_change)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Mark a change applied (status = applied, applied_at = now).
+pub fn change_apply(conn: &Connection, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE changes SET status = 'applied', applied_at = ?1 WHERE id = ?2",
+        params![&now, id],
+    )?;
+    Ok(())
+}
+
+/// Close a change (status = closed).
+pub fn change_close(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE changes SET status = 'closed' WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// ITIL: Problems (FEAT-002)
+// ---------------------------------------------------------------------------
+
+const PROBLEM_COLS: &str =
+    "id, title, description, status, root_cause, created_at, updated_at, closed_at";
+
+fn row_to_problem(row: &rusqlite::Row) -> rusqlite::Result<Problem> {
+    Ok(Problem {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        description: row.get(2)?,
+        status: row.get(3)?,
+        root_cause: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+        closed_at: row.get(7)?,
+    })
+}
+
+/// Open a new problem (status = open).
+pub fn problem_open(conn: &Connection, title: &str, description: &str) -> Result<Problem> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO problems
+            (id, title, description, status, root_cause, created_at, updated_at, closed_at)
+         VALUES (?1, ?2, ?3, 'open', NULL, ?4, ?4, NULL)",
+        params![&id, title, description, &now],
+    )?;
+    problem_get(conn, &id)?.context("problem vanished after insert")
+}
+
+pub fn problem_get(conn: &Connection, id: &str) -> Result<Option<Problem>> {
+    let sql = format!("SELECT {PROBLEM_COLS} FROM problems WHERE id = ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query_map(params![id], row_to_problem)?;
+    match rows.next() {
+        Some(r) => Ok(Some(r?)),
+        None => Ok(None),
+    }
+}
+
+pub fn problem_list(conn: &Connection, status: Option<&str>) -> Result<Vec<Problem>> {
+    let (sql, p): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match status {
+        Some(s) => (
+            format!("SELECT {PROBLEM_COLS} FROM problems WHERE status = ?1 ORDER BY created_at DESC"),
+            vec![Box::new(s.to_string())],
+        ),
+        None => (
+            format!("SELECT {PROBLEM_COLS} FROM problems ORDER BY created_at DESC"),
+            vec![],
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(p.iter()), row_to_problem)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Promote a problem to a known error with a recorded root cause.
+pub fn problem_set_known_error(conn: &Connection, id: &str, root_cause: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE problems SET status = 'known_error', root_cause = ?1, updated_at = ?2 WHERE id = ?3",
+        params![root_cause, &now, id],
+    )?;
+    Ok(())
+}
+
+/// Close a problem (status = closed, closed_at = now).
+pub fn problem_close(conn: &Connection, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE problems SET status = 'closed', closed_at = ?1, updated_at = ?1 WHERE id = ?2",
+        params![&now, id],
+    )?;
+    Ok(())
+}
+
+/// Link an incident to a problem (idempotent) and set the incident's problem_id.
+pub fn link_incident_to_problem(conn: &Connection, problem_id: &str, incident_id: &str) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO problem_incidents (problem_id, incident_id) VALUES (?1, ?2)",
+        params![problem_id, incident_id],
+    )?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE incidents SET problem_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![problem_id, &now, incident_id],
+    )?;
+    Ok(())
+}
+
+/// The incident ids linked to a problem.
+pub fn problem_incident_ids(conn: &Connection, problem_id: &str) -> Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare("SELECT incident_id FROM problem_incidents WHERE problem_id = ?1 ORDER BY incident_id")?;
+    let rows = stmt
+        .query_map(params![problem_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn init_schema_is_idempotent() {
+        let conn = test_conn();
+        // Running it again must not error.
+        init_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn incident_lifecycle() {
+        let conn = test_conn();
+        let inc = incident_open(&conn, "disk full on /var", "log spike", "high", "monitor", Some("disk-usage")).unwrap();
+        assert_eq!(inc.status, "open");
+        assert_eq!(inc.severity, "high");
+        assert_eq!(inc.source, "monitor");
+        assert_eq!(inc.skill_name.as_deref(), Some("disk-usage"));
+
+        incident_set_status(&conn, &inc.id, "investigating").unwrap();
+        assert_eq!(incident_get(&conn, &inc.id).unwrap().unwrap().status, "investigating");
+        assert_eq!(incident_list(&conn, Some("investigating")).unwrap().len(), 1);
+        assert_eq!(incident_list(&conn, Some("open")).unwrap().len(), 0);
+
+        incident_resolve(&conn, &inc.id, "rotated logs").unwrap();
+        let r = incident_get(&conn, &inc.id).unwrap().unwrap();
+        assert_eq!(r.status, "resolved");
+        assert_eq!(r.resolution.as_deref(), Some("rotated logs"));
+        assert!(r.resolved_at.is_some());
+
+        incident_close(&conn, &inc.id).unwrap();
+        assert_eq!(incident_get(&conn, &inc.id).unwrap().unwrap().status, "closed");
+    }
+
+    #[test]
+    fn change_lifecycle() {
+        let conn = test_conn();
+        let inc = incident_open(&conn, "svc down", "", "medium", "manual", None).unwrap();
+        let chg = change_record(
+            &conn,
+            "restart nginx",
+            "remediate the outage",
+            Some(&inc.id),
+            Some("stopped"),
+            Some("running"),
+        )
+        .unwrap();
+        assert_eq!(chg.status, "planned");
+        assert_eq!(chg.incident_id.as_deref(), Some(inc.id.as_str()));
+        assert_eq!(chg.before.as_deref(), Some("stopped"));
+
+        change_apply(&conn, &chg.id).unwrap();
+        let applied = change_get(&conn, &chg.id).unwrap().unwrap();
+        assert_eq!(applied.status, "applied");
+        assert!(applied.applied_at.is_some());
+
+        change_close(&conn, &chg.id).unwrap();
+        assert_eq!(change_get(&conn, &chg.id).unwrap().unwrap().status, "closed");
+        assert_eq!(change_list(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn problem_lifecycle_and_linking() {
+        let conn = test_conn();
+        let prob = problem_open(&conn, "nightly job flaps", "recurring timeout").unwrap();
+        assert_eq!(prob.status, "open");
+
+        let i1 = incident_open(&conn, "timeout #1", "", "low", "monitor", Some("nightly")).unwrap();
+        let i2 = incident_open(&conn, "timeout #2", "", "low", "monitor", Some("nightly")).unwrap();
+        link_incident_to_problem(&conn, &prob.id, &i1.id).unwrap();
+        link_incident_to_problem(&conn, &prob.id, &i2.id).unwrap();
+        // idempotent
+        link_incident_to_problem(&conn, &prob.id, &i1.id).unwrap();
+
+        let mut linked = problem_incident_ids(&conn, &prob.id).unwrap();
+        linked.sort();
+        let mut expected = vec![i1.id.clone(), i2.id.clone()];
+        expected.sort();
+        assert_eq!(linked, expected);
+        assert_eq!(incident_get(&conn, &i1.id).unwrap().unwrap().problem_id.as_deref(), Some(prob.id.as_str()));
+
+        problem_set_known_error(&conn, &prob.id, "deadlock in cron lock").unwrap();
+        let ke = problem_get(&conn, &prob.id).unwrap().unwrap();
+        assert_eq!(ke.status, "known_error");
+        assert_eq!(ke.root_cause.as_deref(), Some("deadlock in cron lock"));
+
+        problem_close(&conn, &prob.id).unwrap();
+        let closed = problem_get(&conn, &prob.id).unwrap().unwrap();
+        assert_eq!(closed.status, "closed");
+        assert!(closed.closed_at.is_some());
+    }
+
+    #[test]
+    fn incident_get_missing_returns_none() {
+        let conn = test_conn();
+        assert!(incident_get(&conn, "nope").unwrap().is_none());
+    }
 }
