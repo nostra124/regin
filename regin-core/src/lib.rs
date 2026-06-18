@@ -7,6 +7,7 @@ pub mod foreman;
 pub mod db;
 pub mod llm;
 pub mod persona;
+pub mod planning;
 pub mod protocol;
 pub mod reflect;
 pub mod repo;

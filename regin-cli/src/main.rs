@@ -188,6 +188,25 @@ enum Commands {
         action: MeetingAction,
     },
 
+    /// Run the individual planning cycle (aggregate When/Which → plan; emit upward).
+    Plan {
+        /// Cadence: weekly | monthly | yearly
+        #[arg(long, default_value = "weekly")]
+        cadence: String,
+        /// A required capability/skill package this agent needs (repeatable)
+        #[arg(long = "need")]
+        needs: Vec<String>,
+        /// Emit upward signals (priority ask + capability gap) over the bus
+        #[arg(long)]
+        emit: bool,
+        /// Process/project owner address (priority ask). Else REGIN_PROCESS_OWNER.
+        #[arg(long)]
+        owner: Option<String>,
+        /// CAO address (capability gaps). Else REGIN_CAO, else cao@hq.
+        #[arg(long)]
+        cao: Option<String>,
+    },
+
     /// Foreman mode: drain the inbox, run cave-tasks on local workers, hand over.
     Foreman {
         #[command(subcommand)]
@@ -583,6 +602,7 @@ async fn main() -> Result<()> {
         Commands::Meeting { action } => match action {
             MeetingAction::Chair { name, agenda, to } => cmd_meeting_chair(&name, agenda, to).await,
         },
+        Commands::Plan { cadence, needs, emit, owner, cao } => cmd_plan(&cadence, needs, emit, owner, cao).await,
         Commands::Foreman { action } => match action {
             ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
         },
@@ -742,6 +762,49 @@ async fn cmd_meeting_chair(name: &str, agenda: Vec<String>, to: Option<String>) 
     client.send(&target, KIND_STRUCTURED, &minutes_message_body(name, &minutes), Some(name))?;
     println!("regin: chaired {name} — {} report(s), {} decision(s), {} action(s) → {target}",
         reports.len(), minutes.decisions.len(), minutes.action_items.len());
+    Ok(())
+}
+
+async fn cmd_plan(cadence: &str, needs: Vec<String>, emit: bool, owner: Option<String>, cao: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::planning::{build_plan, capability_gap_body, cadence_scope, priority_ask_body};
+
+    if cadence_scope(cadence).is_none() {
+        return Err(anyhow!("unknown cadence {cadence:?} (use weekly|monthly|yearly)"));
+    }
+    // gather decentralized signals (best-effort — work without the daemon too)
+    let schedules: Vec<String> = match rpc(&Request::TaskSchedules).await {
+        Ok(Response::SchedulesList { schedules }) => schedules.into_iter().map(|s| s.skill).collect(),
+        _ => Vec::new(),
+    };
+    let count = |resp: Result<Response>| -> usize {
+        match resp {
+            Ok(Response::Incidents { incidents }) => incidents.len(),
+            Ok(Response::Problems { problems }) => problems.len(),
+            _ => 0,
+        }
+    };
+    let open_incidents = count(rpc(&Request::IncidentList { status: Some("open".into()) }).await);
+    let open_problems = count(rpc(&Request::ProblemList { status: Some("open".into()) }).await);
+    let available = regin_core::config::user_skills_dir().ok()
+        .map(|d| regin_core::skillpkg::installed_packages(&d)).unwrap_or_default();
+
+    let plan = build_plan(cadence, &schedules, &needs, &available, open_incidents, open_problems);
+    println!("{}", serde_json::to_string_pretty(&plan).unwrap_or_default());
+
+    if emit {
+        let client = BusClient::from_env()?;
+        let owner = owner.or_else(|| std::env::var("REGIN_PROCESS_OWNER").ok());
+        if let Some(o) = owner {
+            client.send(&o, KIND_STRUCTURED, &priority_ask_body(&plan), Some(cadence))?;
+            println!("regin: priority ask → {o}");
+        }
+        if let Some(body) = capability_gap_body(&plan) {
+            let cao = cao.or_else(|| std::env::var("REGIN_CAO").ok()).unwrap_or_else(|| "cao@hq".to_string());
+            client.send(&cao, KIND_STRUCTURED, &body, Some(cadence))?;
+            println!("regin: capability gap → {cao} ({} gap(s))", plan.capability_gaps.len());
+        }
+    }
     Ok(())
 }
 
