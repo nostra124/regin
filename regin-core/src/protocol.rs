@@ -12,10 +12,10 @@ pub enum Request {
     Ping,
 
     #[serde(rename = "skill_list")]
-    SkillList,
+    SkillList { cwd: Option<String> },
 
     #[serde(rename = "skill_show")]
-    SkillShow { name: String },
+    SkillShow { name: String, cwd: Option<String> },
 
     /// Execute a task. `cwd` is the caller's working directory (for repo context).
     #[serde(rename = "task_exec")]
@@ -30,10 +30,18 @@ pub enum Request {
     #[serde(rename = "task_schedules")]
     TaskSchedules,
 
-    /// Create a new user skill. With `from_prompt`, the agent drafts the skill.md;
+    /// Create a new skill. With `from_prompt`, the agent drafts the skill.md;
     /// otherwise a template is scaffolded. Refuses overwrite unless `force`.
+    /// With `repo`, the skill is stored in regin's per-repo store keyed by `cwd`
+    /// (FEAT-009) instead of the user skills dir.
     #[serde(rename = "task_create")]
-    TaskCreate { name: String, from_prompt: Option<String>, force: bool },
+    TaskCreate {
+        name: String,
+        from_prompt: Option<String>,
+        force: bool,
+        repo: bool,
+        cwd: Option<String>,
+    },
 
     #[serde(rename = "runs_list")]
     RunsList { skill: Option<String>, limit: u32 },

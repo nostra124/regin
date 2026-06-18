@@ -243,12 +243,15 @@ enum TaskAction {
         /// Have the agent draft the skill from this goal
         #[arg(long = "from-prompt", value_name = "GOAL")]
         from_prompt: Option<String>,
-        /// Overwrite an existing user skill of the same name
+        /// Overwrite an existing skill of the same name
         #[arg(long)]
         force: bool,
-        /// Open $EDITOR on the new skill.md
+        /// Open $EDITOR on the new skill.md (user skills only)
         #[arg(long)]
         edit: bool,
+        /// Store in the current repo's per-repo store (XDG, keyed by repo path)
+        #[arg(long)]
+        repo: bool,
     },
 }
 
@@ -423,8 +426,8 @@ async fn main() -> Result<()> {
             TaskAction::Exec { name, schedule } => cmd_task_exec(&name, schedule.as_deref()).await,
             TaskAction::Unschedule { name } => cmd_task_unschedule(&name).await,
             TaskAction::Schedules => cmd_task_schedules().await,
-            TaskAction::Create { name, from_prompt, force, edit } => {
-                cmd_task_create(&name, from_prompt, force, edit).await
+            TaskAction::Create { name, from_prompt, force, edit, repo } => {
+                cmd_task_create(&name, from_prompt, force, edit, repo).await
             }
         },
         Commands::Runs { skill, limit } => cmd_runs(skill.as_deref(), limit).await,
@@ -774,7 +777,7 @@ async fn cmd_chat() -> Result<()> {
 }
 
 async fn cmd_task_list() -> Result<()> {
-    match rpc(&Request::SkillList).await? {
+    match rpc(&Request::SkillList { cwd: Some(cwd_string()) }).await? {
         Response::SkillList { skills } => {
             if skills.is_empty() {
                 println!("No tasks found.");
@@ -794,7 +797,7 @@ async fn cmd_task_list() -> Result<()> {
 }
 
 async fn cmd_task_show(name: &str) -> Result<()> {
-    match rpc(&Request::SkillShow { name: name.into() }).await? {
+    match rpc(&Request::SkillShow { name: name.into(), cwd: Some(cwd_string()) }).await? {
         Response::SkillDetail { name, description, prompt, files } => {
             println_color(&format!("Task: {name}"), Color::Cyan);
             println!("  {description}");
@@ -1065,8 +1068,10 @@ async fn cmd_task_create(
     from_prompt: Option<String>,
     force: bool,
     edit: bool,
+    repo: bool,
 ) -> Result<()> {
-    match rpc(&Request::TaskCreate { name: name.into(), from_prompt, force }).await? {
+    let cwd = repo.then(cwd_string);
+    match rpc(&Request::TaskCreate { name: name.into(), from_prompt, force, repo, cwd }).await? {
         Response::SkillCreated { path, shadows_system } => {
             println_color(&format!("✓ Created skill '{name}' at {path}"), Color::Green);
             if shadows_system {
@@ -1075,13 +1080,13 @@ async fn cmd_task_create(
                     Color::Yellow,
                 );
             }
-            if edit {
+            if edit && !repo {
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
                 std::process::Command::new(editor)
                     .arg(&path)
                     .status()
                     .map_err(|e| anyhow!("Failed to open editor: {e}"))?;
-            } else {
+            } else if !repo {
                 println_color(&format!("  edit it: $EDITOR {path}"), Color::DarkGrey);
             }
         }

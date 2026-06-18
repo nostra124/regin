@@ -125,6 +125,25 @@ async fn send(w: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> Result<
     Ok(())
 }
 
+/// Per-repo skills (name, content) for the repo resolved from `cwd` (FEAT-009).
+fn repo_skills_for(state: &AppState, cwd: Option<&str>) -> Vec<(String, String)> {
+    match repo::repo_key(cwd) {
+        Some(key) => {
+            let db = state.db.lock().expect("DB poisoned");
+            db::repo_skill_list(&db, &key).unwrap_or_default()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// The per-repo content for one skill name, if the cwd resolves to a repo that
+/// has it (FEAT-009).
+fn repo_skill_content(state: &AppState, cwd: Option<&str>, name: &str) -> Option<String> {
+    let key = repo::repo_key(cwd)?;
+    let db = state.db.lock().expect("DB poisoned");
+    db::repo_skill_get(&db, &key, name).ok().flatten()
+}
+
 /// Build system context messages from the per-repo context + scoped memories
 /// (FEAT-008). The repo is identified by its filesystem path; a legacy in-repo
 /// `.repo/regin/context.md` is imported into the store once.
@@ -220,18 +239,22 @@ async fn dispatch(
     match req {
         Request::Ping => send(w, &Response::Pong).await?,
 
-        Request::SkillList => {
+        Request::SkillList { cwd } => {
             let sys = config::system_skills_dir();
             let usr = config::user_skills_dir()?;
-            let all = skills::list_all_skills(&sys, &usr)?;
+            let repo_skills = repo_skills_for(state, cwd.as_deref());
+            let all = skills::list_all_skills_scoped(&sys, &usr, &repo_skills)?;
             let infos = all.iter().map(|s| regin_core::types::SkillInfo {
                 name: s.name.clone(), description: s.description.clone(), source: s.source.to_string(),
             }).collect();
             send(w, &Response::SkillList { skills: infos }).await?;
         }
 
-        Request::SkillShow { name } => {
-            let skill = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &name)?;
+        Request::SkillShow { name, cwd } => {
+            let repo_content = repo_skill_content(state, cwd.as_deref(), &name);
+            let skill = skills::load_skill_scoped(
+                &config::system_skills_dir(), &config::user_skills_dir()?, repo_content.as_deref(), &name,
+            )?;
             let files = skill.files.iter().map(|(f, _)| f.clone()).collect();
             send(w, &Response::SkillDetail {
                 name: skill.name, description: skill.description, prompt: skill.prompt, files,
@@ -239,7 +262,10 @@ async fn dispatch(
         }
 
         Request::TaskExec { skill: name, cwd } => {
-            let skill = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &name)?;
+            let repo_content = repo_skill_content(state, cwd.as_deref(), &name);
+            let skill = skills::load_skill_scoped(
+                &config::system_skills_dir(), &config::user_skills_dir()?, repo_content.as_deref(), &name,
+            )?;
             let run = exec_skill_agentic(&skill, state, cwd.as_deref(), w).await?;
             send(w, &Response::TaskResult { run }).await?;
         }
@@ -435,8 +461,8 @@ async fn dispatch(
             send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
         }
 
-        // --- Skill authoring (FEAT-007) ---
-        Request::TaskCreate { name, from_prompt, force } => {
+        // --- Skill authoring (FEAT-007 / FEAT-009) ---
+        Request::TaskCreate { name, from_prompt, force, repo, cwd } => {
             let content = match &from_prompt {
                 Some(goal) => {
                     let client = state.llm_client()?; // needs an API key
@@ -452,10 +478,26 @@ async fn dispatch(
                 }
                 None => skills::skill_template(&name),
             };
-            let user_dir = config::user_skills_dir()?;
-            let path = skills::create_skill(&user_dir, &name, &content, force)?;
-            let shadows = skills::system_skill_exists(&config::system_skills_dir(), &name);
-            send(w, &Response::SkillCreated { path: path.display().to_string(), shadows_system: shadows }).await?;
+            if repo {
+                // FEAT-009: store in the per-repo store keyed by repo path.
+                match repo::repo_key(cwd.as_deref()) {
+                    Some(key) => {
+                        let existed = { let db = state.db.lock().expect("DB poisoned"); db::repo_skill_get(&db, &key, &name)?.is_some() };
+                        if existed && !force {
+                            send(w, &Response::Error { message: format!("Repo skill '{name}' already exists (use --force)") }).await?;
+                        } else {
+                            { let db = state.db.lock().expect("DB poisoned"); db::repo_skill_save(&db, &key, &name, &content)?; }
+                            send(w, &Response::SkillCreated { path: format!("[repo store] {key} :: {name}"), shadows_system: false }).await?;
+                        }
+                    }
+                    None => send(w, &Response::Error { message: "No repo resolved for --repo".into() }).await?,
+                }
+            } else {
+                let user_dir = config::user_skills_dir()?;
+                let path = skills::create_skill(&user_dir, &name, &content, force)?;
+                let shadows = skills::system_skill_exists(&config::system_skills_dir(), &name);
+                send(w, &Response::SkillCreated { path: path.display().to_string(), shadows_system: shadows }).await?;
+            }
         }
 
         // --- Per-repo context (FEAT-008) ---

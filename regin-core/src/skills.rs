@@ -26,6 +26,8 @@ pub struct Skill {
 pub enum SkillSource {
     System,
     User,
+    /// A per-repo skill from regin's store, keyed by repo path (FEAT-009).
+    Repo,
 }
 
 impl std::fmt::Display for SkillSource {
@@ -33,6 +35,7 @@ impl std::fmt::Display for SkillSource {
         match self {
             SkillSource::System => write!(f, "system"),
             SkillSource::User => write!(f, "user"),
+            SkillSource::Repo => write!(f, "repo"),
         }
     }
 }
@@ -86,6 +89,60 @@ fn load_skills_from_dir(dir: &Path, source: SkillSource) -> Result<Vec<Skill>> {
         }
     }
     Ok(skills)
+}
+
+/// Build a Skill from in-memory content (no supporting files), e.g. a per-repo
+/// skill stored in the DB. The first line is the description.
+pub fn skill_from_content(name: &str, content: &str, source: SkillSource) -> Skill {
+    let description = content
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('#')
+        .trim()
+        .to_string();
+    Skill {
+        name: name.to_string(),
+        description,
+        path: std::path::PathBuf::new(),
+        prompt: content.to_string(),
+        source,
+        files: Vec::new(),
+    }
+}
+
+/// List skills merging system + user dirs and per-repo store skills.
+/// Precedence (highest last): system < user < repo.
+pub fn list_all_skills_scoped(
+    system_dir: &Path,
+    user_dir: &Path,
+    repo_skills: &[(String, String)],
+) -> Result<Vec<Skill>> {
+    let mut by_name: BTreeMap<String, Skill> = BTreeMap::new();
+    for skill in load_skills_from_dir(system_dir, SkillSource::System)? {
+        by_name.insert(skill.name.clone(), skill);
+    }
+    for skill in load_skills_from_dir(user_dir, SkillSource::User)? {
+        by_name.insert(skill.name.clone(), skill);
+    }
+    for (name, content) in repo_skills {
+        by_name.insert(name.clone(), skill_from_content(name, content, SkillSource::Repo));
+    }
+    Ok(by_name.into_values().collect())
+}
+
+/// Load a skill, preferring a per-repo store skill (`repo_content`) over the
+/// user/system dirs.
+pub fn load_skill_scoped(
+    system_dir: &Path,
+    user_dir: &Path,
+    repo_content: Option<&str>,
+    name: &str,
+) -> Result<Skill> {
+    if let Some(content) = repo_content {
+        return Ok(skill_from_content(name, content, SkillSource::Repo));
+    }
+    load_skill(system_dir, user_dir, name)
 }
 
 /// Load a specific skill by name, checking user dir first then system dir.
@@ -287,5 +344,49 @@ mod tests {
         assert!(system_skill_exists(&sys, "shadowme"));
         assert!(!system_skill_exists(&sys, "nope"));
         std::fs::remove_dir_all(&sys).ok();
+    }
+
+    #[test]
+    fn repo_skills_override_and_dont_leak() {
+        let sys = tmpdir();
+        let user = tmpdir();
+        create_skill(&sys, "shared", "shared: system version\nsys body", false).unwrap();
+        create_skill(&user, "uonly", "uonly: user only\nbody", false).unwrap();
+
+        // repo store provides "shared" (override) and "ronly" (repo-only)
+        let repo_skills = vec![
+            ("shared".to_string(), "shared: repo version\nrepo body".to_string()),
+            ("ronly".to_string(), "ronly: repo only\nbody".to_string()),
+        ];
+        let merged = list_all_skills_scoped(&sys, &user, &repo_skills).unwrap();
+
+        let shared = merged.iter().find(|s| s.name == "shared").unwrap();
+        assert_eq!(shared.source, SkillSource::Repo, "repo overrides system");
+        assert_eq!(shared.description, "shared: repo version");
+        assert!(merged.iter().any(|s| s.name == "ronly" && s.source == SkillSource::Repo));
+        assert!(merged.iter().any(|s| s.name == "uonly" && s.source == SkillSource::User));
+
+        // without repo skills, the override and repo-only skill are gone (no leak)
+        let plain = list_all_skills_scoped(&sys, &user, &[]).unwrap();
+        assert_eq!(plain.iter().find(|s| s.name == "shared").unwrap().source, SkillSource::System);
+        assert!(!plain.iter().any(|s| s.name == "ronly"));
+
+        std::fs::remove_dir_all(&sys).ok();
+        std::fs::remove_dir_all(&user).ok();
+    }
+
+    #[test]
+    fn load_skill_scoped_prefers_repo() {
+        let sys = tmpdir();
+        let user = tmpdir();
+        create_skill(&user, "x", "x: user\nbody", false).unwrap();
+        let s = load_skill_scoped(&sys, &user, Some("x: repo\nbody"), "x").unwrap();
+        assert_eq!(s.source, SkillSource::Repo);
+        assert_eq!(s.description, "x: repo");
+        // falls back to user/system when no repo content
+        let s2 = load_skill_scoped(&sys, &user, None, "x").unwrap();
+        assert_eq!(s2.source, SkillSource::User);
+        std::fs::remove_dir_all(&sys).ok();
+        std::fs::remove_dir_all(&user).ok();
     }
 }
