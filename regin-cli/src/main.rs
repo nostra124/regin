@@ -149,6 +149,24 @@ enum Commands {
         action: MemoryAction,
     },
 
+    /// Manage incidents (ITIL): unplanned interruptions or degradations.
+    Incident {
+        #[command(subcommand)]
+        action: IncidentAction,
+    },
+
+    /// Manage changes (ITIL): documented modifications to systems.
+    Change {
+        #[command(subcommand)]
+        action: ChangeAction,
+    },
+
+    /// Manage problems (ITIL): root causes behind recurring incidents.
+    Problem {
+        #[command(subcommand)]
+        action: ProblemAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
 }
@@ -260,6 +278,89 @@ enum MemoryAction {
     },
 }
 
+#[derive(Subcommand)]
+enum IncidentAction {
+    /// Open a new incident.
+    Open {
+        /// Short title
+        title: String,
+        /// Severity (e.g. low, medium, high, critical)
+        #[arg(long, default_value = "medium")]
+        severity: String,
+        /// Longer description
+        #[arg(long, default_value = "")]
+        desc: String,
+    },
+    /// List incidents, optionally filtered by status.
+    List {
+        /// Filter: open, investigating, resolved, closed
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one incident by id.
+    Show { id: String },
+    /// Update an incident's status (e.g. investigating).
+    Update {
+        id: String,
+        #[arg(long)]
+        status: String,
+    },
+    /// Resolve an incident with a resolution note.
+    Resolve { id: String, resolution: String },
+    /// Close an incident.
+    Close { id: String },
+}
+
+#[derive(Subcommand)]
+enum ChangeAction {
+    /// Record a planned change.
+    Record {
+        /// Short title
+        title: String,
+        #[arg(long, default_value = "")]
+        desc: String,
+        /// The incident this change remediates
+        #[arg(long)]
+        incident: Option<String>,
+        #[arg(long)]
+        before: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+    },
+    /// List all changes.
+    List,
+    /// Show one change by id.
+    Show { id: String },
+    /// Mark a change applied.
+    Apply { id: String },
+    /// Close a change.
+    Close { id: String },
+}
+
+#[derive(Subcommand)]
+enum ProblemAction {
+    /// Open a new problem.
+    Open {
+        title: String,
+        #[arg(long, default_value = "")]
+        desc: String,
+    },
+    /// List problems, optionally filtered by status.
+    List {
+        /// Filter: open, known_error, closed
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one problem by id.
+    Show { id: String },
+    /// Link an incident to a problem.
+    Link { problem_id: String, incident_id: String },
+    /// Promote a problem to a known error with a root cause.
+    KnownError { id: String, root_cause: String },
+    /// Close a problem.
+    Close { id: String },
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -296,6 +397,33 @@ async fn main() -> Result<()> {
             MemoryAction::Save { category, content } => cmd_memory_save(&category, &content).await,
             MemoryAction::Update { id, content } => cmd_memory_update(&id, &content).await,
             MemoryAction::Delete { id } => cmd_memory_delete(&id).await,
+        },
+        Commands::Incident { action } => match action {
+            IncidentAction::Open { title, severity, desc } => {
+                cmd_ok(Request::IncidentOpen { title, description: desc, severity }).await
+            }
+            IncidentAction::List { status } => cmd_incidents(Request::IncidentList { status }).await,
+            IncidentAction::Show { id } => cmd_incidents(Request::IncidentShow { id }).await,
+            IncidentAction::Update { id, status } => cmd_ok(Request::IncidentUpdate { id, status }).await,
+            IncidentAction::Resolve { id, resolution } => cmd_ok(Request::IncidentResolve { id, resolution }).await,
+            IncidentAction::Close { id } => cmd_ok(Request::IncidentClose { id }).await,
+        },
+        Commands::Change { action } => match action {
+            ChangeAction::Record { title, desc, incident, before, after } => {
+                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, before, after }).await
+            }
+            ChangeAction::List => cmd_changes(Request::ChangeList).await,
+            ChangeAction::Show { id } => cmd_changes(Request::ChangeShow { id }).await,
+            ChangeAction::Apply { id } => cmd_ok(Request::ChangeApply { id }).await,
+            ChangeAction::Close { id } => cmd_ok(Request::ChangeClose { id }).await,
+        },
+        Commands::Problem { action } => match action {
+            ProblemAction::Open { title, desc } => cmd_ok(Request::ProblemOpen { title, description: desc }).await,
+            ProblemAction::List { status } => cmd_problems(Request::ProblemList { status }).await,
+            ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
+            ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
+            ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
         },
         Commands::Ping => cmd_ping().await,
     }
@@ -821,6 +949,102 @@ async fn cmd_memory_delete(id: &str) -> Result<()> {
 async fn cmd_ping() -> Result<()> {
     match rpc(&Request::Ping).await? {
         Response::Pong => println_color("regind is running ✓", Color::Green),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+// --- ITIL command helpers ---
+
+fn sid(id: &str) -> &str {
+    &id[..id.len().min(8)]
+}
+
+/// Run a request that returns a simple Ok/Error acknowledgement.
+async fn cmd_ok(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_incidents(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Incidents { incidents } => {
+            if incidents.is_empty() {
+                println!("No incidents.");
+                return Ok(());
+            }
+            for i in &incidents {
+                print_color(&format!("  {}", sid(&i.id)), Color::DarkGrey);
+                print_color(&format!("  [{:<13}] ", i.status), Color::Cyan);
+                print_color(&format!("{:<8} ", i.severity), Color::Yellow);
+                println!("{}", i.title);
+                if !i.description.is_empty() {
+                    println!("            {}", i.description);
+                }
+                if let Some(p) = &i.problem_id {
+                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
+                }
+                if let Some(r) = &i.resolution {
+                    println_color(&format!("            resolution: {r}"), Color::Green);
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_changes(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Changes { changes } => {
+            if changes.is_empty() {
+                println!("No changes.");
+                return Ok(());
+            }
+            for c in &changes {
+                print_color(&format!("  {}", sid(&c.id)), Color::DarkGrey);
+                print_color(&format!("  [{:<8}] ", c.status), Color::Cyan);
+                println!("{}", c.title);
+                if let Some(inc) = &c.incident_id {
+                    println_color(&format!("            incident: {}", sid(inc)), Color::DarkGrey);
+                }
+                if c.before.is_some() || c.after.is_some() {
+                    println!(
+                        "            {} -> {}",
+                        c.before.as_deref().unwrap_or("?"),
+                        c.after.as_deref().unwrap_or("?")
+                    );
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_problems(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Problems { problems } => {
+            if problems.is_empty() {
+                println!("No problems.");
+                return Ok(());
+            }
+            for p in &problems {
+                print_color(&format!("  {}", sid(&p.id)), Color::DarkGrey);
+                print_color(&format!("  [{:<11}] ", p.status), Color::Cyan);
+                println!("{}", p.title);
+                if let Some(rc) = &p.root_cause {
+                    println_color(&format!("            root cause: {rc}"), Color::Yellow);
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())

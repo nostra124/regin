@@ -322,6 +322,91 @@ async fn dispatch(
             { let db = state.db.lock().expect("DB poisoned"); db::memory_delete(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Memory {id} deleted") }).await?;
         }
+
+        // --- ITIL: Incidents ---
+        Request::IncidentOpen { title, description, severity } => {
+            let inc = { let db = state.db.lock().expect("DB poisoned");
+                db::incident_open(&db, &title, &description, &severity, "manual", None)? };
+            send(w, &Response::Ok { message: format!("Incident opened: {} [{}]", inc.id, inc.severity) }).await?;
+        }
+        Request::IncidentList { status } => {
+            let incidents = { let db = state.db.lock().expect("DB poisoned"); db::incident_list(&db, status.as_deref())? };
+            send(w, &Response::Incidents { incidents }).await?;
+        }
+        Request::IncidentShow { id } => {
+            let inc = { let db = state.db.lock().expect("DB poisoned"); db::incident_get(&db, &id)? };
+            match inc {
+                Some(i) => send(w, &Response::Incidents { incidents: vec![i] }).await?,
+                None => send(w, &Response::Error { message: format!("No incident {id}") }).await?,
+            }
+        }
+        Request::IncidentUpdate { id, status } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::incident_set_status(&db, &id, &status)?; }
+            send(w, &Response::Ok { message: format!("Incident {id} -> {status}") }).await?;
+        }
+        Request::IncidentResolve { id, resolution } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::incident_resolve(&db, &id, &resolution)?; }
+            send(w, &Response::Ok { message: format!("Incident {id} resolved") }).await?;
+        }
+        Request::IncidentClose { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::incident_close(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Incident {id} closed") }).await?;
+        }
+
+        // --- ITIL: Changes ---
+        Request::ChangeRecord { title, description, incident_id, before, after } => {
+            let c = { let db = state.db.lock().expect("DB poisoned");
+                db::change_record(&db, &title, &description, incident_id.as_deref(), before.as_deref(), after.as_deref())? };
+            send(w, &Response::Ok { message: format!("Change recorded: {}", c.id) }).await?;
+        }
+        Request::ChangeList => {
+            let changes = { let db = state.db.lock().expect("DB poisoned"); db::change_list(&db)? };
+            send(w, &Response::Changes { changes }).await?;
+        }
+        Request::ChangeShow { id } => {
+            let c = { let db = state.db.lock().expect("DB poisoned"); db::change_get(&db, &id)? };
+            match c {
+                Some(c) => send(w, &Response::Changes { changes: vec![c] }).await?,
+                None => send(w, &Response::Error { message: format!("No change {id}") }).await?,
+            }
+        }
+        Request::ChangeApply { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_apply(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Change {id} applied") }).await?;
+        }
+        Request::ChangeClose { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_close(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Change {id} closed") }).await?;
+        }
+
+        // --- ITIL: Problems ---
+        Request::ProblemOpen { title, description } => {
+            let p = { let db = state.db.lock().expect("DB poisoned"); db::problem_open(&db, &title, &description)? };
+            send(w, &Response::Ok { message: format!("Problem opened: {}", p.id) }).await?;
+        }
+        Request::ProblemList { status } => {
+            let problems = { let db = state.db.lock().expect("DB poisoned"); db::problem_list(&db, status.as_deref())? };
+            send(w, &Response::Problems { problems }).await?;
+        }
+        Request::ProblemShow { id } => {
+            let p = { let db = state.db.lock().expect("DB poisoned"); db::problem_get(&db, &id)? };
+            match p {
+                Some(p) => send(w, &Response::Problems { problems: vec![p] }).await?,
+                None => send(w, &Response::Error { message: format!("No problem {id}") }).await?,
+            }
+        }
+        Request::ProblemLink { problem_id, incident_id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::link_incident_to_problem(&db, &problem_id, &incident_id)?; }
+            send(w, &Response::Ok { message: format!("Linked incident {incident_id} to problem {problem_id}") }).await?;
+        }
+        Request::ProblemKnownError { id, root_cause } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::problem_set_known_error(&db, &id, &root_cause)?; }
+            send(w, &Response::Ok { message: format!("Problem {id} -> known_error") }).await?;
+        }
+        Request::ProblemClose { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::problem_close(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
+        }
     }
     Ok(())
 }
