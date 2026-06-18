@@ -20,5 +20,18 @@ local CLI workers (claude/opencode), and adopts a **role persona** with its
 ## Depends on
 - dvalin **MILESTONE-1.1.0** (bus) + **1.2.0** (skill deployment). Cross-repo.
 
+## Tickets (derived from DISC-004/005/007)
+
+| FEAT | Title | depends_on | Status |
+|------|-------|-----------|--------|
+| FEAT-010 | Bus client (identity, inbox/outbox, two modes) | — | open |
+| FEAT-011 | Role-persona config + capability(=tool) ceiling | — | open |
+| FEAT-012 | Local CLI-worker supervisor (claude/opencode) | — | open |
+| FEAT-013 | Foreman mode: intake → supervise → handover | 010, 012 | open |
+| FEAT-014 | Skill-package structure (base + role/area) | — | open |
+| FEAT-015 | Escalation bridge: problem → dvalin ticket | 010 | open |
+
+Order: 010/011/012/014 → 013 → 015.
+
 ## Out of scope
 - A `ROADMAP.md` (the roadmap is the collective `MILESTONE-*.md` files).

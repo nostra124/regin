@@ -173,8 +173,37 @@ enum Commands {
         action: ContextAction,
     },
 
+    /// Messaging bus: send · inbox (role@cave, via the cave inbox/outbox files).
+    Bus {
+        #[command(subcommand)]
+        action: BusAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum BusAction {
+    /// Send a message to a role@cave address (appends to the cave outbox).
+    Send {
+        /// Recipient address (role@cave or owner)
+        to: String,
+        /// Message body
+        body: String,
+        /// Send as a structured (typed JSON) message instead of free text
+        #[arg(long)]
+        structured: bool,
+        /// Optional reference id (e.g. a ticket/handover ref)
+        #[arg(long)]
+        ref_id: Option<String>,
+    },
+    /// Show inbox messages bound for this agent (advances the read cursor).
+    Inbox {
+        /// Peek without advancing the cursor
+        #[arg(long)]
+        peek: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -477,8 +506,39 @@ async fn main() -> Result<()> {
                 cmd_ok(Request::ContextSet { cwd: Some(cwd_string()), content }).await
             }
         },
+        Commands::Bus { action } => match action {
+            BusAction::Send { to, body, structured, ref_id } => cmd_bus_send(&to, &body, structured, ref_id.as_deref()),
+            BusAction::Inbox { peek } => cmd_bus_inbox(peek),
+        },
         Commands::Ping => cmd_ping().await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bus (FEAT-010): file-based cave inbox/outbox — no daemon round-trip needed.
+
+fn cmd_bus_send(to: &str, body: &str, structured: bool, ref_id: Option<&str>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED, KIND_UNSTRUCTURED};
+    let client = BusClient::from_env()?;
+    let kind = if structured { KIND_STRUCTURED } else { KIND_UNSTRUCTURED };
+    client.send(to, kind, body, ref_id)?;
+    println!("regin: sent {} -> {to}", client.address());
+    Ok(())
+}
+
+fn cmd_bus_inbox(peek: bool) -> Result<()> {
+    use regin_core::bus::BusClient;
+    let client = BusClient::from_env()?;
+    let msgs = client.inbox(!peek)?;
+    if msgs.is_empty() {
+        println!("regin: inbox empty ({})", client.address());
+        return Ok(());
+    }
+    for m in &msgs {
+        let r = m.ref_id.as_deref().map(|r| format!(" [{r}]")).unwrap_or_default();
+        println!("{} → {} ({}){}: {}", m.sender, m.recipient, m.kind, r, m.body);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
