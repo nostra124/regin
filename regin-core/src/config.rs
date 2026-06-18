@@ -8,11 +8,13 @@ pub const SYSTEM_SKILLS_DIR: &str = "/usr/share/regin/skills";
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("nanogpt.api_key", "", "NanoGPT API key"),
-    ("nanogpt.model", "claude-sonnet-4-20250514", "LLM model"),
+    ("nanogpt.model", "auto", "LLM model (auto routes via the subscription)"),
     ("nanogpt.base_url", "https://nano-gpt.com/api/v1", "NanoGPT API base URL"),
     ("daemon.enabled", "false", "Keep daemon running permanently via user systemd"),
     ("daemon.auto_register", "true", "On first use, auto-register the systemd user service (set false to only spawn transiently)"),
     ("memory.episodic_retention_days", "30", "Days to retain reflected episodic memories"),
+    ("memory.reflect_interval", "daily", "How often the daemon reflects episodes into semantic memory"),
+    ("memory.decay_days", "30", "Reflection memories unseen this long lose strength (then drop at 0)"),
     ("monitor.auto_incident", "false", "Auto-open incidents from failed scheduled runs"),
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),
     ("monitor.recurrence_threshold", "3", "Incidents of one skill before a problem is opened"),

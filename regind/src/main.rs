@@ -4,7 +4,7 @@ use regin_core::{
     config, context, db,
     llm::{LlmTurn, NanoGptClient},
     protocol::{Request, Response},
-    repo, skills,
+    reflect, repo, skills,
     tools,
     types::ChatMessage,
 };
@@ -67,6 +67,9 @@ async fn main() -> Result<()> {
 
     let sched_state = Arc::clone(&state);
     tokio::spawn(async move { schedule_checker(sched_state).await });
+
+    let refl_state = Arc::clone(&state);
+    tokio::spawn(async move { reflection_checker(refl_state).await });
 
     let cleanup = socket_path.clone();
     let result = tokio::select! {
@@ -336,6 +339,17 @@ async fn dispatch(
             send(w, &Response::Ok { message: format!("Memory {id} deleted") }).await?;
         }
 
+        // --- Hermes reflection (FEAT-006) ---
+        Request::MemoryReflect => {
+            let stats = run_reflection(state).await?;
+            send(w, &Response::ReflectStats {
+                episodes: stats.episodes as u32,
+                reinforced: stats.reinforced as u32,
+                created: stats.created as u32,
+                decayed: stats.decayed as u32,
+            }).await?;
+        }
+
         // --- ITIL: Incidents ---
         Request::IncidentOpen { title, description, severity } => {
             let inc = { let db = state.db.lock().expect("DB poisoned");
@@ -559,6 +573,61 @@ async fn schedule_checker(state: Arc<AppState>) {
                 let db = state.db.lock().expect("DB poisoned");
                 let _ = db::update_schedule_after_run(&db, &sched.skill, &last_run, &next);
             }
+        }
+    }
+}
+
+/// Run one Hermes reflection pass (FEAT-006). The DB lock is released around the
+/// network call so the daemon stays responsive.
+async fn run_reflection(state: &Arc<AppState>) -> Result<reflect::ReflectionStats> {
+    let client = state.llm_client()?;
+    let window = 100usize;
+    let (episodes, existing, decay_before) = {
+        let db = state.db.lock().expect("DB poisoned");
+        let decay_days = db::setting_get(&db, "memory.decay_days")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(30);
+        let decay_before = (chrono::Utc::now() - chrono::Duration::days(decay_days)).to_rfc3339();
+        let (e, ex) = reflect::gather(&db, window)?;
+        (e, ex, decay_before)
+    };
+    if episodes.is_empty() {
+        let db = state.db.lock().expect("DB poisoned");
+        let decayed = db::memory_decay(&db, &decay_before)?;
+        return Ok(reflect::ReflectionStats { decayed, ..Default::default() });
+    }
+    let prompt = reflect::reflection_prompt(&episodes, &existing);
+    let text = client.chat_completion(&[ChatMessage::user(prompt)]).await?;
+    let proposals = reflect::parse_proposals(&text)?;
+    let db = state.db.lock().expect("DB poisoned");
+    reflect::apply(&db, &episodes, &proposals, &decay_before)
+}
+
+/// Periodically reflect episodes into semantic memory, on memory.reflect_interval.
+/// Fails safe — errors are logged and never stop the loop.
+async fn reflection_checker(state: Arc<AppState>) {
+    loop {
+        let interval_str = {
+            let db = state.db.lock().expect("DB poisoned");
+            db::setting_get(&db, "memory.reflect_interval").unwrap_or_else(|_| "daily".into())
+        };
+        let dur = parse_interval(&interval_str)
+            .ok()
+            .and_then(|d| d.to_std().ok())
+            .unwrap_or_else(|| std::time::Duration::from_secs(86_400));
+        tokio::time::sleep(dur).await;
+
+        match run_reflection(&state).await {
+            Ok(s) if s.episodes > 0 || s.decayed > 0 => info!(
+                episodes = s.episodes,
+                reinforced = s.reinforced,
+                created = s.created,
+                decayed = s.decayed,
+                "reflection pass"
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("reflection: {e}"),
         }
     }
 }
