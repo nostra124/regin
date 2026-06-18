@@ -4,6 +4,20 @@ This file is the agent's scratch space: decisions, quirks, constraints, and
 open questions discovered while working. It is **never overwritten by the
 toolchain**. Read it at the start of every session; append to it at the end.
 
+## Standing rules (settled — do not relitigate)
+- **Roadmap = the collective milestone files. There is intentionally NO
+  `ROADMAP.md`.** The roadmap is the set of `MILESTONE-*.md` files under
+  `.repo/project/issues/`, read together. Do **not** propose, create, or ask
+  about a `ROADMAP.md`. (Same convention as dvalin.)
+- **`.repo/dvalin/` is the workflow-engine's per-repo area** (notes, decisions,
+  engine instructions) — named after the engine (dvalin), NOT after the repo.
+  Same in every repo dvalin manages. Never use `.repo/<reponame>/`.
+- **regin's own per-repo additions live OUTSIDE the repo.** Anything regin adds
+  for a repo — additional memories, special skills, context/instructions — is
+  stored in regin's XDG store (SQLite), **keyed by the repo's filesystem path**,
+  never committed into the repo. The repo only carries `.repo/dvalin/` +
+  `.repo/project/`. (See FEAT-008.)
+
 ## How to use this file
 - Append new findings under a dated heading; never silently rewrite history.
 - Record *why* a non-obvious decision was made, not just *what*.
@@ -16,7 +30,8 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - LLM access is via the NanoGPT API; the CLI holds no LLM logic.
 - Tools available to the agent loop: `bash`, `read_file`, `write_file`, `edit_file`, `web_search`.
 - Skills resolve user-over-system: `~/.config/regin/skills/` overrides `/usr/share/regin/skills/`.
-- Chat loads per-repo context from `.repo/regin/context.md` (cwd) plus saved memories.
+- Chat loads per-repo context + memories + skills from regin's XDG store, keyed
+  by repo path (FEAT-008). Legacy in-repo `.repo/regin/context.md` is being retired.
 
 ## Methodology
 - This repo follows the V-Model methodology in `.repo/project/skills/`. Start at

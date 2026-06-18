@@ -14,11 +14,11 @@ Three places for content — use the right one:
 
 | Location | Owner | What goes here |
 |---|---|---|
-| `.repo/regin/` | agents | Anything only the coding agent needs: session notes, decisions, quirks, deferred items, project-specific instructions. Never overwritten by the toolchain. |
+| `.repo/dvalin/` | agents | Anything only the coding agent needs: session notes, decisions, quirks, deferred items, project-specific instructions. The workflow engine (dvalin) owns this dir in every repo it manages. Never overwritten by the toolchain. |
 | `docs/` | project team | General documentation for humans and agents alike: architecture, ADRs, runbooks, onboarding. |
 | `issues/` | project team + agents | All tracked work: FEAT, BUG, DISC, AUDT tickets and milestones. |
 
-Start every session by reading `.repo/regin/notes.md` — it contains what
+Start every session by reading `.repo/dvalin/notes.md` — it contains what
 previous agents learned about this project.
 
 ---
@@ -41,7 +41,7 @@ Read in order before starting any work. Each entry states why it matters.
 | # | File | Why |
 |---|---|---|
 | 1 | [`.repo/project/profile.md`](.repo/project/profile.md) | What this project IS — scope, language, build system, dependencies. Everything else assumes this. |
-| 2 | [`.repo/regin/notes.md`](.repo/regin/notes.md) | What previous agents learned — decisions, quirks, constraints, open questions. Read before any code. |
+| 2 | [`.repo/dvalin/notes.md`](.repo/dvalin/notes.md) | What previous agents learned — decisions, quirks, constraints, open questions. Read before any code. |
 | 3 | [`.repo/project/skills/methodology/vmodel.md`](.repo/project/skills/methodology/vmodel.md) | The V-Model: phases, agent loop, one-ticket-one-session, semver routing. The core mental model. |
 | 3a | [`.repo/project/skills/methodology/discovery.md`](.repo/project/skills/methodology/discovery.md) | How new work enters the system: DISC tickets → FEAT tickets → milestone. Read before filing any ticket. |
 | 4 | [`.repo/project/skills/policy/testing.md`](.repo/project/skills/policy/testing.md) | Binding rules: test coverage matrix, auto-merge gates, CI hard-stops, never-poll-for-CI. |
@@ -62,11 +62,11 @@ Read in order before starting any work. Each entry states why it matters.
 
 Every session follows this structure — no exceptions:
 
-1. Read this file and `.repo/regin/notes.md`.
+1. Read this file and `.repo/dvalin/notes.md`.
 2. Identify the active ticket (the highest-priority open ticket in
    `.repo/project/issues/`, bugs before features at equal priority).
 3. Work **one ticket to done/** per session. Do not touch scope outside the ticket.
-4. Before ending the session, append any new findings to `.repo/regin/notes.md`.
+4. Before ending the session, append any new findings to `.repo/dvalin/notes.md`.
 5. Move the completed ticket to `done/`.
 
 If you discover new work during a session: file a ticket immediately, then

@@ -35,9 +35,10 @@ The agent loop is LLM-driven with tool calls executed locally: `bash`,
 - Configuration stored entirely in SQLite — **no config files**
 - Per-user systemd integration: `daemon.enabled=true` installs a lingering user service
 - Two skill layers: system (`/usr/share/regin/skills/`) and user (`~/.config/regin/skills/`); user overrides system by name
-- Per-repo agent context: chat loads `.repo/regin/context.md` from the working directory if present
+- Per-repo additions (context, memories, special skills): stored in regin's XDG store keyed by the repo's filesystem path — **not** committed into the repo (FEAT-008). The only in-repo footprint is dvalin's `.repo/dvalin/` + `.repo/project/`.
 
 ### Out of scope
+- A `ROADMAP.md` file — **the roadmap is the collective `MILESTONE-*.md` files** under `.repo/project/issues/` (settled; do not create a ROADMAP.md)
 - Replacing systemd / cron as a general scheduler (the scheduler exists only to drive tasks)
 - Running agents remotely or multi-host fleet orchestration
 - Bundling or hosting an LLM — regin is a client of the NanoGPT API
