@@ -182,6 +182,12 @@ enum Commands {
     /// Show the active role persona (REGIN_PERSONA) and its capability ceiling.
     Persona,
 
+    /// Chair a meeting: collect inbox reports → compile minutes → emit to dvalin.
+    Meeting {
+        #[command(subcommand)]
+        action: MeetingAction,
+    },
+
     /// Foreman mode: drain the inbox, run cave-tasks on local workers, hand over.
     Foreman {
         #[command(subcommand)]
@@ -207,6 +213,21 @@ enum SkillAction {
     },
     /// List installed skill packages.
     Packages,
+}
+
+#[derive(Subcommand)]
+enum MeetingAction {
+    /// Chair a meeting: compile minutes from inbox reports and emit them.
+    Chair {
+        /// Meeting name (e.g. board)
+        name: String,
+        /// An agenda item (repeatable; defaults to a standard agenda)
+        #[arg(long = "agenda")]
+        agenda: Vec<String>,
+        /// Address to send the minutes to (else REGIN_MEETING_RECORDER, else dvalin@hq)
+        #[arg(long)]
+        to: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -559,6 +580,9 @@ async fn main() -> Result<()> {
             BusAction::Inbox { peek } => cmd_bus_inbox(peek),
         },
         Commands::Persona => cmd_persona(),
+        Commands::Meeting { action } => match action {
+            MeetingAction::Chair { name, agenda, to } => cmd_meeting_chair(&name, agenda, to).await,
+        },
         Commands::Foreman { action } => match action {
             ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
         },
@@ -692,6 +716,32 @@ fn cmd_skill_packages() -> Result<()> {
             println!("{p}");
         }
     }
+    Ok(())
+}
+
+async fn cmd_meeting_chair(name: &str, agenda: Vec<String>, to: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::chair::{collect_reports, compile, minutes_message_body};
+
+    let client = BusClient::from_env()?;
+    let reports = collect_reports(&client.inbox(true)?);
+    // pull the chair's own open ITIL count (best-effort — discipline feed)
+    let open_itil = match rpc(&Request::IncidentList { status: Some("open".into()) }).await {
+        Ok(Response::Incidents { incidents }) => incidents.len(),
+        _ => 0,
+    };
+    let agenda = if agenda.is_empty() {
+        vec!["incidents & problems".to_string(), "delivery status".to_string(), "priorities".to_string()]
+    } else {
+        agenda
+    };
+    let minutes = compile(&agenda, &reports, open_itil);
+    let target = to
+        .or_else(|| std::env::var("REGIN_MEETING_RECORDER").ok())
+        .unwrap_or_else(|| "dvalin@hq".to_string());
+    client.send(&target, KIND_STRUCTURED, &minutes_message_body(name, &minutes), Some(name))?;
+    println!("regin: chaired {name} — {} report(s), {} decision(s), {} action(s) → {target}",
+        reports.len(), minutes.decisions.len(), minutes.action_items.len());
     Ok(())
 }
 

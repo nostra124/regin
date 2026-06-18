@@ -1,4 +1,5 @@
 pub mod bus;
+pub mod chair;
 pub mod config;
 pub mod context;
 pub mod escalation;
