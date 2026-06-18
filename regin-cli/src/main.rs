@@ -188,8 +188,25 @@ enum Commands {
         action: ForemanAction,
     },
 
+    /// Skill packages: install a regin-*-skills package · list installed.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Install a skill package directory (regin-*-skills) into the user skills store.
+    Install {
+        /// Path to the package directory (contains package.toml + skills/)
+        dir: std::path::PathBuf,
+    },
+    /// List installed skill packages.
+    Packages,
 }
 
 #[derive(Subcommand)]
@@ -533,6 +550,10 @@ async fn main() -> Result<()> {
         Commands::Foreman { action } => match action {
             ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
         },
+        Commands::Skill { action } => match action {
+            SkillAction::Install { dir } => cmd_skill_install(&dir),
+            SkillAction::Packages => cmd_skill_packages(),
+        },
         Commands::Ping => cmd_ping().await,
     }
 }
@@ -602,6 +623,31 @@ async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
         }
     }
     println!("regin foreman: handled {handled} cave-task(s)");
+    Ok(())
+}
+
+fn cmd_skill_install(dir: &std::path::Path) -> Result<()> {
+    use regin_core::skillpkg::Package;
+    let dest = regin_core::config::user_skills_dir()?;
+    let pkg = Package::load(dir)?;
+    let installed = pkg.install(&dest)?;
+    println!("regin: installed {} ({} skills) into {}", pkg.manifest.name, installed.len(), dest.display());
+    for s in installed {
+        println!("  + {s}");
+    }
+    Ok(())
+}
+
+fn cmd_skill_packages() -> Result<()> {
+    let dest = regin_core::config::user_skills_dir()?;
+    let pkgs = regin_core::skillpkg::installed_packages(&dest);
+    if pkgs.is_empty() {
+        println!("regin: no skill packages installed");
+    } else {
+        for p in pkgs {
+            println!("{p}");
+        }
+    }
     Ok(())
 }
 
