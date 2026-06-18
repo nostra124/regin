@@ -3,6 +3,7 @@ pub mod context;
 pub mod db;
 pub mod llm;
 pub mod protocol;
+pub mod repo;
 pub mod skills;
 pub mod tools;
 pub mod types;

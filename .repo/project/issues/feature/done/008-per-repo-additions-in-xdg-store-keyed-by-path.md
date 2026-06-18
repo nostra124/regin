@@ -5,8 +5,8 @@ priority: medium
 complexity: M
 estimate_tokens: 40k-80k
 estimate_time: 60-120min
-phase: open
-status: open
+phase: done
+status: done
 ---
 
 # Per-repo additions (context / memories / skills) in regin's XDG store, keyed by repo path
@@ -57,3 +57,8 @@ This retires the current in-repo `.repo/regin/context.md` mechanism.
    everywhere.
 5. Round-trip unit tests for repo-key resolution + per-repo memory/skill scoping;
    docs updated.
+
+## Delivered vs. split
+This ticket delivered per-repo **context** + **memories** + repo-key resolution +
+legacy `.repo/regin/context.md` import + the `regin context` CLI. Per-repo
+**skills** layering was split into **FEAT-009**.

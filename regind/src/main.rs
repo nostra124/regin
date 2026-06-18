@@ -4,7 +4,7 @@ use regin_core::{
     config, context, db,
     llm::{LlmTurn, NanoGptClient},
     protocol::{Request, Response},
-    skills,
+    repo, skills,
     tools,
     types::ChatMessage,
 };
@@ -34,10 +34,6 @@ impl AppState {
         Ok(NanoGptClient::new(base_url, api_key, model))
     }
 
-    fn load_memories(&self) -> Vec<regin_core::types::Memory> {
-        let db = self.db.lock().expect("DB poisoned");
-        db::memory_list(&db, None).unwrap_or_default()
-    }
 }
 
 #[tokio::main]
@@ -126,11 +122,28 @@ async fn send(w: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> Result<
     Ok(())
 }
 
-/// Build system context messages from context files + memories.
+/// Build system context messages from the per-repo context + scoped memories
+/// (FEAT-008). The repo is identified by its filesystem path; a legacy in-repo
+/// `.repo/regin/context.md` is imported into the store once.
 fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
-    let memories = state.load_memories();
+    let key = repo::repo_key(cwd);
+    let (memories, repo_ctx) = {
+        let db = state.db.lock().expect("DB poisoned");
+        if let Some(k) = &key {
+            // one-time legacy import
+            if db::repo_context_get(&db, k).ok().flatten().is_none() {
+                if let Some(legacy) = repo::read_legacy_context(cwd) {
+                    let _ = db::repo_context_set(&db, k, &legacy);
+                    info!(repo = %k, "imported legacy .repo/regin/context.md into the store");
+                }
+            }
+        }
+        let mems = db::memory_list_for_repo(&db, key.as_deref()).unwrap_or_default();
+        let rc = key.as_deref().and_then(|k| db::repo_context_get(&db, k).ok().flatten());
+        (mems, rc)
+    };
     let mut msgs = Vec::new();
-    if let Some(system) = context::build_system_prompt(cwd, &memories) {
+    if let Some(system) = context::build_system_prompt(repo_ctx.as_deref(), &memories) {
         msgs.push(serde_json::json!({ "role": "system", "content": system }));
     }
     msgs
@@ -406,6 +419,25 @@ async fn dispatch(
         Request::ProblemClose { id } => {
             { let db = state.db.lock().expect("DB poisoned"); db::problem_close(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
+        }
+
+        // --- Per-repo context (FEAT-008) ---
+        Request::ContextShow { cwd } => {
+            let key = repo::repo_key(cwd.as_deref());
+            let content = match &key {
+                Some(k) => { let db = state.db.lock().expect("DB poisoned"); db::repo_context_get(&db, k)? }
+                None => None,
+            };
+            send(w, &Response::Context { repo_key: key, content }).await?;
+        }
+        Request::ContextSet { cwd, content } => {
+            match repo::repo_key(cwd.as_deref()) {
+                Some(k) => {
+                    { let db = state.db.lock().expect("DB poisoned"); db::repo_context_set(&db, &k, &content)?; }
+                    send(w, &Response::Ok { message: format!("Repo context set for {k}") }).await?;
+                }
+                None => send(w, &Response::Error { message: "No working directory to key the repo".into() }).await?,
+            }
         }
     }
     Ok(())

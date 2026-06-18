@@ -72,6 +72,13 @@ pub enum Request {
     #[serde(rename = "memory_delete")]
     MemoryDelete { id: String },
 
+    // --- Per-repo context (FEAT-008) ---
+    #[serde(rename = "context_show")]
+    ContextShow { cwd: Option<String> },
+
+    #[serde(rename = "context_set")]
+    ContextSet { cwd: Option<String>, content: String },
+
     // --- ITIL: Incidents ---
     #[serde(rename = "incident_open")]
     IncidentOpen { title: String, description: String, severity: String },
@@ -192,6 +199,9 @@ pub enum Response {
 
     #[serde(rename = "problems")]
     Problems { problems: Vec<Problem> },
+
+    #[serde(rename = "context")]
+    Context { repo_key: Option<String>, content: Option<String> },
 }
 
 #[cfg(test)]

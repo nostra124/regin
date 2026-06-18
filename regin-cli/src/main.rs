@@ -167,8 +167,25 @@ enum Commands {
         action: ProblemAction,
     },
 
+    /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
+    Context {
+        #[command(subcommand)]
+        action: ContextAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum ContextAction {
+    /// Show the stored context for the current repo.
+    Show,
+    /// Set the stored context for the current repo.
+    Set {
+        /// Context text
+        content: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -424,6 +441,12 @@ async fn main() -> Result<()> {
             ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
             ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
+        },
+        Commands::Context { action } => match action {
+            ContextAction::Show => cmd_context_show().await,
+            ContextAction::Set { content } => {
+                cmd_ok(Request::ContextSet { cwd: Some(cwd_string()), content }).await
+            }
         },
         Commands::Ping => cmd_ping().await,
     }
@@ -941,6 +964,24 @@ async fn cmd_memory_update(id: &str, content: &str) -> Result<()> {
 async fn cmd_memory_delete(id: &str) -> Result<()> {
     match rpc(&Request::MemoryDelete { id: id.into() }).await? {
         Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_context_show() -> Result<()> {
+    match rpc(&Request::ContextShow { cwd: Some(cwd_string()) }).await? {
+        Response::Context { repo_key, content } => {
+            match repo_key {
+                Some(k) => println_color(&format!("repo: {k}"), Color::DarkGrey),
+                None => println!("(no repo resolved for the current directory)"),
+            }
+            match content {
+                Some(c) => println!("{c}"),
+                None => println_color("  (no context stored — set one with: regin context set '<text>')", Color::DarkGrey),
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
