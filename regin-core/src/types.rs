@@ -143,3 +143,19 @@ pub struct Problem {
     pub updated_at: String,
     pub closed_at: Option<String>,
 }
+
+/// An episodic-memory entry — the short-term record of *what happened*,
+/// distilled into long-term (semantic) memories by reflection (FEAT-005/006).
+/// kind: task_run | incident | chat | change
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Episode {
+    pub id: String,
+    pub kind: String,
+    /// The related record's id (e.g. the task_run or incident id), if any.
+    pub ref_id: Option<String>,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub created_at: String,
+    /// Whether a reflection pass has already consumed this episode.
+    pub reflected: bool,
+}

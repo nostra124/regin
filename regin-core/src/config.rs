@@ -11,6 +11,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("nanogpt.model", "claude-sonnet-4-20250514", "LLM model"),
     ("nanogpt.base_url", "https://nano-gpt.com/api/v1", "NanoGPT API base URL"),
     ("daemon.enabled", "false", "Keep daemon running permanently via user systemd"),
+    ("memory.episodic_retention_days", "30", "Days to retain reflected episodic memories"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/

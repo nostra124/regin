@@ -3,7 +3,9 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use tracing::{debug, info};
 
-use crate::types::{Change, Conversation, Incident, Memory, Message, Problem, Schedule, TaskRun};
+use crate::types::{
+    Change, Conversation, Episode, Incident, Memory, Message, Problem, Schedule, TaskRun,
+};
 
 /// Initialize the SQLite database at the given path, creating tables if needed.
 pub fn init_db(path: &Path) -> Result<Connection> {
@@ -116,6 +118,16 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             problem_id TEXT NOT NULL,
             incident_id TEXT NOT NULL,
             PRIMARY KEY (problem_id, incident_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS episodes (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            ref_id TEXT,
+            summary TEXT NOT NULL,
+            detail TEXT,
+            created_at TEXT NOT NULL,
+            reflected INTEGER NOT NULL DEFAULT 0
         );",
     )
     .context("Failed to create database tables")?;
@@ -770,6 +782,79 @@ pub fn problem_incident_ids(conn: &Connection, problem_id: &str) -> Result<Vec<S
     Ok(rows)
 }
 
+// ---------------------------------------------------------------------------
+// Episodic memory (FEAT-005)
+// ---------------------------------------------------------------------------
+
+fn row_to_episode(row: &rusqlite::Row) -> rusqlite::Result<Episode> {
+    Ok(Episode {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        ref_id: row.get(2)?,
+        summary: row.get(3)?,
+        detail: row.get(4)?,
+        created_at: row.get(5)?,
+        reflected: row.get::<_, i64>(6)? != 0,
+    })
+}
+
+/// Record an episode (reflected = false).
+pub fn episode_record(
+    conn: &Connection,
+    kind: &str,
+    ref_id: Option<&str>,
+    summary: &str,
+    detail: Option<&str>,
+) -> Result<Episode> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO episodes (id, kind, ref_id, summary, detail, created_at, reflected)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![&id, kind, ref_id, summary, detail, &now],
+    )?;
+    debug!(id, kind, "Episode recorded");
+    Ok(Episode {
+        id,
+        kind: kind.to_string(),
+        ref_id: ref_id.map(str::to_string),
+        summary: summary.to_string(),
+        detail: detail.map(str::to_string),
+        created_at: now,
+        reflected: false,
+    })
+}
+
+/// The most recent *unreflected* episodes, newest first, bounded by `limit`.
+pub fn episode_recent(conn: &Connection, limit: usize) -> Result<Vec<Episode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, ref_id, summary, detail, created_at, reflected
+         FROM episodes WHERE reflected = 0 ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit as i64], row_to_episode)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Mark the given episodes reflected so the next reflection pass skips them.
+pub fn episode_mark_reflected(conn: &Connection, ids: &[String]) -> Result<()> {
+    for id in ids {
+        conn.execute("UPDATE episodes SET reflected = 1 WHERE id = ?1", params![id])?;
+    }
+    Ok(())
+}
+
+/// Prune *reflected* episodes created before `before` (RFC3339). Unreflected
+/// episodes are never removed. Returns the number deleted.
+pub fn episode_prune(conn: &Connection, before: &str) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM episodes WHERE reflected = 1 AND created_at < ?1",
+        params![before],
+    )?;
+    Ok(n)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -873,5 +958,51 @@ mod tests {
     fn incident_get_missing_returns_none() {
         let conn = test_conn();
         assert!(incident_get(&conn, "nope").unwrap().is_none());
+    }
+
+    fn episode_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM episodes", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn episode_record_recent_and_reflect() {
+        let conn = test_conn();
+        let e1 = episode_record(&conn, "task_run", Some("run-1"), "ran disk-usage", None).unwrap();
+        let _e2 = episode_record(&conn, "incident", Some("inc-1"), "opened incident", None).unwrap();
+        let e3 = episode_record(&conn, "chat", None, "chatted", Some("detail")).unwrap();
+        assert!(!e1.reflected);
+
+        // newest first, all unreflected
+        let recent = episode_recent(&conn, 10).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent.first().unwrap().id, e3.id, "newest first");
+        assert_eq!(recent.last().unwrap().id, e1.id, "oldest last");
+
+        // limit is honoured
+        assert_eq!(episode_recent(&conn, 2).unwrap().len(), 2);
+
+        // reflected episodes drop out of `recent`
+        episode_mark_reflected(&conn, &[recent[1].id.clone()]).unwrap();
+        let after = episode_recent(&conn, 10).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|e| e.id != recent[1].id));
+    }
+
+    #[test]
+    fn episode_prune_removes_only_old_reflected() {
+        let conn = test_conn();
+        let a = episode_record(&conn, "task_run", None, "a", None).unwrap();
+        let _b = episode_record(&conn, "task_run", None, "b", None).unwrap();
+        // mark `a` reflected; leave `b` unreflected
+        episode_mark_reflected(&conn, &[a.id.clone()]).unwrap();
+
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let deleted = episode_prune(&conn, &future).unwrap();
+        assert_eq!(deleted, 1, "only the reflected episode is pruned");
+        assert_eq!(episode_count(&conn), 1, "the unreflected episode survives");
+
+        // pruning with an old cutoff deletes nothing further
+        let past = (chrono::Utc::now() - chrono::Duration::days(365)).to_rfc3339();
+        assert_eq!(episode_prune(&conn, &past).unwrap(), 0);
     }
 }
