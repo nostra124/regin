@@ -5,7 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use regin_core::{
-    config,
+    config, db,
     protocol::{Request, Response},
     types::ChatMessage,
 };
@@ -483,11 +483,31 @@ async fn ensure_daemon() -> Result<()> {
     if UnixStream::connect(&sock).await.is_ok() {
         return Ok(());
     }
+
+    // BUG-001: prefer registering the persistent systemd *user* service so regind
+    // survives logout/reboot, instead of a loose transient process. Honour an
+    // opt-out (daemon.auto_register = false) and fall back to a transient spawn
+    // when systemd-user is unavailable (e.g. minimal containers).
+    let auto_register = read_local_setting("daemon.auto_register")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
+    if auto_register && systemd_user_available() {
+        eprintln!("Registering regind as a user service...");
+        if install_regind_service().is_ok() {
+            let _ = set_local_setting("daemon.enabled", "true");
+            for _ in 0..50 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                if UnixStream::connect(&sock).await.is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+        // fall through to a transient spawn if the service did not come up
+    }
+
     eprintln!("Starting regind...");
-    let regind = std::env::current_exe()?
-        .parent()
-        .map(|p| p.join("regind"))
-        .unwrap_or_else(|| "regind".into());
+    let regind = regind_bin();
     if regind.exists() {
         let _ = Command::new(&regind).spawn();
     } else {
@@ -500,6 +520,59 @@ async fn ensure_daemon() -> Result<()> {
         }
     }
     Err(anyhow!("Failed to start regind. Run it manually or check logs."))
+}
+
+/// Path to the bundled `regind` binary next to this executable.
+fn regind_bin() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("regind")))
+        .unwrap_or_else(|| "regind".into())
+}
+
+/// Whether a systemd *user* manager is reachable (so we can install a service).
+fn systemd_user_available() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Read a setting directly from the SQLite store (used before the daemon is up).
+fn read_local_setting(key: &str) -> Option<String> {
+    let path = config::db_path().ok()?;
+    let conn = db::init_db(&path).ok()?;
+    db::setting_get(&conn, key).ok()
+}
+
+/// Write a setting directly to the SQLite store (used before the daemon is up).
+fn set_local_setting(key: &str, value: &str) -> Result<()> {
+    let path = config::db_path()?;
+    let conn = db::init_db(&path)?;
+    db::setting_set(&conn, key, value)?;
+    Ok(())
+}
+
+/// Install + enable the regind systemd user service with lingering, so it
+/// survives logout and starts at boot.
+fn install_regind_service() -> Result<()> {
+    let unit_dir = config::user_systemd_dir()?;
+    let unit_path = config::regind_service_path()?;
+    let regind = regind_bin();
+    let regind_str = if regind.exists() {
+        regind.to_string_lossy().to_string()
+    } else {
+        which_cmd("regind").unwrap_or_else(|| "/usr/bin/regind".into())
+    };
+    std::fs::create_dir_all(&unit_dir)?;
+    std::fs::write(&unit_path, config::regind_service_unit(&regind_str))?;
+    let _ = Command::new("loginctl").args(["enable-linger"]).status();
+    let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
+    let _ = Command::new("systemctl").args(["--user", "enable", "--now", "regind"]).status();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -893,25 +966,11 @@ async fn cmd_config_set(key: &str, value: &str) -> Result<()> {
 
 async fn handle_daemon_enabled(value: &str) -> Result<()> {
     let enable = matches!(value, "true" | "1" | "yes");
-    let unit_dir = config::user_systemd_dir()?;
     let unit_path = config::regind_service_path()?;
 
     if enable {
-        let regind = std::env::current_exe()?
-            .parent()
-            .map(|p| p.join("regind"))
-            .unwrap_or_else(|| "regind".into());
-        let regind_str = if regind.exists() {
-            regind.to_string_lossy().to_string()
-        } else {
-            which_cmd("regind").unwrap_or_else(|| "/usr/bin/regind".into())
-        };
-        std::fs::create_dir_all(&unit_dir)?;
-        std::fs::write(&unit_path, config::regind_service_unit(&regind_str))?;
+        install_regind_service()?;
         println_color(&format!("  Wrote {}", unit_path.display()), Color::DarkGrey);
-        let _ = Command::new("loginctl").args(["enable-linger"]).status();
-        let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
-        let _ = Command::new("systemctl").args(["--user", "enable", "--now", "regind"]).status();
         println_color("  ✓ regind enabled as user service (survives logout)", Color::Green);
     } else {
         let _ = Command::new("systemctl").args(["--user", "disable", "--now", "regind"]).status();

@@ -20,7 +20,7 @@ FEAT-007 are independent quick(er) wins.
 |----|-------|------------|--------|
 | DISC-001 | Regin as an ITIL operations agent | — | open |
 | DISC-002 | Hermes: self-improving, tiered memory | — | open |
-| BUG-001 | Chat auto-registers the systemd user service | — | open |
+| BUG-001 | Chat auto-registers the systemd user service | — | **done** |
 | FEAT-002 | ITIL data model in SQLite | — | **done** |
 | FEAT-003 | ITIL CLI verb families (incident/change/problem) | FEAT-002 | **done** |
 | FEAT-004 | Monitoring evaluation → auto incidents; recurrence → problems | FEAT-002 | **done** |
