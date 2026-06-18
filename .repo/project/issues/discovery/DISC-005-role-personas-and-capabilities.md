@@ -26,12 +26,15 @@ This DISC explores the regin side: what a **role persona** consists of, how it
 maps onto regin's existing primitives (settings in SQLite, skills, memory, tools),
 and how capability scoping is enforced so a role only wields its allowed tools.
 
-## Positioning: regin is a blue-collar delivery worker
+## Positioning: regin is a specialist (not "blue-collar")
 
-regin's character is **discipline + autonomy within a domain** — the
-**blue-collar** delivery worker (and cave foreman). It is deliberately *not* a
-maximal-capability generalist; its strength is doing a bounded job reliably,
-permanently, and to process. Two consequences:
+regin's character is the **specialist**: it holds a **specific, long-term role**
+in the organization and **specializes** in it, following a strict **ITIL** regime
+internally so its self-improvement stays disciplined and **aligned with the
+overall workflow**. This is independent of org rank — a regin can anchor an
+executive seat (CFO, CIO) just as well as a per-repo dev lead or cave foreman;
+the common thread is a **standing, disciplined, organization-internal** post, not
+a "collar". Two consequences:
 
 - **Self-extension via sudo.** regin has sudo in its cave, so a persona is *not*
   limited to a fixed tool list — regin can **build/install any tool its job
@@ -40,13 +43,15 @@ permanently, and to process. Two consequences:
   bootstraps whatever it requires. This squares with the earlier "no special
   restrictions unless via user authorization" decision — here the role profile
   *is* that authorization.
-- **Complement, not overlap, with raven (white-collar).** A parallel agent,
-  **raven**, is the **white-collar** worker runtime — a desktop companion with
-  much richer capabilities out of the box (e.g. Playwright **browser**
-  automation). White-collar / knowledge-work-heavy or browser/desktop-driven
-  roles target the **raven** runtime; disciplined domain delivery targets
-  **regin**. This DISC scopes the regin (blue-collar) personas; raven personas
-  are dvalin DISC-030's concern. The role→runtime split keeps regin focused.
+- **Complement, not overlap, with raven (the generalist).** A parallel agent,
+  **raven**, is the **generalist** runtime — a desktop companion with a richer
+  toolset (e.g. Playwright **browser** automation) but **fine-grained per-tool
+  authorizations**. raven suits **general, research-intensive, outward-facing**
+  work (interactions with the world *outside* the organization); regin suits
+  **specialized, disciplined, organization-internal** work. A regin persona may
+  **delegate** outward research to raven rather than absorbing it. This DISC
+  scopes the regin (specialist) personas; raven personas are dvalin DISC-030's
+  concern.
 
 ## To explore / decide
 
