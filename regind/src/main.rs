@@ -421,6 +421,29 @@ async fn dispatch(
             send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
         }
 
+        // --- Skill authoring (FEAT-007) ---
+        Request::TaskCreate { name, from_prompt, force } => {
+            let content = match &from_prompt {
+                Some(goal) => {
+                    let client = state.llm_client()?; // needs an API key
+                    let prompt = format!(
+                        "Write a regin skill file (skill.md) for an operational task named `{name}`.\n\
+                         Goal: {goal}\n\n\
+                         Output ONLY the file content, no code fences. The FIRST line must be a\n\
+                         concise one-line description (shown as the skill description). Then a blank\n\
+                         line, then clear step-by-step instructions for the agent, which has tools:\n\
+                         bash, file read/write/edit, and web search."
+                    );
+                    client.chat_completion(&[ChatMessage::user(prompt)]).await?
+                }
+                None => skills::skill_template(&name),
+            };
+            let user_dir = config::user_skills_dir()?;
+            let path = skills::create_skill(&user_dir, &name, &content, force)?;
+            let shadows = skills::system_skill_exists(&config::system_skills_dir(), &name);
+            send(w, &Response::SkillCreated { path: path.display().to_string(), shadows_system: shadows }).await?;
+        }
+
         // --- Per-repo context (FEAT-008) ---
         Request::ContextShow { cwd } => {
             let key = repo::repo_key(cwd.as_deref());

@@ -26,7 +26,7 @@ FEAT-007 are independent quick(er) wins.
 | FEAT-004 | Monitoring evaluation → auto incidents; recurrence → problems | FEAT-002 | **done** |
 | FEAT-005 | Episodic memory tier | — | **done** |
 | FEAT-006 | Reflective distillation (episodic → semantic) | FEAT-005 | open |
-| FEAT-007 | Skill (task) creation flow | — | open |
+| FEAT-007 | Skill (task) creation flow | — | **done** |
 | FEAT-008 | Per-repo additions (context/memories) in XDG store, keyed by repo path | — | **done** |
 | FEAT-009 | Per-repo skills layer in XDG store (split from FEAT-008) | FEAT-008 | open |
 | FEAT-001 | Operations methodology doc set (ITIL discipline) | — | open |

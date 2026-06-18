@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::db;
@@ -195,4 +195,97 @@ pub async fn run_skill(
 
     info!(skill = %skill.name, status = %task_run.status, "Skill run completed");
     Ok(task_run)
+}
+
+// ---------------------------------------------------------------------------
+// Skill authoring (FEAT-007)
+// ---------------------------------------------------------------------------
+
+/// A starter `skill.md`. The first line is the description shown in `task list`.
+pub fn skill_template(name: &str) -> String {
+    format!(
+        "{name}: one-line description of what this skill does\n\n\
+         You are running the `{name}` operational task. Replace this with the\n\
+         instructions the agent should follow. The first line above is the skill\n\
+         description shown in `regin task list`.\n"
+    )
+}
+
+/// Whether a system skill of this name exists (used to warn about shadowing).
+pub fn system_skill_exists(system_dir: &Path, name: &str) -> bool {
+    system_dir.join(name).join("skill.md").exists()
+}
+
+/// Write a user skill `<user_dir>/<name>/skill.md`. Refuses to overwrite an
+/// existing user skill unless `force`. Returns the path written.
+pub fn create_skill(user_dir: &Path, name: &str, content: &str, force: bool) -> Result<PathBuf> {
+    if name.trim().is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(anyhow!("Invalid skill name: {name:?}"));
+    }
+    let dir = user_dir.join(name);
+    let skill_md = dir.join("skill.md");
+    if skill_md.exists() && !force {
+        return Err(anyhow!(
+            "Skill '{name}' already exists at {} (use --force to overwrite)",
+            skill_md.display()
+        ));
+    }
+    fs::create_dir_all(&dir).with_context(|| format!("create dir {}", dir.display()))?;
+    fs::write(&skill_md, content).with_context(|| format!("write {}", skill_md.display()))?;
+    info!(skill = name, "Skill created");
+    Ok(skill_md)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("regin-skill-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn create_scaffold_then_it_loads() {
+        let user = tmpdir();
+        let path = create_skill(&user, "disk-trend", &skill_template("disk-trend"), false).unwrap();
+        assert!(path.exists());
+        // it is discoverable as a user skill, with a parsed description
+        let sys = tmpdir();
+        let listed = list_all_skills(&sys, &user).unwrap();
+        let s = listed.iter().find(|s| s.name == "disk-trend").expect("listed");
+        assert_eq!(s.source, SkillSource::User);
+        assert!(s.description.starts_with("disk-trend:"));
+        std::fs::remove_dir_all(&user).ok();
+        std::fs::remove_dir_all(&sys).ok();
+    }
+
+    #[test]
+    fn overwrite_is_guarded_unless_forced() {
+        let user = tmpdir();
+        create_skill(&user, "x", "first", false).unwrap();
+        assert!(create_skill(&user, "x", "second", false).is_err(), "must refuse overwrite");
+        create_skill(&user, "x", "second", true).unwrap();
+        assert_eq!(std::fs::read_to_string(user.join("x").join("skill.md")).unwrap(), "second");
+        std::fs::remove_dir_all(&user).ok();
+    }
+
+    #[test]
+    fn invalid_names_rejected() {
+        let user = tmpdir();
+        assert!(create_skill(&user, "a/b", "c", false).is_err());
+        assert!(create_skill(&user, "..", "c", false).is_err());
+        assert!(create_skill(&user, "", "c", false).is_err());
+        std::fs::remove_dir_all(&user).ok();
+    }
+
+    #[test]
+    fn system_shadow_detected() {
+        let sys = tmpdir();
+        create_skill(&sys, "shadowme", "sys", false).unwrap();
+        assert!(system_skill_exists(&sys, "shadowme"));
+        assert!(!system_skill_exists(&sys, "nope"));
+        std::fs::remove_dir_all(&sys).ok();
+    }
 }
