@@ -51,6 +51,17 @@ client** on top of them.
   in-cave work (e.g. a failed worker step → incident; recurring → problem;
   escalate upward as a structured message).
 
+## Meeting-chair behaviour (dvalin DISC-031)
+
+A regin role can **chair or attend a standing meeting**: when dvalin convenes a
+meeting (a scheduled workflow), the regin chair runs the **standard agenda**,
+collects participants' reports off the bus, applies its discipline, and produces
+**minutes + decisions + action-items** posted back as structured messages. The
+agenda steps pull regin's own **ITIL records** (open incidents/problems/changes)
+and **self-improvement health** — so the governance layer is fed by the
+operational data regin already keeps. Scope here: how a regin persona runs an
+agenda and emits minutes/actions over the bus client.
+
 ## Spawned features (to derive on close)
 
 - `regind` messaging-bus client (send/inbox/subscribe via execd; identity, modes)
