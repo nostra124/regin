@@ -182,8 +182,24 @@ enum Commands {
     /// Show the active role persona (REGIN_PERSONA) and its capability ceiling.
     Persona,
 
+    /// Foreman mode: drain the inbox, run cave-tasks on local workers, hand over.
+    Foreman {
+        #[command(subcommand)]
+        action: ForemanAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum ForemanAction {
+    /// Drain the inbox once: handle each cave-task and post handovers.
+    RunOnce {
+        /// Plan only — show what would run without spawning workers.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -514,6 +530,9 @@ async fn main() -> Result<()> {
             BusAction::Inbox { peek } => cmd_bus_inbox(peek),
         },
         Commands::Persona => cmd_persona(),
+        Commands::Foreman { action } => match action {
+            ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
+        },
         Commands::Ping => cmd_ping().await,
     }
 }
@@ -542,6 +561,47 @@ fn cmd_bus_inbox(peek: bool) -> Result<()> {
         let r = m.ref_id.as_deref().map(|r| format!(" [{r}]")).unwrap_or_default();
         println!("{} → {} ({}){}: {}", m.sender, m.recipient, m.kind, r, m.body);
     }
+    Ok(())
+}
+
+async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::foreman::{handover_body, handover_recipient, plan_handover, CaveTask};
+    use regin_core::worker;
+
+    let client = BusClient::from_env()?;
+    // dry-run peeks (does not consume); a real run consumes the inbox.
+    let messages = client.inbox(!dry_run)?;
+    let mut handled = 0;
+    for m in &messages {
+        let Some(task) = CaveTask::from_message(m) else { continue };
+        handled += 1;
+        if dry_run {
+            println!("would run [{}] worker={} task={:?}", task.ref_id.as_deref().unwrap_or("-"), task.worker, task.task);
+            continue;
+        }
+        let kind = match task.worker_kind() {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("skipping cave-task: {e}");
+                continue;
+            }
+        };
+        // NEEDS-LIVE-VERIFICATION: spawns the claude/opencode worker in the cave.
+        let run = worker::run(kind, &task.task, task.cwd.as_deref());
+        let (handover, incident) = plan_handover(&task, &run);
+        let to = handover_recipient(&task, m);
+        client.send(&to, KIND_STRUCTURED, &handover_body(&handover)?, task.ref_id.as_deref())?;
+        println!("handover [{}] outcome={} -> {to}", handover.ref_id.as_deref().unwrap_or("-"), handover.outcome);
+        // discipline boundary: a broken in-cave step becomes an ITIL incident.
+        if let Some(draft) = incident {
+            match rpc(&Request::IncidentOpen { title: draft.title, description: draft.description, severity: draft.severity }).await {
+                Ok(_) => println!("  opened incident for the failed worker run"),
+                Err(e) => eprintln!("  (could not open incident — daemon down? {e})"),
+            }
+        }
+    }
+    println!("regin foreman: handled {handled} cave-task(s)");
     Ok(())
 }
 

@@ -1,6 +1,7 @@
 pub mod bus;
 pub mod config;
 pub mod context;
+pub mod foreman;
 pub mod db;
 pub mod llm;
 pub mod persona;
