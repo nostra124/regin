@@ -52,6 +52,22 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | FEAT-031 | Principle derivation & ratification | open |
 | FEAT-032 | Deliberation capture | open |
 
+### Test-coverage to 100% (DISC-020 — folded in; completes the 0.5.0 exit criterion)
+
+| ID | Title | Status |
+|----|-------|--------|
+| FEAT-070 | CLI transport seam + render/logic split | open |
+| FEAT-071 | Injectable LLM client (`LlmClient` trait) | open |
+| FEAT-072 | llm.rs pure extraction + mock-HTTP test | open |
+| FEAT-073 | Daemon loop extraction + full dispatch coverage | open |
+| FEAT-074 | Integration tests over the real binaries | open |
+| FEAT-075 | Easy-win unit tests + coverage gate ramp to 100% | open |
+
+The testability seams (FEAT-070/071) also make the identity-plane features above
+easier to test, so land them early. Target: absolute 100% line coverage, no
+exclusions — the binary glue is covered by FEAT-074 spawning the real instrumented
+binaries (cargo-llvm-cov captures child-process coverage).
+
 ## Notes
 
 - The decision-plane FEATs (028–032) depend on the memory-plane store (FEAT-021)
