@@ -30,6 +30,10 @@ pub const M_REMEDIATION_ESCALATED: &str = "remediation.escalated";
 pub const M_PROMOTION: &str = "promotion.count";
 /// A promoted check later found wrong and demoted (FEAT-051).
 pub const M_PROMOTION_ERROR: &str = "promotion.error";
+/// An applied change that verified successfully (FEAT-040).
+pub const M_CHANGE_SUCCESS: &str = "change.success";
+/// An applied change that had to be rolled back / caused a regression (FEAT-040).
+pub const M_CHANGE_FAILURE: &str = "change.failure";
 
 /// Append a KPI event.
 pub fn kpi_record(conn: &Connection, metric: &str, value: f64, meta: Option<&str>) -> Result<()> {
@@ -87,6 +91,9 @@ pub struct KpiSummary {
     pub promotions: i64,
     pub promotion_errors: i64,
     pub promotion_error_rate: f64,
+    pub change_successes: i64,
+    pub change_failures: i64,
+    pub change_success_rate: f64,
 }
 
 fn parse_ts(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -158,6 +165,10 @@ pub fn summary(conn: &Connection, since: &str) -> Result<KpiSummary> {
     let promotion_errors = kpi_count(conn, M_PROMOTION_ERROR, since)?;
     let promotion_error_rate = ratio(promotion_errors, promotions);
 
+    let change_successes = kpi_count(conn, M_CHANGE_SUCCESS, since)?;
+    let change_failures = kpi_count(conn, M_CHANGE_FAILURE, since)?;
+    let change_success_rate = ratio(change_successes, change_successes + change_failures);
+
     Ok(KpiSummary {
         since: since.to_string(),
         incidents_opened,
@@ -177,6 +188,9 @@ pub fn summary(conn: &Connection, since: &str) -> Result<KpiSummary> {
         promotions,
         promotion_errors,
         promotion_error_rate,
+        change_successes,
+        change_failures,
+        change_success_rate,
     })
 }
 

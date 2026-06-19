@@ -189,6 +189,9 @@ enum Commands {
     /// Show regin's effective operating mode: org (supervisor) vs standalone (FEAT-041).
     Mode,
 
+    /// Show the adaptive autonomy posture and the evidence behind it (FEAT-040).
+    Posture,
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -689,6 +692,7 @@ async fn main() -> Result<()> {
             FiltersAction::Test { domain, text } => cmd_ok(Request::FiltersTest { domain, text }).await,
         },
         Commands::Mode => cmd_mode().await,
+        Commands::Posture => cmd_posture().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1797,6 +1801,27 @@ async fn cmd_mode() -> Result<()> {
             println!("  bus configured: {configured}");
             println!("  last reachable: {}", last_ok.as_deref().unwrap_or("never"));
             println!("  consecutive failures: {failures}");
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_posture() -> Result<()> {
+    match rpc(&Request::PostureQuery).await? {
+        Response::PostureInfo { posture, allow_auto, change_successes, change_failures, change_success_rate, promotion_error_rate } => {
+            let color = if posture == "trusted" { Color::Green } else { Color::Yellow };
+            print!("autonomy posture: ");
+            println_color(&posture, color);
+            println!("  master switch (posture.allow_auto): {allow_auto}");
+            println!("  change outcomes: {change_successes} ok / {change_failures} failed ({:.0}% success)", change_success_rate * 100.0);
+            println!("  promotion error rate: {:.0}%", promotion_error_rate * 100.0);
+            if posture == "conservative" {
+                println_color("  safe fixes still route to approval until trust is earned", Color::DarkGrey);
+            } else {
+                println_color("  safe, reversible fixes may auto-apply", Color::DarkGrey);
+            }
         }
         Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),

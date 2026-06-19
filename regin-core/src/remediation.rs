@@ -110,12 +110,15 @@ impl RiskJudge for ConservativeJudge {
 }
 
 /// Route a candidate fix to a lane (FEAT-037). Out-of-control escalates; a Safe,
-/// reversible fix the ceiling permits auto-applies; everything else needs
-/// approval (the conservative default — FEAT-040 graduates the safe set).
-pub fn route(fix: &CandidateFix, ceiling_allows: bool) -> Lane {
+/// reversible fix auto-applies when `auto_permitted`; everything else needs
+/// approval. `auto_permitted` is the AND of the auto-apply gates the caller
+/// composes: the capability ceiling (FEAT-038) and the adaptive posture
+/// (FEAT-040). A conservative posture makes this false, so safe fixes still route
+/// to approval until trust is earned.
+pub fn route(fix: &CandidateFix, auto_permitted: bool) -> Lane {
     match fix.risk {
         RiskClass::OutOfControl => Lane::Escalate,
-        RiskClass::Safe if fix.reversible && ceiling_allows => Lane::AutoApply,
+        RiskClass::Safe if fix.reversible && auto_permitted => Lane::AutoApply,
         _ => Lane::PendingApproval,
     }
 }
@@ -136,16 +139,17 @@ pub struct RemediationOutcome {
 /// - **pending_approval**: a change staged for approval (counted on approval);
 /// - **escalate**: a problem linked to the incident (+ `remediation.escalated`).
 ///
-/// `ceiling_allows` is whether the capability ceiling (FEAT-038) permits the fix.
-/// `backout` is the safe-lane gate's captured rollback plan, if any.
+/// `auto_permitted` is the AND of the auto-apply gates (capability ceiling
+/// FEAT-038 and adaptive posture FEAT-040) the caller composes. `backout` is the
+/// safe-lane gate's captured rollback plan, if any.
 pub fn record_and_route(
     conn: &Connection,
     incident_id: &str,
     fix: &CandidateFix,
-    ceiling_allows: bool,
+    auto_permitted: bool,
     backout: Option<&str>,
 ) -> Result<RemediationOutcome> {
-    let lane = route(fix, ceiling_allows);
+    let lane = route(fix, auto_permitted);
     let outcome = match lane {
         Lane::AutoApply => {
             let change = db::change_record(

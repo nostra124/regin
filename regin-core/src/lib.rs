@@ -14,6 +14,7 @@ pub mod llm;
 pub mod mode;
 pub mod persona;
 pub mod planning;
+pub mod posture;
 pub mod protocol;
 pub mod reflect;
 pub mod remediation;

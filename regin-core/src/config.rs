@@ -27,6 +27,10 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("kpi.reliability_floor", "0.95", "Minimum incident-resolution rate the CSI objective must hold (cost is minimized subject to this)"),
     ("bus.last_ok", "", "Last successful supervisor-bus interaction (RFC3339); drives effective-mode detection"),
     ("bus.failures", "0", "Consecutive supervisor-bus failures since the last success (effective-mode debounce)"),
+    ("posture.allow_auto", "true", "Master switch bounding how much may auto-apply; false forces conservative (FEAT-040)"),
+    ("posture.min_samples", "10", "Minimum change outcomes before auto-apply can graduate (FEAT-040)"),
+    ("posture.min_success_rate", "0.9", "Change-success rate required to graduate auto-apply (FEAT-040)"),
+    ("posture.max_promotion_error_rate", "0.1", "Promotion-error rate above which posture demotes to conservative (FEAT-040)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/

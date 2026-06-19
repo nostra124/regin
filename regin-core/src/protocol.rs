@@ -193,6 +193,11 @@ pub enum Request {
     /// Report regin's effective operating mode (org vs standalone).
     #[serde(rename = "mode")]
     ModeQuery,
+
+    // --- Adaptive posture (FEAT-040) ---
+    /// Report the current autonomy posture and the evidence behind it.
+    #[serde(rename = "posture")]
+    PostureQuery,
 }
 
 /// Response from daemon to CLI.
@@ -287,6 +292,16 @@ pub enum Response {
 
     #[serde(rename = "mode")]
     ModeInfo { mode: String, configured: bool, last_ok: Option<String>, failures: u32 },
+
+    #[serde(rename = "posture")]
+    PostureInfo {
+        posture: String,
+        allow_auto: bool,
+        change_successes: i64,
+        change_failures: i64,
+        change_success_rate: f64,
+        promotion_error_rate: f64,
+    },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

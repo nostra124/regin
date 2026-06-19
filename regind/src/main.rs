@@ -4,6 +4,7 @@ use regin_core::{
     bus, config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
     mode,
+    posture,
     protocol::{Request, Response},
     reflect, repo, schedule, skills,
     tools,
@@ -593,6 +594,31 @@ async fn dispatch(
             };
             let m = mode::effective_mode(configured, &reach, chrono::Utc::now(), mode::ModePolicy::default());
             send(w, &Response::ModeInfo { mode: m.to_string(), configured, last_ok, failures }).await?;
+        }
+
+        // --- Adaptive posture (FEAT-040) ---
+        Request::PostureQuery => {
+            let since = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let (summary, policy) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let g = |k: &str| db::setting_get(&db, k).unwrap_or_default();
+                let policy = posture::PosturePolicy {
+                    allow_auto: g("posture.allow_auto") == "true",
+                    min_samples: g("posture.min_samples").parse().unwrap_or(10),
+                    min_success_rate: g("posture.min_success_rate").parse().unwrap_or(0.9),
+                    max_promotion_error_rate: g("posture.max_promotion_error_rate").parse().unwrap_or(0.1),
+                };
+                (kpi::summary(&db, &since)?, policy)
+            };
+            let p = posture::compute(&summary, policy);
+            send(w, &Response::PostureInfo {
+                posture: p.to_string(),
+                allow_auto: policy.allow_auto,
+                change_successes: summary.change_successes,
+                change_failures: summary.change_failures,
+                change_success_rate: summary.change_success_rate,
+                promotion_error_rate: summary.promotion_error_rate,
+            }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
