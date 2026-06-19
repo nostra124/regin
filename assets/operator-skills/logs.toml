@@ -1,0 +1,14 @@
+domain = "logs"
+monitor_command = "echo logs.journal_mb=$(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[MG]' | head -1 | awk '/G/{gsub(/G/,\"\"); print $1*1024} /M/{gsub(/M/,\"\"); print $1}' | cut -d. -f1)"
+
+[[remediation]]
+tag = "rotate_logs"
+title = "vacuum the journal"
+description = "Shrink the systemd journal to a bounded size."
+command = "journalctl --vacuum-size=500M"
+
+[[remediation]]
+tag = "truncate_logs"
+title = "truncate a runaway log"
+description = "Truncate an oversized log file in place."
+command = "truncate -s 0 \"$LOGFILE\""

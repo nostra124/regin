@@ -1,0 +1,26 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH desired 1  "desired " 
+.SH NAME
+desired \- Inspect the desired (to\-be) state per domain (FEAT\-033)
+.SH SYNOPSIS
+\fBdesired\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Inspect the desired (to\-be) state per domain (FEAT\-033)
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+desired\-list(1)
+List loaded desired\-state domains (system + user), flagging conflicts
+.TP
+desired\-show(1)
+Show one domain\*(Aqs intent + assertions
+.TP
+desired\-check(1)
+Re\-check targets, opening a problem for any contradictory domain
+.TP
+desired\-help(1)
+Print this message or the help of the given subcommand(s)

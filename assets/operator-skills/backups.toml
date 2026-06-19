@@ -1,0 +1,8 @@
+domain = "backups"
+monitor_command = "f=$(ls -t /var/backups/*.tar* 2>/dev/null | head -1); if [ -n \"$f\" ]; then echo backups.age_hours=$(( ( $(date +%s) - $(stat -c %Y \"$f\") ) / 3600 )); else echo backups.age_hours=9999; fi"
+
+[[remediation]]
+tag = "run_backup"
+title = "trigger a backup run"
+description = "Run the configured backup job now."
+command = "systemctl start backup.service"

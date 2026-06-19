@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build · test · clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: build
+        run: cargo build --workspace --locked
+      - name: test
+        run: cargo test --workspace --locked
+      - name: clippy
+        run: cargo clippy --workspace --all-targets
+
+  coverage:
+    name: coverage gate (FEAT-058)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: coverage gate
+        run: make coverage
+        env:
+          COVERAGE_MIN: "55"
+
+  pit:
+    name: per-format install PITs (FEAT-054)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: install podman, bats, musl tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman bats musl-tools
+      - name: install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: build packages (deb/rpm/apk)
+        run: packaging/build.sh
+      - name: run install PITs in podman
+        run: bats tests/pit/

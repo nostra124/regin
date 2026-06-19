@@ -1,7 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+use crate::desired::{DesiredInfo, DesiredState};
+use crate::filters::FilterRule;
+use crate::audit::Finding;
+use crate::greeting::Greeting;
+use crate::promotion::DerivedCheck;
+use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
-    Change, ChatMessage, Conversation, Incident, Memory, Problem, Schedule, SkillInfo, TaskRun,
+    Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
+    SkillInfo, TaskRun,
 };
 
 /// Request from CLI to daemon.
@@ -109,6 +116,9 @@ pub enum Request {
     IncidentResolve { id: String, resolution: String },
     #[serde(rename = "incident_close")]
     IncidentClose { id: String },
+    /// Block an incident on a workaround while its problem awaits a fix (FEAT-035).
+    #[serde(rename = "incident_block")]
+    IncidentBlock { id: String, workaround: String },
 
     // --- ITIL: Changes ---
     #[serde(rename = "change_record")]
@@ -116,6 +126,7 @@ pub enum Request {
         title: String,
         description: String,
         incident_id: Option<String>,
+        problem_id: Option<String>,
         before: Option<String>,
         after: Option<String>,
     },
@@ -123,6 +134,12 @@ pub enum Request {
     ChangeList,
     #[serde(rename = "change_show")]
     ChangeShow { id: String },
+    /// Move a change to pending_approval (FEAT-035).
+    #[serde(rename = "change_request_approval")]
+    ChangeRequestApproval { id: String },
+    /// Approve a pending change, recording the approver (FEAT-035).
+    #[serde(rename = "change_approve")]
+    ChangeApprove { id: String, approved_by: String },
     #[serde(rename = "change_apply")]
     ChangeApply { id: String },
     #[serde(rename = "change_close")]
@@ -141,6 +158,69 @@ pub enum Request {
     ProblemKnownError { id: String, root_cause: String },
     #[serde(rename = "problem_close")]
     ProblemClose { id: String },
+    /// Add a root-cause hypothesis to a problem (FEAT-035).
+    #[serde(rename = "problem_hypothesis_add")]
+    ProblemHypothesisAdd { problem_id: String, text: String },
+    /// List a problem's hypotheses (FEAT-035).
+    #[serde(rename = "problem_hypothesis_list")]
+    ProblemHypothesisList { problem_id: String },
+    /// Set a hypothesis's status: created|validating|confirmed|rejected (FEAT-035).
+    #[serde(rename = "problem_hypothesis_status")]
+    ProblemHypothesisStatus { id: String, status: String },
+
+    // --- Desired state (to-be) — FEAT-033 ---
+    /// List loaded desired-state domains (with conflict flags).
+    #[serde(rename = "desired_list")]
+    DesiredList,
+    /// Show one domain's desired state.
+    #[serde(rename = "desired_show")]
+    DesiredShow { domain: String },
+    /// Re-check all desired states, opening problems for contradictory targets.
+    #[serde(rename = "desired_check")]
+    DesiredCheck,
+
+    // --- CSI metrics (FEAT-050) ---
+    /// Compute the KPI snapshot + constrained objective over the last N days.
+    #[serde(rename = "metrics")]
+    Metrics { since_days: Option<u32> },
+
+    // --- Notice filters (FEAT-052) ---
+    /// List loaded notice-filter rules (system + user).
+    #[serde(rename = "filters_list")]
+    FiltersList,
+    /// Test whether an observation would be filtered.
+    #[serde(rename = "filters_test")]
+    FiltersTest { domain: String, text: String },
+
+    // --- Effective mode (FEAT-041) ---
+    /// Report regin's effective operating mode (org vs standalone).
+    #[serde(rename = "mode")]
+    ModeQuery,
+
+    // --- Adaptive posture (FEAT-040) ---
+    /// Report the current autonomy posture and the evidence behind it.
+    #[serde(rename = "posture")]
+    PostureQuery,
+
+    // --- Login greeting (FEAT-043) ---
+    /// The login greeting: health line + parked actionable items.
+    #[serde(rename = "greeting")]
+    GreetingQuery,
+
+    // --- Active push (FEAT-044) ---
+    /// Send a test notification over the configured push channel.
+    #[serde(rename = "push_test")]
+    PushTest,
+
+    // --- Promoted deterministic checks (FEAT-051) ---
+    /// List active derived (promoted) deterministic checks.
+    #[serde(rename = "checks_list")]
+    ChecksList,
+
+    // --- Self-audit (FEAT-055) ---
+    /// Run the periodic CSI self-audit now and file its findings.
+    #[serde(rename = "audit_run")]
+    AuditRun,
 }
 
 /// Response from daemon to CLI.
@@ -217,6 +297,44 @@ pub enum Response {
     #[serde(rename = "problems")]
     Problems { problems: Vec<Problem> },
 
+    #[serde(rename = "hypotheses")]
+    Hypotheses { hypotheses: Vec<ProblemHypothesis> },
+
+    // --- Desired state (FEAT-033) ---
+    #[serde(rename = "desired_list")]
+    DesiredListResp { items: Vec<DesiredInfo> },
+
+    #[serde(rename = "desired_detail")]
+    DesiredDetail { state: Box<DesiredState> },
+
+    #[serde(rename = "metrics")]
+    Metrics { summary: Box<KpiSummary>, objective: Objective },
+
+    #[serde(rename = "filters")]
+    Filters { rules: Vec<FilterRule> },
+
+    #[serde(rename = "mode")]
+    ModeInfo { mode: String, configured: bool, last_ok: Option<String>, failures: u32 },
+
+    #[serde(rename = "posture")]
+    PostureInfo {
+        posture: String,
+        allow_auto: bool,
+        change_successes: i64,
+        change_failures: i64,
+        change_success_rate: f64,
+        promotion_error_rate: f64,
+    },
+
+    #[serde(rename = "greeting")]
+    GreetingResp { greeting: Box<Greeting> },
+
+    #[serde(rename = "derived_checks")]
+    DerivedChecks { checks: Vec<DerivedCheck> },
+
+    #[serde(rename = "audit")]
+    AuditResult { findings: Vec<Finding>, trimmed: bool, opened: usize },
+
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },
 
@@ -250,9 +368,16 @@ mod tests {
             title: "c".into(),
             description: "".into(),
             incident_id: Some("i".into()),
+            problem_id: Some("p".into()),
             before: None,
             after: Some("up".into()),
         });
+        req_roundtrip(&Request::IncidentBlock { id: "i".into(), workaround: "wa".into() });
+        req_roundtrip(&Request::ChangeRequestApproval { id: "c".into() });
+        req_roundtrip(&Request::ChangeApprove { id: "c".into(), approved_by: "rene".into() });
+        req_roundtrip(&Request::ProblemHypothesisAdd { problem_id: "p".into(), text: "t".into() });
+        req_roundtrip(&Request::ProblemHypothesisList { problem_id: "p".into() });
+        req_roundtrip(&Request::ProblemHypothesisStatus { id: "h".into(), status: "confirmed".into() });
         req_roundtrip(&Request::ProblemLink { problem_id: "p".into(), incident_id: "i".into() });
         req_roundtrip(&Request::ProblemKnownError { id: "p".into(), root_cause: "rc".into() });
     }

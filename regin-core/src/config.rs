@@ -2,8 +2,17 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tracing::debug;
 
-/// System-wide skills directory (shipped with the .deb package).
+/// System-wide skills directory (shipped with the package).
 pub const SYSTEM_SKILLS_DIR: &str = "/usr/share/regin/skills";
+
+/// System-wide desired-state (to-be) directory, shipped with the package (FEAT-033).
+pub const SYSTEM_DESIRED_DIR: &str = "/usr/share/regin/desired";
+
+/// System-wide notice-filter directory, shipped with the package (FEAT-052).
+pub const SYSTEM_FILTERS_DIR: &str = "/usr/share/regin/filters";
+
+/// System-wide operator-skill directory, shipped with the package (FEAT-045/046).
+pub const SYSTEM_OPERATOR_SKILLS_DIR: &str = "/usr/share/regin/operator-skills";
 
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
@@ -18,6 +27,19 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("monitor.auto_incident", "false", "Auto-open incidents from failed scheduled runs"),
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),
     ("monitor.recurrence_threshold", "3", "Incidents of one skill before a problem is opened"),
+    ("kpi.reliability_floor", "0.95", "Minimum incident-resolution rate the CSI objective must hold (cost is minimized subject to this)"),
+    ("bus.last_ok", "", "Last successful supervisor-bus interaction (RFC3339); drives effective-mode detection"),
+    ("bus.failures", "0", "Consecutive supervisor-bus failures since the last success (effective-mode debounce)"),
+    ("posture.allow_auto", "true", "Master switch bounding how much may auto-apply; false forces conservative (FEAT-040)"),
+    ("posture.min_samples", "10", "Minimum change outcomes before auto-apply can graduate (FEAT-040)"),
+    ("posture.min_success_rate", "0.9", "Change-success rate required to graduate auto-apply (FEAT-040)"),
+    ("posture.max_promotion_error_rate", "0.1", "Promotion-error rate above which posture demotes to conservative (FEAT-040)"),
+    ("push.enabled", "false", "Opt-in active push for critical items (off by default, FEAT-044)"),
+    ("push.channel", "none", "Active-push channel: none|ntfy|webhook (FEAT-044)"),
+    ("push.target", "", "Active-push target URL (ntfy topic URL or webhook endpoint)"),
+    ("push.min_severity", "critical", "Minimum severity to actively push (FEAT-044)"),
+    ("push.min_interval_secs", "300", "Minimum seconds between active pushes (rate limit)"),
+    ("regind.heartbeat", "", "Last scheduler tick (RFC3339); a stale value signals a stalled loop (FEAT-048)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
@@ -56,6 +78,39 @@ pub fn user_skills_dir() -> Result<PathBuf> {
 /// Returns system skills dir: /usr/share/regin/skills/
 pub fn system_skills_dir() -> PathBuf {
     PathBuf::from(SYSTEM_SKILLS_DIR)
+}
+
+/// Returns user desired-state dir: ~/.config/regin/desired/ (FEAT-033)
+pub fn user_desired_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("desired"))
+}
+
+/// Returns system desired-state dir: /usr/share/regin/desired/ (FEAT-033)
+pub fn system_desired_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_DESIRED_DIR)
+}
+
+/// Returns user notice-filter dir: ~/.config/regin/filters/ (FEAT-052)
+pub fn user_filters_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("filters"))
+}
+
+/// Returns system notice-filter dir: /usr/share/regin/filters/ (FEAT-052)
+pub fn system_filters_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_FILTERS_DIR)
+}
+
+/// Returns user operator-skill dir: ~/.config/regin/operator-skills/ (FEAT-045)
+pub fn user_operator_skills_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("operator-skills"))
+}
+
+/// Returns system operator-skill dir: /usr/share/regin/operator-skills/ (FEAT-045)
+pub fn system_operator_skills_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_OPERATOR_SKILLS_DIR)
 }
 
 /// Returns the user systemd unit dir: ~/.config/systemd/user/

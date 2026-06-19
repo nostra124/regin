@@ -1,0 +1,55 @@
+# nfpm recipe (FEAT-053 / DISC-014): one config -> .deb + .rpm + .apk.
+# Build with packaging/build.sh, which stamps ${VERSION} from Cargo.toml,
+# (re)generates the man pages, and runs nfpm once per format. Supersedes the
+# deb-only FEAT-020 staging tree (pkg/).
+name: "regin"
+arch: "amd64"
+platform: "linux"
+version: "${VERSION}"
+section: "admin"
+priority: "optional"
+maintainer: "regin maintainers"
+description: |
+  LLM-backed autonomous operator for a Linux/UNIX machine.
+  Keeps the system at its declared to-be state with ITIL discipline
+  (incidents -> changes -> problems), monitoring, and guarded remediation.
+vendor: "regin"
+homepage: "https://github.com/nostra124/regin"
+license: "MIT"
+
+contents:
+  # binaries (musl static-pie: one build runs on glibc and musl/Alpine)
+  - src: ./target/x86_64-unknown-linux-musl/release/regin
+    dst: /usr/bin/regin
+  - src: ./target/x86_64-unknown-linux-musl/release/regind
+    dst: /usr/bin/regind
+
+  # man pages (generated from the clap surface, FEAT-019)
+  - src: ./man/regin.1
+    dst: /usr/share/man/man1/regin.1
+  - src: ./man/regind.1
+    dst: /usr/share/man/man1/regind.1
+  - src: ./man/regin-*.1
+    dst: /usr/share/man/man1/
+
+  # operator-skills package (FEAT-046) + to-be-state + notice filters
+  - src: ./assets/operator-skills/
+    dst: /usr/share/regin/operator-skills/
+  - src: ./assets/desired/
+    dst: /usr/share/regin/desired/
+  - src: ./assets/filters/
+    dst: /usr/share/regin/filters/
+
+  # installer (FEAT-056), shipped for reference
+  - src: ./assets/install.sh
+    dst: /usr/share/regin/install.sh
+    file_info:
+      mode: 0755
+
+overrides:
+  rpm:
+    depends: []
+  deb:
+    depends: []
+  apk:
+    depends: []

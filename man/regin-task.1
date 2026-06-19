@@ -1,0 +1,42 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH task 1  "task " 
+.SH NAME
+task \- Manage and execute operational tasks (skills)
+.SH SYNOPSIS
+\fBtask\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage and execute operational tasks (skills).
+.PP
+Tasks are markdown\-defined skills that the agent executes. System tasks ship in /usr/share/regin/skills/. User tasks go in ~/.config/regin/skills/. User tasks override system tasks with the same name.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH SUBCOMMANDS
+.TP
+task\-list(1)
+List all available tasks
+.TP
+task\-show(1)
+Show details of a task: its prompt and supporting files
+.TP
+task\-exec(1)
+Execute a task, optionally scheduling it for repeated execution
+.TP
+task\-unschedule(1)
+Remove a recurring schedule for a task
+.TP
+task\-schedules(1)
+List all active task schedules
+.TP
+task\-create(1)
+Create a new task (skill) in the user skills dir
+.TP
+task\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+SKILL FORMAT:
+  Each skill is a directory containing skill.md (the prompt) and
+  optional supporting files. The first line of skill.md is the
+  description shown in \*(Aqtask list\*(Aq.

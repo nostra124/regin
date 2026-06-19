@@ -1,0 +1,8 @@
+domain = "security-updates"
+monitor_command = "echo security-updates.pending=$(apt-get -s -o Debug::NoLocking=true upgrade 2>/dev/null | grep -c '^Inst.*security')"
+
+[[remediation]]
+title = "apply security updates"
+description = "Apply pending security updates (staged for approval; may need a service restart)."
+command = "apt-get update && apt-get -y install --only-upgrade $(apt-get -s upgrade | awk '/^Inst.*security/{print $2}')"
+risk = "uncertain"

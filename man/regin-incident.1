@@ -1,0 +1,38 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH incident 1  "incident " 
+.SH NAME
+incident \- Manage incidents (ITIL): unplanned interruptions or degradations
+.SH SYNOPSIS
+\fBincident\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage incidents (ITIL): unplanned interruptions or degradations
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+incident\-open(1)
+Open a new incident
+.TP
+incident\-list(1)
+List incidents, optionally filtered by status
+.TP
+incident\-show(1)
+Show one incident by id
+.TP
+incident\-update(1)
+Update an incident\*(Aqs status (e.g. investigating)
+.TP
+incident\-resolve(1)
+Resolve an incident with a resolution note
+.TP
+incident\-block(1)
+Block an incident on a workaround while its problem awaits a fix
+.TP
+incident\-close(1)
+Close an incident
+.TP
+incident\-help(1)
+Print this message or the help of the given subcommand(s)

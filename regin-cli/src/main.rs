@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use regin_core::{
     config, db,
@@ -67,8 +67,11 @@ enum Commands {
     /// Start an interactive chat session with the agent.
     ///
     /// The agent has access to tools: bash, file read/write/edit, and web
-    /// search. It loads context from ~/.config/regin/context.md and
-    /// .repo/regin/context.md (if present in cwd), plus all saved memories.
+    /// search. It loads per-repo context, skills, and memories from regin's
+    /// own store (SQLite under the XDG data dir), keyed by the current repo's
+    /// filesystem path — manage it with `regin context`. A global user context
+    /// (~/.config/regin/context.md), if present, applies everywhere; all saved
+    /// memories are injected too.
     ///
     /// In-session commands:
     ///   /new       Start a new conversation
@@ -166,6 +169,50 @@ enum Commands {
         #[command(subcommand)]
         action: ProblemAction,
     },
+
+    /// Inspect the desired (to-be) state per domain (FEAT-033).
+    Desired {
+        #[command(subcommand)]
+        action: DesiredAction,
+    },
+
+    /// Show CSI metrics: KPIs + the cost-vs-reliability objective (FEAT-050).
+    Metrics {
+        /// Window in days (default 30).
+        #[arg(long)]
+        days: Option<u32>,
+    },
+
+    /// Inspect notice filters that suppress known noise before the LLM (FEAT-052).
+    Filters {
+        #[command(subcommand)]
+        action: FiltersAction,
+    },
+
+    /// Show regin's effective operating mode: org (supervisor) vs standalone (FEAT-041).
+    Mode,
+
+    /// Show the adaptive autonomy posture and the evidence behind it (FEAT-040).
+    Posture,
+
+    /// Show the login greeting: health + parked items needing a decision (FEAT-043).
+    Greeting,
+
+    /// Active push for critical items (opt-in, off by default) (FEAT-044).
+    Push {
+        #[command(subcommand)]
+        action: PushAction,
+    },
+
+    /// List active derived (promoted) deterministic checks (FEAT-051).
+    Checks,
+
+    /// Run the periodic CSI self-audit now and file its findings (FEAT-055).
+    Audit,
+
+    /// Generate man pages from the CLI into a directory (FEAT-019; used by packaging).
+    #[command(hide = true)]
+    GenMan { dir: String },
 
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
@@ -478,6 +525,8 @@ enum IncidentAction {
     },
     /// Resolve an incident with a resolution note.
     Resolve { id: String, resolution: String },
+    /// Block an incident on a workaround while its problem awaits a fix.
+    Block { id: String, workaround: String },
     /// Close an incident.
     Close { id: String },
 }
@@ -493,6 +542,9 @@ enum ChangeAction {
         /// The incident this change remediates
         #[arg(long)]
         incident: Option<String>,
+        /// The problem this change resolves
+        #[arg(long)]
+        problem: Option<String>,
         #[arg(long)]
         before: Option<String>,
         #[arg(long)]
@@ -502,6 +554,15 @@ enum ChangeAction {
     List,
     /// Show one change by id.
     Show { id: String },
+    /// Move a change to pending_approval (awaiting a decision).
+    RequestApproval { id: String },
+    /// Approve a pending change, recording the approver.
+    Approve {
+        id: String,
+        /// Who approved it
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
     /// Mark a change applied.
     Apply { id: String },
     /// Close a change.
@@ -528,6 +589,12 @@ enum ProblemAction {
     Link { problem_id: String, incident_id: String },
     /// Promote a problem to a known error with a root cause.
     KnownError { id: String, root_cause: String },
+    /// Add a root-cause hypothesis to a problem.
+    HypothesisAdd { problem_id: String, text: String },
+    /// List a problem's hypotheses.
+    HypothesisList { problem_id: String },
+    /// Set a hypothesis's status: created|validating|confirmed|rejected.
+    HypothesisStatus { id: String, status: String },
     /// Escalate a problem to dvalin as a BUG/FEAT (structured bus message).
     Escalate {
         /// Problem id
@@ -541,6 +608,30 @@ enum ProblemAction {
     },
     /// Close a problem.
     Close { id: String },
+}
+
+#[derive(Subcommand)]
+enum PushAction {
+    /// Send a test notification over the configured channel.
+    Test,
+}
+
+#[derive(Subcommand)]
+enum FiltersAction {
+    /// List loaded notice-filter rules (system + user).
+    List,
+    /// Test whether an observation would be filtered before reaching the LLM.
+    Test { domain: String, text: String },
+}
+
+#[derive(Subcommand)]
+enum DesiredAction {
+    /// List loaded desired-state domains (system + user), flagging conflicts.
+    List,
+    /// Show one domain's intent + assertions.
+    Show { domain: String },
+    /// Re-check targets, opening a problem for any contradictory domain.
+    Check,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +650,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::GenMan { dir } => cmd_gen_man(&dir),
         Commands::Chat => cmd_chat().await,
         Commands::Task { action } => match action {
             TaskAction::List => cmd_task_list().await,
@@ -592,14 +684,17 @@ async fn main() -> Result<()> {
             IncidentAction::Show { id } => cmd_incidents(Request::IncidentShow { id }).await,
             IncidentAction::Update { id, status } => cmd_ok(Request::IncidentUpdate { id, status }).await,
             IncidentAction::Resolve { id, resolution } => cmd_ok(Request::IncidentResolve { id, resolution }).await,
+            IncidentAction::Block { id, workaround } => cmd_ok(Request::IncidentBlock { id, workaround }).await,
             IncidentAction::Close { id } => cmd_ok(Request::IncidentClose { id }).await,
         },
         Commands::Change { action } => match action {
-            ChangeAction::Record { title, desc, incident, before, after } => {
-                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, before, after }).await
+            ChangeAction::Record { title, desc, incident, problem, before, after } => {
+                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, problem_id: problem, before, after }).await
             }
             ChangeAction::List => cmd_changes(Request::ChangeList).await,
             ChangeAction::Show { id } => cmd_changes(Request::ChangeShow { id }).await,
+            ChangeAction::RequestApproval { id } => cmd_ok(Request::ChangeRequestApproval { id }).await,
+            ChangeAction::Approve { id, by } => cmd_ok(Request::ChangeApprove { id, approved_by: by }).await,
             ChangeAction::Apply { id } => cmd_ok(Request::ChangeApply { id }).await,
             ChangeAction::Close { id } => cmd_ok(Request::ChangeClose { id }).await,
         },
@@ -609,9 +704,30 @@ async fn main() -> Result<()> {
             ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
             ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
             ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::HypothesisAdd { problem_id, text } => cmd_ok(Request::ProblemHypothesisAdd { problem_id, text }).await,
+            ProblemAction::HypothesisList { problem_id } => cmd_hypotheses(Request::ProblemHypothesisList { problem_id }).await,
+            ProblemAction::HypothesisStatus { id, status } => cmd_ok(Request::ProblemHypothesisStatus { id, status }).await,
             ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
         },
+        Commands::Desired { action } => match action {
+            DesiredAction::List => cmd_desired_list().await,
+            DesiredAction::Show { domain } => cmd_desired_show(&domain).await,
+            DesiredAction::Check => cmd_ok(Request::DesiredCheck).await,
+        },
+        Commands::Metrics { days } => cmd_metrics(days).await,
+        Commands::Filters { action } => match action {
+            FiltersAction::List => cmd_filters_list().await,
+            FiltersAction::Test { domain, text } => cmd_ok(Request::FiltersTest { domain, text }).await,
+        },
+        Commands::Mode => cmd_mode().await,
+        Commands::Posture => cmd_posture().await,
+        Commands::Greeting => cmd_greeting().await,
+        Commands::Push { action } => match action {
+            PushAction::Test => cmd_ok(Request::PushTest).await,
+        },
+        Commands::Checks => cmd_checks().await,
+        Commands::Audit => cmd_audit().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1113,6 +1229,10 @@ async fn cmd_chat() -> Result<()> {
 
     println_color("regin — Linux server administration agent", Color::Yellow);
     println_color("Commands: /new  /history  /quit", Color::DarkGrey);
+    // FEAT-043: open with the login greeting (health + parked actionable items).
+    if let Ok(Response::GreetingResp { greeting }) = rpc(&Request::GreetingQuery).await {
+        render_greeting(&greeting);
+    }
     println!();
 
     let mut history: Vec<ChatMessage> = Vec::new();
@@ -1577,8 +1697,8 @@ async fn cmd_incidents(req: Request) -> Result<()> {
                 if !i.description.is_empty() {
                     println!("            {}", i.description);
                 }
-                if let Some(p) = &i.problem_id {
-                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
+                if let Some(w) = &i.workaround {
+                    println_color(&format!("            workaround: {w}"), Color::DarkGrey);
                 }
                 if let Some(r) = &i.resolution {
                     println_color(&format!("            resolution: {r}"), Color::Green);
@@ -1605,6 +1725,9 @@ async fn cmd_changes(req: Request) -> Result<()> {
                 if let Some(inc) = &c.incident_id {
                     println_color(&format!("            incident: {}", sid(inc)), Color::DarkGrey);
                 }
+                if let Some(p) = &c.problem_id {
+                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
+                }
                 if c.before.is_some() || c.after.is_some() {
                     println!(
                         "            {} -> {}",
@@ -1612,7 +1735,286 @@ async fn cmd_changes(req: Request) -> Result<()> {
                         c.after.as_deref().unwrap_or("?")
                     );
                 }
+                if let Some(by) = &c.approved_by {
+                    println_color(&format!("            approved by {by}"), Color::Green);
+                }
             }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_hypotheses(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Hypotheses { hypotheses } => {
+            if hypotheses.is_empty() {
+                println!("No hypotheses.");
+                return Ok(());
+            }
+            for h in &hypotheses {
+                print_color(&format!("  {}", sid(&h.id)), Color::DarkGrey);
+                print_color(&format!("  [{:<10}] ", h.status), Color::Cyan);
+                println!("{}", h.text);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_desired_list() -> Result<()> {
+    match rpc(&Request::DesiredList).await? {
+        Response::DesiredListResp { items } => {
+            if items.is_empty() {
+                println!("No desired-state domains. Add files under ~/.config/regin/desired/<domain>.md");
+                return Ok(());
+            }
+            for d in &items {
+                print_color(&format!("  {:<16}", d.domain), Color::Cyan);
+                print_color(&format!("[{}] ", d.source), Color::DarkGrey);
+                print!("{} assertion(s)", d.assertions);
+                if let Some(rt) = d.recurrence_threshold {
+                    print!(", recurrence>={rt}");
+                }
+                println!();
+                for c in &d.conflicts {
+                    println_color(&format!("        conflict: {c}"), Color::Red);
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_desired_show(domain: &str) -> Result<()> {
+    match rpc(&Request::DesiredShow { domain: domain.to_string() }).await? {
+        Response::DesiredDetail { state } => {
+            print_color(&format!("{} ", state.domain), Color::Cyan);
+            println_color(&format!("[{}] {}", state.source, state.path.display()), Color::DarkGrey);
+            if let Some(rt) = state.recurrence_threshold {
+                println_color(&format!("recurrence threshold: {rt}"), Color::DarkGrey);
+            }
+            if !state.intent.is_empty() {
+                println!("\n{}", state.intent);
+            }
+            if !state.assertions.is_empty() {
+                println_color("\nassertions:", Color::Yellow);
+                for a in &state.assertions {
+                    print!("  {a}");
+                    if let Some(d) = &a.description {
+                        print_color(&format!("  — {d}"), Color::DarkGrey);
+                    }
+                    println!();
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+fn fmt_secs(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+async fn cmd_mode() -> Result<()> {
+    match rpc(&Request::ModeQuery).await? {
+        Response::ModeInfo { mode, configured, last_ok, failures } => {
+            let color = if mode == "org" { Color::Green } else { Color::Yellow };
+            print!("effective mode: ");
+            println_color(&mode, color);
+            println!("  bus configured: {configured}");
+            println!("  last reachable: {}", last_ok.as_deref().unwrap_or("never"));
+            println!("  consecutive failures: {failures}");
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+fn render_greeting(g: &regin_core::greeting::Greeting) {
+    println_color(&g.health_line(), Color::DarkGrey);
+    if !g.has_actions() {
+        return;
+    }
+    if !g.pending_changes.is_empty() {
+        println_color("changes awaiting approval:", Color::Yellow);
+        for a in &g.pending_changes {
+            println!("  {}  {}", sid(&a.id), a.title);
+        }
+    }
+    if !g.decision_problems.is_empty() {
+        println_color("problems needing a decision:", Color::Yellow);
+        for a in &g.decision_problems {
+            println!("  {}  {}", sid(&a.id), a.title);
+        }
+    }
+}
+
+/// Generate man pages from the clap surface (FEAT-019) so they never drift from
+/// the actual commands. Writes `regin.1` plus a page per visible subcommand.
+fn cmd_gen_man(dir: &str) -> Result<()> {
+    let out = std::path::Path::new(dir);
+    std::fs::create_dir_all(out).with_context(|| format!("create {dir}"))?;
+    let cmd = Cli::command();
+
+    let mut buf = Vec::new();
+    clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
+    std::fs::write(out.join("regin.1"), &buf).context("write regin.1")?;
+
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        let name = sub.get_name();
+        let mut b = Vec::new();
+        clap_mangen::Man::new(sub.clone()).render(&mut b)?;
+        std::fs::write(out.join(format!("regin-{name}.1")), &b)
+            .with_context(|| format!("write regin-{name}.1"))?;
+    }
+    println!("man pages written to {dir}");
+    Ok(())
+}
+
+async fn cmd_audit() -> Result<()> {
+    match rpc(&Request::AuditRun).await? {
+        Response::AuditResult { findings, trimmed, opened } => {
+            if trimmed {
+                println_color("(audit trimmed to stay within budget)", Color::DarkGrey);
+            }
+            if findings.is_empty() {
+                println_color("Self-audit clean — no findings.", Color::Green);
+                return Ok(());
+            }
+            for f in &findings {
+                print_color(&format!("  [{}] ", f.area), Color::Yellow);
+                println!("{}", f.message);
+            }
+            println_color(&format!("{opened} new problem(s) filed for review.", ), Color::DarkGrey);
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_checks() -> Result<()> {
+    match rpc(&Request::ChecksList).await? {
+        Response::DerivedChecks { checks } => {
+            if checks.is_empty() {
+                println!("No derived checks yet. regin promotes stable LLM verdicts into cheap checks over time.");
+                return Ok(());
+            }
+            for c in &checks {
+                print_color(&format!("  {:<16}", c.domain), Color::Cyan);
+                print!("{}", c.description);
+                println_color(&format!("  [{}]", c.signature), Color::DarkGrey);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_greeting() -> Result<()> {
+    match rpc(&Request::GreetingQuery).await? {
+        Response::GreetingResp { greeting } => render_greeting(&greeting),
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_posture() -> Result<()> {
+    match rpc(&Request::PostureQuery).await? {
+        Response::PostureInfo { posture, allow_auto, change_successes, change_failures, change_success_rate, promotion_error_rate } => {
+            let color = if posture == "trusted" { Color::Green } else { Color::Yellow };
+            print!("autonomy posture: ");
+            println_color(&posture, color);
+            println!("  master switch (posture.allow_auto): {allow_auto}");
+            println!("  change outcomes: {change_successes} ok / {change_failures} failed ({:.0}% success)", change_success_rate * 100.0);
+            println!("  promotion error rate: {:.0}%", promotion_error_rate * 100.0);
+            if posture == "conservative" {
+                println_color("  safe fixes still route to approval until trust is earned", Color::DarkGrey);
+            } else {
+                println_color("  safe, reversible fixes may auto-apply", Color::DarkGrey);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_filters_list() -> Result<()> {
+    match rpc(&Request::FiltersList).await? {
+        Response::Filters { rules } => {
+            if rules.is_empty() {
+                println!("No notice filters. Add rule files under ~/.config/regin/filters/*.toml");
+                return Ok(());
+            }
+            for r in &rules {
+                print_color(&format!("  {:<20}", r.name), Color::Cyan);
+                print_color(&format!("[{}] ", r.source), Color::DarkGrey);
+                print!("contains {:?}", r.contains);
+                if let Some(d) = &r.domain {
+                    print!(" (domain: {d})");
+                }
+                println!();
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_metrics(days: Option<u32>) -> Result<()> {
+    match rpc(&Request::Metrics { since_days: days }).await? {
+        Response::Metrics { summary: s, objective: o } => {
+            println_color(&format!("CSI metrics — last {} days", days.unwrap_or(30)), Color::Cyan);
+
+            println_color("\nObjective (minimize cost s.t. reliability >= floor)", Color::Yellow);
+            let verdict = if o.meets_floor { "MEETS floor" } else { "BELOW floor" };
+            let vcolor = if o.meets_floor { Color::Green } else { Color::Red };
+            print!("  reliability {:.0}% (floor {:.0}%)  ", o.reliability * 100.0, o.reliability_floor * 100.0);
+            println_color(verdict, vcolor);
+            println!("  LLM cost: ${:.2}", o.cost_llm_usd);
+
+            println_color("\nReliability / quality", Color::Yellow);
+            println!("  incidents: {} opened, {} resolved, {} open", s.incidents_opened, s.incidents_resolved, s.open_incidents);
+            println!("  time in deviation: {}", fmt_secs(s.time_in_deviation_secs));
+            match s.mttr_secs {
+                Some(m) => println!("  MTTR: {}", fmt_secs(m)),
+                None => println!("  MTTR: n/a"),
+            }
+            println!("  recurring problems: {}", s.recurring_problems);
+
+            println_color("\nAutomation / autonomy", Color::Yellow);
+            println!("  remediations: {} auto, {} approved, {} escalated", s.remediations_auto, s.remediations_approved, s.remediations_escalated);
+            println!("  automation ratio: {:.0}%   autonomy ratio: {:.0}%", s.automation_ratio * 100.0, s.autonomy_ratio * 100.0);
+
+            println_color("\nCost / efficiency", Color::Yellow);
+            println!("  LLM spend: ${:.2}   avoided: ${:.2}   notices filtered: {}", s.cost_llm_usd, s.cost_avoided_usd, s.notice_filter_saved);
+
+            println_color("\nLearning / health", Color::Yellow);
+            println!("  promotions: {}   errors: {}   error rate: {:.0}%", s.promotions, s.promotion_errors, s.promotion_error_rate * 100.0);
         }
         Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
@@ -1640,4 +2042,28 @@ async fn cmd_problems(req: Request) -> Result<()> {
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_command_tree_is_valid() {
+        // clap's own structural validation (dup args, bad option specs, etc.).
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn man_pages_generate_from_clap() {
+        let dir = std::env::temp_dir().join(format!("regin-man-test-{}", std::process::id()));
+        cmd_gen_man(dir.to_str().unwrap()).unwrap();
+        assert!(dir.join("regin.1").exists(), "top-level man page");
+        // a page per visible subcommand
+        assert!(dir.join("regin-audit.1").exists());
+        assert!(dir.join("regin-metrics.1").exists());
+        // the hidden gen-man subcommand is not documented
+        assert!(!dir.join("regin-gen-man.1").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

@@ -110,8 +110,13 @@ fn human_source() -> String {
 // ---------------------------------------------------------------------------
 
 /// An incident: an unplanned interruption or degradation.
-/// status: open | investigating | resolved | closed
+/// status: open | investigating | blocked | resolved | closed
 /// source: manual | monitor
+///
+/// `blocked` (FEAT-035) parks an incident on a `workaround` while the underlying
+/// problem awaits a real fix. The problem linkage lives only in the
+/// `problem_incidents` join table (the redundant `incidents.problem_id` column was
+/// dropped per DISC-011) — see [`crate::db::incident_problem_id`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Incident {
     pub id: String,
@@ -122,8 +127,8 @@ pub struct Incident {
     pub source: String,
     /// Skill that produced this incident, when source = monitor.
     pub skill_name: Option<String>,
-    /// The problem this incident was linked to, if any.
-    pub problem_id: Option<String>,
+    /// A temporary workaround keeping things running while `blocked` (FEAT-035).
+    pub workaround: Option<String>,
     pub opened_at: String,
     pub updated_at: String,
     pub resolved_at: Option<String>,
@@ -131,7 +136,12 @@ pub struct Incident {
 }
 
 /// A change: a deliberate modification to a system.
-/// status: planned | applied | closed
+/// status: planned | pending_approval | applied | closed
+///
+/// A change may remediate an incident *or* resolve a problem (`problem_id`,
+/// FEAT-035). `pending_approval` sits between `planned` and `applied`: the change
+/// is staged but awaits a human/supervisor decision, recorded in `approved_by` /
+/// `approved_at` on approval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Change {
     pub id: String,
@@ -140,8 +150,14 @@ pub struct Change {
     pub status: String,
     /// The incident this change remediates, if any.
     pub incident_id: Option<String>,
+    /// The problem this change resolves, if any (FEAT-035).
+    pub problem_id: Option<String>,
     pub before: Option<String>,
     pub after: Option<String>,
+    /// Who approved the change out of `pending_approval` (FEAT-035).
+    pub approved_by: Option<String>,
+    /// When the change was approved (FEAT-035).
+    pub approved_at: Option<String>,
     pub created_at: String,
     pub applied_at: Option<String>,
 }
@@ -158,6 +174,18 @@ pub struct Problem {
     pub created_at: String,
     pub updated_at: String,
     pub closed_at: Option<String>,
+}
+
+/// A hypothesis about a problem's root cause (FEAT-035).
+/// status: created | validating | confirmed | rejected
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProblemHypothesis {
+    pub id: String,
+    pub problem_id: String,
+    pub text: String,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// An episodic-memory entry — the short-term record of *what happened*,

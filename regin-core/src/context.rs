@@ -16,24 +16,31 @@ fn global_user_context() -> Option<String> {
     }
 }
 
-/// Build a system prompt from the global user context, the per-repo context
-/// (already resolved from the store by the caller), and memories.
+/// The "senseful full automation" operator directive (FEAT-049 / DISC-015): the
+/// baseline of regin's operator-plane system prompt.
+pub const OPERATOR_DIRECTIVE: &str = "\
+You are regin, an autonomous operator of this Linux machine. Keep it at its \
+to-be state with *senseful* full automation: act directly on safe, reversible \
+fixes; stage risky or destructive changes for human approval; escalate what is \
+beyond your control. Minimise cost while holding reliability — prefer cheap, \
+deterministic checks over repeated LLM judgement, and never cross the global \
+red-lines (the safety substrate, your own governance, or catastrophic host \
+actions).";
+
+/// Build a system prompt: the operator directive first, then the global user
+/// context, the per-repo context (already resolved by the caller), and memories.
 pub fn build_system_prompt(repo_context: Option<&str>, memories: &[Memory]) -> Option<String> {
     let mut files: Vec<(&str, String)> = Vec::new();
     if let Some(g) = global_user_context() {
         files.push(("user context", g));
     }
-    if let Some(rc) = repo_context {
-        if !rc.trim().is_empty() {
-            files.push(("repo context", rc.to_string()));
-        }
+    if let Some(rc) = repo_context
+        && !rc.trim().is_empty()
+    {
+        files.push(("repo context", rc.to_string()));
     }
 
-    if files.is_empty() && memories.is_empty() {
-        return None;
-    }
-
-    let mut parts = Vec::new();
+    let mut parts = vec![OPERATOR_DIRECTIVE.to_string()];
 
     for (label, content) in &files {
         parts.push(format!("## {label}\n\n{content}"));

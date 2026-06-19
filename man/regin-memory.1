@@ -1,0 +1,51 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH memory 1  "memory " 
+.SH NAME
+memory \- Manage the agent\*(Aqs long\-term memory
+.SH SYNOPSIS
+\fBmemory\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage the agent\*(Aqs long\-term memory.
+.PP
+Memories persist across sessions and are included as context in every chat and task execution. Use them to teach the agent about your infrastructure, preferences, and patterns.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH SUBCOMMANDS
+.TP
+memory\-list(1)
+List all memories, optionally filtered by category
+.TP
+memory\-search(1)
+Search memories by content
+.TP
+memory\-save(1)
+Save a new memory
+.TP
+memory\-update(1)
+Update an existing memory by ID
+.TP
+memory\-delete(1)
+Delete a memory by ID
+.TP
+memory\-reflect(1)
+Run a Hermes reflection pass now: distil recent episodes into memories
+.TP
+memory\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+CATEGORIES:
+  fact        Infrastructure facts (OS, IPs, services)
+  preference  How you like things done
+  pattern     Recurring issues or solutions
+  project     Project\-specific context
+  skill       Learned operational procedures
+  person      Team member info
+
+EXAMPLES:
+  regin memory save fact \*(AqProduction DB is PostgreSQL 16 on db01\*(Aq
+  regin memory save preference \*(AqAlways use apt, never snap\*(Aq
+  regin memory list
+  regin memory search postgres

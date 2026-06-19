@@ -1,0 +1,38 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH change 1  "change " 
+.SH NAME
+change \- Manage changes (ITIL): documented modifications to systems
+.SH SYNOPSIS
+\fBchange\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage changes (ITIL): documented modifications to systems
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+change\-record(1)
+Record a planned change
+.TP
+change\-list(1)
+List all changes
+.TP
+change\-show(1)
+Show one change by id
+.TP
+change\-request\-approval(1)
+Move a change to pending_approval (awaiting a decision)
+.TP
+change\-approve(1)
+Approve a pending change, recording the approver
+.TP
+change\-apply(1)
+Mark a change applied
+.TP
+change\-close(1)
+Close a change
+.TP
+change\-help(1)
+Print this message or the help of the given subcommand(s)

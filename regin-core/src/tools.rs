@@ -163,22 +163,21 @@ pub fn tool_definitions() -> Vec<ToolDef> {
     ]
 }
 
-/// Execute a tool call, enforcing a persona's capability ceiling (FEAT-011): a
-/// tool outside the persona's allowed set is refused before it runs.
+/// Execute a tool call, enforcing the guardrail (FEAT-038): the static global
+/// red-lines and the editable per-role capability ceiling (FEAT-011). A denial is
+/// refused before the tool runs, with an audit message naming the deciding layer.
 pub async fn execute_tool_gated(
     call: &ToolCall,
     default_cwd: Option<&str>,
     persona: Option<&crate::persona::Persona>,
 ) -> ToolResult {
-    if !crate::persona::allows(persona, &call.function.name) {
-        let role = persona.map(|p| p.role.as_str()).unwrap_or("?");
+    let decision = crate::guardrail::check_tool_call(call, persona);
+    if let Some(audit) = decision.audit() {
+        tracing::warn!(tool = %call.function.name, "guardrail refused: {audit}");
         return ToolResult {
             tool_call_id: call.id.clone(),
             name: call.function.name.clone(),
-            output: format!(
-                "Refused: tool '{}' is outside the '{}' persona's capability ceiling",
-                call.function.name, role
-            ),
+            output: format!("Refused: {audit}"),
             success: false,
         };
     }
@@ -433,5 +432,83 @@ mod persona_gate_tests {
         assert!(!names.contains(&"bash".to_string()), "bash filtered out");
         // unscoped sees everything
         assert_eq!(tool_definitions_for(None).len(), tool_definitions().len());
+    }
+}
+
+#[cfg(test)]
+mod exec_tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn tmp() -> PathBuf {
+        let p = std::env::temp_dir().join(format!("regin-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn call(name: &str, args: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "t".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: name.into(), arguments: args.to_string() },
+        }
+    }
+
+    #[tokio::test]
+    async fn bash_runs_and_reports_empty_command() {
+        let ok = execute_tool(&call("bash", json!({"command": "echo hello-regin"})), None).await;
+        assert!(ok.success);
+        assert!(ok.output.contains("hello-regin"));
+
+        let empty = execute_tool(&call("bash", json!({"command": ""})), None).await;
+        assert!(!empty.success);
+        assert!(empty.output.contains("No command"));
+    }
+
+    #[tokio::test]
+    async fn write_read_edit_roundtrip_and_missing_file() {
+        let dir = tmp();
+        let path = dir.join("note.txt");
+        let p = path.to_str().unwrap();
+
+        let w = execute_tool(&call("write_file", json!({"path": p, "content": "foo bar"})), None).await;
+        assert!(w.success, "{}", w.output);
+
+        let r = execute_tool(&call("read_file", json!({"path": p})), None).await;
+        assert!(r.success);
+        assert!(r.output.contains("foo bar"));
+
+        let e = execute_tool(&call("edit_file", json!({"path": p, "old_text": "foo", "new_text": "baz"})), None).await;
+        assert!(e.success, "{}", e.output);
+        let r2 = execute_tool(&call("read_file", json!({"path": p})), None).await;
+        assert!(r2.output.contains("baz bar"));
+
+        let miss = execute_tool(&call("read_file", json!({"path": dir.join("nope").to_str().unwrap()})), None).await;
+        assert!(!miss.success);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_reported() {
+        let r = execute_tool(&call("telepathy", json!({})), None).await;
+        assert!(!r.success);
+        assert!(r.output.contains("Unknown tool"));
+    }
+
+    #[test]
+    fn urlencoding_escapes_reserved() {
+        assert_eq!(urlencoding("a b/c?"), "a+b%2Fc%3F");
+        assert_eq!(urlencoding("plain-Text_1.0~"), "plain-Text_1.0~");
+    }
+
+    #[test]
+    fn strip_tags_and_ddg_parse() {
+        assert_eq!(strip_tags("<b>hi</b> <i>there</i>"), "hi there");
+        let html = r#"<a href="https://example.com" class="result__a">Example Title</a>"#;
+        let results = parse_ddg_results(html);
+        assert!(results.iter().any(|r| r.contains("Example Title") && r.contains("example.com")));
+        assert!(parse_ddg_results("<html>no results</html>").is_empty());
     }
 }

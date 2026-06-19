@@ -1,0 +1,8 @@
+domain = "time-sync"
+monitor_command = "o=$(chronyc tracking 2>/dev/null | awk '/Last offset/{printf \"%d\", ($4<0?-$4:$4)*1000}'); echo time-sync.offset_ms=${o:-9999}"
+
+[[remediation]]
+tag = "force_timesync"
+title = "force a clock resync"
+description = "Step the clock and restart the time daemon."
+command = "chronyc makestep && systemctl restart chrony"

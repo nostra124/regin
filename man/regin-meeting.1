@@ -1,0 +1,20 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH meeting 1  "meeting " 
+.SH NAME
+meeting \- Chair a meeting: collect inbox reports → compile minutes → emit to dvalin
+.SH SYNOPSIS
+\fBmeeting\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Chair a meeting: collect inbox reports → compile minutes → emit to dvalin
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+meeting\-chair(1)
+Chair a meeting: compile minutes from inbox reports and emit them
+.TP
+meeting\-help(1)
+Print this message or the help of the given subcommand(s)

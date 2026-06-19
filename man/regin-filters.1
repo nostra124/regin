@@ -1,0 +1,23 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH filters 1  "filters " 
+.SH NAME
+filters \- Inspect notice filters that suppress known noise before the LLM (FEAT\-052)
+.SH SYNOPSIS
+\fBfilters\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Inspect notice filters that suppress known noise before the LLM (FEAT\-052)
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+filters\-list(1)
+List loaded notice\-filter rules (system + user)
+.TP
+filters\-test(1)
+Test whether an observation would be filtered before reaching the LLM
+.TP
+filters\-help(1)
+Print this message or the help of the given subcommand(s)

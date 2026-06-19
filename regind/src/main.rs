@@ -1,10 +1,16 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    config, context, db,
+    audit, bus, config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
+    opskill,
+    greeting,
+    mode,
+    posture,
+    promotion,
     protocol::{Request, Response},
-    reflect, repo, skills,
+    push,
+    reflect, repo, schedule, skills,
     tools,
     types::ChatMessage,
 };
@@ -50,6 +56,23 @@ async fn main() -> Result<()> {
     let db_path = config::db_path()?;
     let conn = db::init_db(&db_path)?;
     info!("Database: {}", db_path.display());
+
+    // FEAT-033: load the desired (to-be) state and surface contradictory targets
+    // as problems for a human (fail-safe: malformed files are skipped, logged).
+    {
+        let states = desired::load_all_desired(
+            &config::system_desired_dir(),
+            &config::user_desired_dir()?,
+        );
+        info!("Loaded {} desired-state domain(s)", states.len());
+        match desired::check_and_open_problems(&conn, &states) {
+            Ok(c) if !c.is_empty() => {
+                warn!("Desired-state conflicts opened problems for: {}", c.join(", "));
+            }
+            Ok(_) => {}
+            Err(e) => warn!("Desired-state conflict check failed: {e:#}"),
+        }
+    }
 
     let socket_path = config::socket_path()?;
     if let Some(parent) = socket_path.parent() {
@@ -117,7 +140,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, state: Arc<AppState>)
     Ok(())
 }
 
-async fn send(w: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> Result<()> {
+async fn send<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, r: &Response) -> Result<()> {
     let mut json = serde_json::to_string(r)?;
     json.push('\n');
     w.write_all(json.as_bytes()).await?;
@@ -173,12 +196,12 @@ fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
 
 /// The agentic loop: call LLM with tools, execute tool calls, repeat until text.
 /// Streams text chunks and tool activity to the client.
-async fn agentic_chat(
+async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
     state: &Arc<AppState>,
     _conversation_id: &str,
     user_messages: &[ChatMessage],
     cwd: Option<&str>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<String> {
     let client = state.llm_client()?;
     // FEAT-011: a configured persona scopes the tool ceiling + shapes the prompt.
@@ -239,10 +262,10 @@ async fn agentic_chat(
     }
 }
 
-async fn dispatch(
+async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
     req: Request,
     state: &Arc<AppState>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<()> {
     match req {
         Request::Ping => send(w, &Response::Pong).await?,
@@ -279,8 +302,20 @@ async fn dispatch(
         }
 
         Request::TaskSchedule { skill, interval } => {
-            let _ = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &skill)?;
-            let next_run = compute_next_run(&interval)?;
+            let loaded = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &skill)?;
+            // FEAT-047: "default" resolves the skill's declared cadence, overridden
+            // by a to-be-state per-domain tune; an explicit interval wins outright.
+            let interval = if interval == "default" {
+                let skill_default = schedule::parse_skill_cadence(&loaded.prompt);
+                let tune = desired::cadence_tune(
+                    &config::system_desired_dir(), &config::user_desired_dir().unwrap_or_default(), &skill,
+                );
+                schedule::resolve_cadence(skill_default.as_deref(), None, tune.as_deref())
+                    .ok_or_else(|| anyhow!("no cadence declared for '{skill}' (pass an explicit interval)"))?
+            } else {
+                interval
+            };
+            let next_run = compute_next_run(&interval, &skill)?;
             { let db = state.db.lock().expect("DB poisoned"); db::save_schedule(&db, &skill, &interval, &next_run)?; }
             send(w, &Response::Ok { message: format!("'{skill}' scheduled {interval} (next: {next_run})") }).await?;
         }
@@ -413,12 +448,24 @@ async fn dispatch(
             { let db = state.db.lock().expect("DB poisoned"); db::incident_close(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Incident {id} closed") }).await?;
         }
+        Request::IncidentBlock { id, workaround } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::incident_block(&db, &id, &workaround)?; }
+            send(w, &Response::Ok { message: format!("Incident {id} blocked (workaround recorded)") }).await?;
+        }
 
         // --- ITIL: Changes ---
-        Request::ChangeRecord { title, description, incident_id, before, after } => {
+        Request::ChangeRecord { title, description, incident_id, problem_id, before, after } => {
             let c = { let db = state.db.lock().expect("DB poisoned");
-                db::change_record(&db, &title, &description, incident_id.as_deref(), before.as_deref(), after.as_deref())? };
+                db::change_record(&db, &title, &description, incident_id.as_deref(), problem_id.as_deref(), before.as_deref(), after.as_deref())? };
             send(w, &Response::Ok { message: format!("Change recorded: {}", c.id) }).await?;
+        }
+        Request::ChangeRequestApproval { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_request_approval(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Change {id} -> pending_approval") }).await?;
+        }
+        Request::ChangeApprove { id, approved_by } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_approve(&db, &id, &approved_by)?; }
+            send(w, &Response::Ok { message: format!("Change {id} approved by {approved_by}") }).await?;
         }
         Request::ChangeList => {
             let changes = { let db = state.db.lock().expect("DB poisoned"); db::change_list(&db)? };
@@ -467,6 +514,175 @@ async fn dispatch(
         Request::ProblemClose { id } => {
             { let db = state.db.lock().expect("DB poisoned"); db::problem_close(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
+        }
+        Request::ProblemHypothesisAdd { problem_id, text } => {
+            let h = { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_add(&db, &problem_id, &text)? };
+            send(w, &Response::Ok { message: format!("Hypothesis added: {}", h.id) }).await?;
+        }
+        Request::ProblemHypothesisList { problem_id } => {
+            let hypotheses = { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_list(&db, &problem_id)? };
+            send(w, &Response::Hypotheses { hypotheses }).await?;
+        }
+        Request::ProblemHypothesisStatus { id, status } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_set_status(&db, &id, &status)?; }
+            send(w, &Response::Ok { message: format!("Hypothesis {id} -> {status}") }).await?;
+        }
+
+        // --- Desired state (to-be) — FEAT-033 ---
+        Request::DesiredList => {
+            let states = desired::load_all_desired(&config::system_desired_dir(), &config::user_desired_dir()?);
+            send(w, &Response::DesiredListResp { items: desired::summaries(&states) }).await?;
+        }
+        Request::DesiredShow { domain } => {
+            let ds = desired::load_desired(&config::system_desired_dir(), &config::user_desired_dir()?, &domain)?;
+            match ds {
+                Some(state) => send(w, &Response::DesiredDetail { state: Box::new(state) }).await?,
+                None => send(w, &Response::Error { message: format!("No desired state for domain `{domain}`") }).await?,
+            }
+        }
+        Request::DesiredCheck => {
+            let states = desired::load_all_desired(&config::system_desired_dir(), &config::user_desired_dir()?);
+            let conflicted = { let db = state.db.lock().expect("DB poisoned"); desired::check_and_open_problems(&db, &states)? };
+            let message = if conflicted.is_empty() {
+                format!("Checked {} desired-state domain(s); no conflicts.", states.len())
+            } else {
+                format!("Conflicts in {} domain(s): {} — problem(s) opened for human review.", conflicted.len(), conflicted.join(", "))
+            };
+            send(w, &Response::Ok { message }).await?;
+        }
+
+        // --- CSI metrics (FEAT-050) ---
+        Request::Metrics { since_days } => {
+            let days = since_days.unwrap_or(30).max(1) as i64;
+            let since = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+            let (summary, objective) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let floor: f64 = db::setting_get(&db, "kpi.reliability_floor")?
+                    .parse()
+                    .unwrap_or(0.95);
+                let summary = kpi::summary(&db, &since)?;
+                let objective = kpi::objective(&summary, floor);
+                (summary, objective)
+            };
+            send(w, &Response::Metrics { summary: Box::new(summary), objective }).await?;
+        }
+
+        // --- Notice filters (FEAT-052) ---
+        Request::FiltersList => {
+            let rules = filters::load_filters(&config::system_filters_dir(), &config::user_filters_dir()?);
+            send(w, &Response::Filters { rules }).await?;
+        }
+        Request::FiltersTest { domain, text } => {
+            let rules = filters::load_filters(&config::system_filters_dir(), &config::user_filters_dir()?);
+            let message = match filters::first_match(&rules, &domain, &text) {
+                Some(r) => format!("FILTERED by rule `{}` (would be dropped before the LLM)", r.name),
+                None => "NOT filtered (would reach the LLM review tier)".to_string(),
+            };
+            send(w, &Response::Ok { message }).await?;
+        }
+
+        // --- Effective mode (FEAT-041) ---
+        Request::ModeQuery => {
+            let configured = bus::BusClient::from_env().is_ok();
+            let (last_ok, failures) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let last_ok = db::setting_get(&db, "bus.last_ok").ok().filter(|s| !s.is_empty());
+                let failures: u32 = db::setting_get(&db, "bus.failures").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                (last_ok, failures)
+            };
+            let reach = mode::ReachabilityState {
+                last_ok: last_ok.as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc)),
+                consecutive_failures: failures,
+            };
+            let m = mode::effective_mode(configured, &reach, chrono::Utc::now(), mode::ModePolicy::default());
+            send(w, &Response::ModeInfo { mode: m.to_string(), configured, last_ok, failures }).await?;
+        }
+
+        // --- Adaptive posture (FEAT-040) ---
+        Request::PostureQuery => {
+            let since = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let (summary, policy) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let g = |k: &str| db::setting_get(&db, k).unwrap_or_default();
+                let policy = posture::PosturePolicy {
+                    allow_auto: g("posture.allow_auto") == "true",
+                    min_samples: g("posture.min_samples").parse().unwrap_or(10),
+                    min_success_rate: g("posture.min_success_rate").parse().unwrap_or(0.9),
+                    max_promotion_error_rate: g("posture.max_promotion_error_rate").parse().unwrap_or(0.1),
+                };
+                (kpi::summary(&db, &since)?, policy)
+            };
+            let p = posture::compute(&summary, policy);
+            send(w, &Response::PostureInfo {
+                posture: p.to_string(),
+                allow_auto: policy.allow_auto,
+                change_successes: summary.change_successes,
+                change_failures: summary.change_failures,
+                change_success_rate: summary.change_success_rate,
+                promotion_error_rate: summary.promotion_error_rate,
+            }).await?;
+        }
+
+        // --- Login greeting (FEAT-043) ---
+        Request::GreetingQuery => {
+            let configured = bus::BusClient::from_env().is_ok();
+            let g = {
+                let db = state.db.lock().expect("DB poisoned");
+                let last_ok = db::setting_get(&db, "bus.last_ok").ok().filter(|s| !s.is_empty());
+                let failures: u32 = db::setting_get(&db, "bus.failures").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let reach = mode::ReachabilityState {
+                    last_ok: last_ok.as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&chrono::Utc)),
+                    consecutive_failures: failures,
+                };
+                let m = mode::effective_mode(configured, &reach, chrono::Utc::now(), mode::ModePolicy::default());
+                greeting::build(&db, &m.to_string())?
+            };
+            send(w, &Response::GreetingResp { greeting: Box::new(g) }).await?;
+        }
+
+        // --- Active push (FEAT-044) ---
+        Request::PushTest => {
+            let (channel, target) = {
+                let db = state.db.lock().expect("DB poisoned");
+                (db::setting_get(&db, "push.channel")?, db::setting_get(&db, "push.target")?)
+            };
+            let ch = push::Channel::parse(&channel);
+            match push::send(ch, &target, "regin test", "active-push test notification (FEAT-044)").await {
+                Ok(()) => send(w, &Response::Ok { message: format!("Test notification sent via {channel}") }).await?,
+                Err(e) => send(w, &Response::Error { message: format!("Push failed: {e}") }).await?,
+            }
+        }
+
+        // --- Promoted deterministic checks (FEAT-051) ---
+        Request::ChecksList => {
+            let checks = { let db = state.db.lock().expect("DB poisoned"); promotion::active_checks(&db)? };
+            send(w, &Response::DerivedChecks { checks }).await?;
+        }
+
+        // --- Self-audit (FEAT-055) ---
+        Request::AuditRun => {
+            let skill_domains: Vec<String> = opskill::load_all(
+                &config::system_operator_skills_dir(),
+                &config::user_operator_skills_dir().unwrap_or_default(),
+            ).into_iter().map(|s| s.domain).collect();
+            let desired_domains: Vec<String> = desired::load_all_desired(
+                &config::system_desired_dir(),
+                &config::user_desired_dir().unwrap_or_default(),
+            ).into_iter().map(|d| d.domain).collect();
+            let since = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let (report, opened) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let floor: f64 = db::setting_get(&db, "kpi.reliability_floor")?.parse().unwrap_or(0.95);
+                let summary = kpi::summary(&db, &since)?;
+                let report = audit::run_audit(&summary, floor, &skill_domains, &desired_domains, false);
+                let opened = audit::file_findings(&db, &report)?;
+                (report, opened)
+            };
+            send(w, &Response::AuditResult { findings: report.findings, trimmed: report.trimmed, opened }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
@@ -531,11 +747,11 @@ async fn dispatch(
 }
 
 /// Run a skill through the agentic loop (with tools).
-async fn exec_skill_agentic(
+async fn exec_skill_agentic<W: tokio::io::AsyncWrite + Unpin>(
     skill: &skills::Skill,
     state: &Arc<AppState>,
     cwd: Option<&str>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<regin_core::types::TaskRun> {
     info!(skill = %skill.name, "Running skill (agentic)");
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -572,6 +788,8 @@ async fn schedule_checker(state: Arc<AppState>) {
         let now = chrono::Utc::now().to_rfc3339();
         let due = {
             let db = state.db.lock().expect("DB poisoned");
+            // FEAT-048: stamp the scheduler heartbeat so a stalled loop is detectable.
+            let _ = db::setting_set(&db, "regind.heartbeat", &now);
             match db::get_due_schedules(&db, &now) { Ok(s) => s, Err(e) => { error!("Schedule check: {e}"); continue; } }
         };
         for sched in due {
@@ -601,10 +819,15 @@ async fn schedule_checker(state: Arc<AppState>) {
                 let auto = db::setting_get(&db, "monitor.auto_incident").map(|v| v == "true").unwrap_or(false);
                 if auto {
                     let severity = db::setting_get(&db, "monitor.severity").unwrap_or_else(|_| "medium".into());
-                    let threshold = db::setting_get(&db, "monitor.recurrence_threshold")
+                    let default_threshold = db::setting_get(&db, "monitor.recurrence_threshold")
                         .ok()
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(3);
+                    // FEAT-036: the domain's to-be-state may override the global default.
+                    let user_desired = config::user_desired_dir().unwrap_or_default();
+                    let threshold = desired::recurrence_threshold(
+                        &config::system_desired_dir(), &user_desired, &sched.skill, default_threshold,
+                    );
                     match db::monitor_evaluate(&db, &sched.skill, &status, &output, &severity, threshold) {
                         Ok(o) => {
                             if o.created_incident {
@@ -619,7 +842,7 @@ async fn schedule_checker(state: Arc<AppState>) {
                 }
             }
             let last_run = chrono::Utc::now().to_rfc3339();
-            if let Ok(next) = compute_next_run(&sched.interval) {
+            if let Ok(next) = compute_next_run(&sched.interval, &sched.skill) {
                 let db = state.db.lock().expect("DB poisoned");
                 let _ = db::update_schedule_after_run(&db, &sched.skill, &last_run, &next);
             }
@@ -662,7 +885,7 @@ async fn reflection_checker(state: Arc<AppState>) {
             let db = state.db.lock().expect("DB poisoned");
             db::setting_get(&db, "memory.reflect_interval").unwrap_or_else(|_| "daily".into())
         };
-        let dur = parse_interval(&interval_str)
+        let dur = schedule::parse_interval(&interval_str)
             .ok()
             .and_then(|d| d.to_std().ok())
             .unwrap_or_else(|| std::time::Duration::from_secs(86_400));
@@ -682,30 +905,10 @@ async fn reflection_checker(state: Arc<AppState>) {
     }
 }
 
-fn parse_interval(interval: &str) -> Result<chrono::Duration> {
-    match interval {
-        "hourly" => Ok(chrono::Duration::hours(1)),
-        "daily" => Ok(chrono::Duration::days(1)),
-        "weekly" => Ok(chrono::Duration::weeks(1)),
-        "monthly" => Ok(chrono::Duration::days(30)),
-        s if s.starts_with("every ") => {
-            let spec = &s[6..];
-            let unit = spec.chars().last().ok_or_else(|| anyhow!("Empty interval"))?;
-            let num: i64 = spec[..spec.len() - 1].parse().context("Bad number")?;
-            match unit {
-                's' => Ok(chrono::Duration::seconds(num)),
-                'm' => Ok(chrono::Duration::minutes(num)),
-                'h' => Ok(chrono::Duration::hours(num)),
-                'd' => Ok(chrono::Duration::days(num)),
-                _ => Err(anyhow!("Unknown unit: {unit}")),
-            }
-        }
-        _ => Err(anyhow!("Unknown interval: {interval}")),
-    }
-}
-
-fn compute_next_run(interval: &str) -> Result<String> {
-    Ok((chrono::Utc::now() + parse_interval(interval)?).to_rfc3339())
+/// Next run for a skill, with deterministic per-skill jitter to smooth load
+/// (FEAT-047). Up to 10% of the interval is added, staggered by skill name.
+fn compute_next_run(interval: &str, skill: &str) -> Result<String> {
+    Ok(schedule::next_run_with_jitter(interval, skill, 0.1, chrono::Utc::now())?.to_rfc3339())
 }
 
 async fn shutdown_signal() {
@@ -713,4 +916,83 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let mut term = signal::unix::signal(signal::unix::SignalKind::terminate()).expect("SIGTERM");
     tokio::select! { _ = ctrl_c => {} _ = term.recv() => {} }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use regin_core::db;
+    use tokio::io::AsyncReadExt;
+
+    fn state() -> Arc<AppState> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        Arc::new(AppState { db: Mutex::new(conn) })
+    }
+
+    /// Drive the real dispatch over an in-memory duplex and collect responses.
+    async fn run(req: Request, st: &Arc<AppState>) -> Vec<Response> {
+        let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+        dispatch(req, st, &mut server).await.unwrap();
+        drop(server); // EOF for the reader
+        let mut out = String::new();
+        client.read_to_string(&mut out).await.unwrap();
+        out.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Response>(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ping_pongs() {
+        let st = state();
+        assert!(matches!(run(Request::Ping, &st).await.as_slice(), [Response::Pong]));
+    }
+
+    #[tokio::test]
+    async fn itil_incident_and_change_flow() {
+        let st = state();
+        // open an incident, then list it
+        let r = run(Request::IncidentOpen { title: "disk full".into(), description: "x".into(), severity: "high".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Ok { .. }]));
+        let listed = run(Request::IncidentList { status: None }, &st).await;
+        match listed.as_slice() {
+            [Response::Incidents { incidents }] => assert_eq!(incidents.len(), 1),
+            other => panic!("expected one incident, got {other:?}"),
+        }
+        // record a change, then list it
+        run(Request::ChangeRecord { title: "fix".into(), description: "".into(), incident_id: None, problem_id: None, before: None, after: None }, &st).await;
+        let changes = run(Request::ChangeList, &st).await;
+        match changes.as_slice() {
+            [Response::Changes { changes }] => assert_eq!(changes.len(), 1),
+            other => panic!("expected one change, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_queries_respond() {
+        let st = state();
+        assert!(matches!(run(Request::Metrics { since_days: Some(7) }, &st).await.as_slice(), [Response::Metrics { .. }]));
+        assert!(matches!(run(Request::ModeQuery, &st).await.as_slice(), [Response::ModeInfo { .. }]));
+        assert!(matches!(run(Request::FiltersList, &st).await.as_slice(), [Response::Filters { .. }]));
+        assert!(matches!(run(Request::DesiredList, &st).await.as_slice(), [Response::DesiredListResp { .. }]));
+        assert!(matches!(run(Request::ProblemList { status: None }, &st).await.as_slice(), [Response::Problems { .. }]));
+    }
+
+    #[tokio::test]
+    async fn unknown_incident_show_errors() {
+        let st = state();
+        let r = run(Request::IncidentShow { id: "nope".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn send_serializes_one_line_per_response() {
+        let mut buf: Vec<u8> = Vec::new();
+        // Vec<u8> implements tokio AsyncWrite
+        send(&mut buf, &Response::Pong).await.unwrap();
+        send(&mut buf, &Response::Ok { message: "hi".into() }).await.unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s.lines().count(), 2);
+    }
 }

@@ -1,0 +1,52 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build packages · publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: verify tag matches Cargo.toml version
+        run: |
+          set -e
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Cargo.toml=$CARGO_VERSION  tag=$TAG_VERSION"
+          if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $CARGO_VERSION"
+            exit 1
+          fi
+
+      - name: install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: build deb/rpm/apk
+        run: packaging/build.sh
+
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum regin* > SHA256SUMS
+
+      - name: publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/regin*
+            dist/SHA256SUMS
+          generate_release_notes: true
