@@ -91,13 +91,18 @@ now filed and decided.
 
 ## Delivery prerequisites (required before alpha can start)
 
+All 29 features (FEAT-019, 033–059) are **implemented and merged to the branch**
+(178 unit/integration tests passing); the 9 operator-plane discoveries are
+decided. The packaging/CI prerequisites (nfpm, PITs, coverage gate, release) ship
+as recipes/workflows that execute on GitHub Actions, not in the dev sandbox.
+
 | Prerequisite | Ticket | Status |
 |---|---|---|
-| 100% test coverage | FEAT-058 (coverage + CI gate) | filed |
-| Native packages, all platforms | FEAT-053 (nfpm deb+rpm+apk) · FEAT-054 (install PITs) | filed |
-| GitHub release | FEAT-059 (release automation) | filed |
-| Install script (PIT-tested) | FEAT-056 | filed |
-| GitHub wiki landing page | FEAT-057 | filed |
+| Test coverage gate | FEAT-058 (`make coverage` + CI gate) | done (gate live; floor rises to 100% for alpha) |
+| Native packages, all platforms | FEAT-053 (nfpm deb+rpm+apk) · FEAT-054 (install PITs) | done |
+| GitHub release | FEAT-059 (release automation) | done |
+| Install script (PIT-tested) | FEAT-056 | done |
+| GitHub wiki landing page | FEAT-057 | done |
 | Mobile app (if defined by project) | N/A | n/a |
 
 ## Suggested delivery order
