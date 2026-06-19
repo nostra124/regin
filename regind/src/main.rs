@@ -681,10 +681,15 @@ async fn schedule_checker(state: Arc<AppState>) {
                 let auto = db::setting_get(&db, "monitor.auto_incident").map(|v| v == "true").unwrap_or(false);
                 if auto {
                     let severity = db::setting_get(&db, "monitor.severity").unwrap_or_else(|_| "medium".into());
-                    let threshold = db::setting_get(&db, "monitor.recurrence_threshold")
+                    let default_threshold = db::setting_get(&db, "monitor.recurrence_threshold")
                         .ok()
                         .and_then(|v| v.parse::<usize>().ok())
                         .unwrap_or(3);
+                    // FEAT-036: the domain's to-be-state may override the global default.
+                    let user_desired = config::user_desired_dir().unwrap_or_default();
+                    let threshold = desired::recurrence_threshold(
+                        &config::system_desired_dir(), &user_desired, &sched.skill, default_threshold,
+                    );
                     match db::monitor_evaluate(&db, &sched.skill, &status, &output, &severity, threshold) {
                         Ok(o) => {
                             if o.created_incident {

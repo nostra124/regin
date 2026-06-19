@@ -297,6 +297,21 @@ pub fn load_desired(
     Ok(None)
 }
 
+/// The effective recurrence→problem threshold for a domain (FEAT-036): the
+/// per-domain to-be-state override if present, else the global `default`.
+/// Fail-safe — a missing/unreadable file yields the default.
+pub fn recurrence_threshold(
+    system_dir: &Path,
+    user_dir: &Path,
+    domain: &str,
+    default: usize,
+) -> usize {
+    match load_desired(system_dir, user_dir, domain) {
+        Ok(Some(ds)) => ds.recurrence_threshold.unwrap_or(default),
+        _ => default,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Contradiction detection (the "ambiguous target -> problem" check)
 // ---------------------------------------------------------------------------
@@ -637,6 +652,27 @@ Anything above is a deviation worth attention.
         // idempotent: re-checking does not open a second problem
         check_and_open_problems(&conn, &[bad]).unwrap();
         assert_eq!(db::problem_list(&conn, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recurrence_threshold_override_then_default() {
+        let sys = tmpdir();
+        let user = tmpdir();
+        // domain with an explicit per-domain override
+        fs::write(sys.join("disk.md"), "# d\n\n```assertions\nrecurrence_threshold = 7\n[[assert]]\nkey=\"a\"\nop=\"lt\"\nvalue=1\n```\n").unwrap();
+        // domain without an override
+        fs::write(sys.join("net.md"), "# n\n").unwrap();
+
+        assert_eq!(recurrence_threshold(&sys, &user, "disk", 3), 7, "override wins");
+        assert_eq!(recurrence_threshold(&sys, &user, "net", 3), 3, "falls back to default");
+        assert_eq!(recurrence_threshold(&sys, &user, "absent", 3), 3, "missing domain -> default");
+
+        // a user override shadows the system file's threshold
+        fs::write(user.join("disk.md"), "# d\n\n```assertions\nrecurrence_threshold = 2\n[[assert]]\nkey=\"a\"\nop=\"lt\"\nvalue=1\n```\n").unwrap();
+        assert_eq!(recurrence_threshold(&sys, &user, "disk", 3), 2, "user layer wins");
+
+        fs::remove_dir_all(&sys).ok();
+        fs::remove_dir_all(&user).ok();
     }
 
     #[test]
