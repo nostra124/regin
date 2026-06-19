@@ -765,6 +765,8 @@ async fn schedule_checker(state: Arc<AppState>) {
         let now = chrono::Utc::now().to_rfc3339();
         let due = {
             let db = state.db.lock().expect("DB poisoned");
+            // FEAT-048: stamp the scheduler heartbeat so a stalled loop is detectable.
+            let _ = db::setting_set(&db, "regind.heartbeat", &now);
             match db::get_due_schedules(&db, &now) { Ok(s) => s, Err(e) => { error!("Schedule check: {e}"); continue; } }
         };
         for sched in due {

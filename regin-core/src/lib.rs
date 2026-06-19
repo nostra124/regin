@@ -22,6 +22,7 @@ pub mod protocol;
 pub mod push;
 pub mod reflect;
 pub mod remediation;
+pub mod resilience;
 pub mod repo;
 pub mod safelane;
 pub mod schedule;

@@ -36,6 +36,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("push.target", "", "Active-push target URL (ntfy topic URL or webhook endpoint)"),
     ("push.min_severity", "critical", "Minimum severity to actively push (FEAT-044)"),
     ("push.min_interval_secs", "300", "Minimum seconds between active pushes (rate limit)"),
+    ("regind.heartbeat", "", "Last scheduler tick (RFC3339); a stale value signals a stalled loop (FEAT-048)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
