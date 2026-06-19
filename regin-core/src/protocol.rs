@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::desired::{DesiredInfo, DesiredState};
 use crate::filters::FilterRule;
 use crate::greeting::Greeting;
+use crate::promotion::DerivedCheck;
 use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
     Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
@@ -209,6 +210,11 @@ pub enum Request {
     /// Send a test notification over the configured push channel.
     #[serde(rename = "push_test")]
     PushTest,
+
+    // --- Promoted deterministic checks (FEAT-051) ---
+    /// List active derived (promoted) deterministic checks.
+    #[serde(rename = "checks_list")]
+    ChecksList,
 }
 
 /// Response from daemon to CLI.
@@ -316,6 +322,9 @@ pub enum Response {
 
     #[serde(rename = "greeting")]
     GreetingResp { greeting: Box<Greeting> },
+
+    #[serde(rename = "derived_checks")]
+    DerivedChecks { checks: Vec<DerivedCheck> },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

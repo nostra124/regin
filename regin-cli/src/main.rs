@@ -201,6 +201,9 @@ enum Commands {
         action: PushAction,
     },
 
+    /// List active derived (promoted) deterministic checks (FEAT-051).
+    Checks,
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -712,6 +715,7 @@ async fn main() -> Result<()> {
         Commands::Push { action } => match action {
             PushAction::Test => cmd_ok(Request::PushTest).await,
         },
+        Commands::Checks => cmd_checks().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1848,6 +1852,25 @@ fn render_greeting(g: &regin_core::greeting::Greeting) {
             println!("  {}  {}", sid(&a.id), a.title);
         }
     }
+}
+
+async fn cmd_checks() -> Result<()> {
+    match rpc(&Request::ChecksList).await? {
+        Response::DerivedChecks { checks } => {
+            if checks.is_empty() {
+                println!("No derived checks yet. regin promotes stable LLM verdicts into cheap checks over time.");
+                return Ok(());
+            }
+            for c in &checks {
+                print_color(&format!("  {:<16}", c.domain), Color::Cyan);
+                print!("{}", c.description);
+                println_color(&format!("  [{}]", c.signature), Color::DarkGrey);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
 }
 
 async fn cmd_greeting() -> Result<()> {

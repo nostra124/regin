@@ -170,7 +170,18 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_kpi_events_metric_time
-            ON kpi_events (metric, recorded_at);",
+            ON kpi_events (metric, recorded_at);
+
+        CREATE TABLE IF NOT EXISTS derived_checks (
+            id TEXT PRIMARY KEY,
+            domain TEXT NOT NULL,
+            signature TEXT NOT NULL,
+            description TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            demoted_at TEXT,
+            demote_reason TEXT
+        );",
     )
     .context("Failed to create database tables")?;
 

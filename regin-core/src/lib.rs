@@ -17,6 +17,7 @@ pub mod mode;
 pub mod persona;
 pub mod planning;
 pub mod posture;
+pub mod promotion;
 pub mod protocol;
 pub mod push;
 pub mod reflect;

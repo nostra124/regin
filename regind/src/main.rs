@@ -6,6 +6,7 @@ use regin_core::{
     greeting,
     mode,
     posture,
+    promotion,
     protocol::{Request, Response},
     push,
     reflect, repo, schedule, skills,
@@ -653,6 +654,12 @@ async fn dispatch(
                 Ok(()) => send(w, &Response::Ok { message: format!("Test notification sent via {channel}") }).await?,
                 Err(e) => send(w, &Response::Error { message: format!("Push failed: {e}") }).await?,
             }
+        }
+
+        // --- Promoted deterministic checks (FEAT-051) ---
+        Request::ChecksList => {
+            let checks = { let db = state.db.lock().expect("DB poisoned"); promotion::active_checks(&db)? };
+            send(w, &Response::DerivedChecks { checks }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
