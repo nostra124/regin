@@ -15,6 +15,7 @@ pub mod db;
 pub mod kpi;
 pub mod llm;
 pub mod mode;
+pub mod opskill;
 pub mod persona;
 pub mod planning;
 pub mod posture;
