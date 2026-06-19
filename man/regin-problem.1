@@ -1,0 +1,47 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH problem 1  "problem " 
+.SH NAME
+problem \- Manage problems (ITIL): root causes behind recurring incidents
+.SH SYNOPSIS
+\fBproblem\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage problems (ITIL): root causes behind recurring incidents
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.SH SUBCOMMANDS
+.TP
+problem\-open(1)
+Open a new problem
+.TP
+problem\-list(1)
+List problems, optionally filtered by status
+.TP
+problem\-show(1)
+Show one problem by id
+.TP
+problem\-link(1)
+Link an incident to a problem
+.TP
+problem\-known\-error(1)
+Promote a problem to a known error with a root cause
+.TP
+problem\-hypothesis\-add(1)
+Add a root\-cause hypothesis to a problem
+.TP
+problem\-hypothesis\-list(1)
+List a problem\*(Aqs hypotheses
+.TP
+problem\-hypothesis\-status(1)
+Set a hypothesis\*(Aqs status: created|validating|confirmed|rejected
+.TP
+problem\-escalate(1)
+Escalate a problem to dvalin as a BUG/FEAT (structured bus message)
+.TP
+problem\-close(1)
+Close a problem
+.TP
+problem\-help(1)
+Print this message or the help of the given subcommand(s)

@@ -1,0 +1,37 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH config 1  "config " 
+.SH NAME
+config \- Manage agent configuration
+.SH SYNOPSIS
+\fBconfig\fR [\fB\-h\fR|\fB\-\-help\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Manage agent configuration.
+.PP
+All settings are stored in the SQLite database. No config files.
+.PP
+Key settings: nanogpt.api_key     NanoGPT API key (required) nanogpt.model       LLM model (default: claude\-sonnet\-4\-20250514) nanogpt.base_url    API endpoint daemon.enabled      Run regind as persistent user service (true/false)
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.SH SUBCOMMANDS
+.TP
+config\-list(1)
+List all settings and their current values
+.TP
+config\-get(1)
+Get the value of a setting
+.TP
+config\-set(1)
+Set a configuration value
+.TP
+config\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+EXAMPLES:
+  regin config set nanogpt.api_key sk\-abc123
+  regin config set nanogpt.model gpt\-4o
+  regin config set daemon.enabled true
+  regin config get nanogpt.model
+  regin config list

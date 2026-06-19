@@ -2,7 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::process::Command;
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use regin_core::{
     config, db,
@@ -206,6 +206,10 @@ enum Commands {
 
     /// Run the periodic CSI self-audit now and file its findings (FEAT-055).
     Audit,
+
+    /// Generate man pages from the CLI into a directory (FEAT-019; used by packaging).
+    #[command(hide = true)]
+    GenMan { dir: String },
 
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
@@ -643,6 +647,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::GenMan { dir } => cmd_gen_man(&dir),
         Commands::Chat => cmd_chat().await,
         Commands::Task { action } => match action {
             TaskAction::List => cmd_task_list().await,
@@ -1858,6 +1863,31 @@ fn render_greeting(g: &regin_core::greeting::Greeting) {
     }
 }
 
+/// Generate man pages from the clap surface (FEAT-019) so they never drift from
+/// the actual commands. Writes `regin.1` plus a page per visible subcommand.
+fn cmd_gen_man(dir: &str) -> Result<()> {
+    let out = std::path::Path::new(dir);
+    std::fs::create_dir_all(out).with_context(|| format!("create {dir}"))?;
+    let cmd = Cli::command();
+
+    let mut buf = Vec::new();
+    clap_mangen::Man::new(cmd.clone()).render(&mut buf)?;
+    std::fs::write(out.join("regin.1"), &buf).context("write regin.1")?;
+
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        let name = sub.get_name();
+        let mut b = Vec::new();
+        clap_mangen::Man::new(sub.clone()).render(&mut b)?;
+        std::fs::write(out.join(format!("regin-{name}.1")), &b)
+            .with_context(|| format!("write regin-{name}.1"))?;
+    }
+    println!("man pages written to {dir}");
+    Ok(())
+}
+
 async fn cmd_audit() -> Result<()> {
     match rpc(&Request::AuditRun).await? {
         Response::AuditResult { findings, trimmed, opened } => {
@@ -2009,4 +2039,28 @@ async fn cmd_problems(req: Request) -> Result<()> {
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_command_tree_is_valid() {
+        // clap's own structural validation (dup args, bad option specs, etc.).
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn man_pages_generate_from_clap() {
+        let dir = std::env::temp_dir().join(format!("regin-man-test-{}", std::process::id()));
+        cmd_gen_man(dir.to_str().unwrap()).unwrap();
+        assert!(dir.join("regin.1").exists(), "top-level man page");
+        // a page per visible subcommand
+        assert!(dir.join("regin-audit.1").exists());
+        assert!(dir.join("regin-metrics.1").exists());
+        // the hidden gen-man subcommand is not documented
+        assert!(!dir.join("regin-gen-man.1").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

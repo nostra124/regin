@@ -1,0 +1,21 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH runs 1  "runs " 
+.SH NAME
+runs \- Show recent task execution history
+.SH SYNOPSIS
+\fBruns\fR [\fB\-\-skill\fR] [\fB\-\-limit\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Show recent task execution history.
+.PP
+Displays the results of past task executions, including status, timestamps, and output previews.
+.SH OPTIONS
+.TP
+\fB\-\-skill\fR \fI<NAME>\fR
+Filter runs by task (skill) name
+.TP
+\fB\-\-limit\fR \fI<N>\fR [default: 20]
+Maximum number of runs to display
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)

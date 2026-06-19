@@ -1,0 +1,28 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH plan 1  "plan " 
+.SH NAME
+plan \- Run the individual planning cycle (aggregate When/Which → plan; emit upward)
+.SH SYNOPSIS
+\fBplan\fR [\fB\-\-cadence\fR] [\fB\-\-need\fR] [\fB\-\-emit\fR] [\fB\-\-owner\fR] [\fB\-\-cao\fR] [\fB\-h\fR|\fB\-\-help\fR] 
+.SH DESCRIPTION
+Run the individual planning cycle (aggregate When/Which → plan; emit upward)
+.SH OPTIONS
+.TP
+\fB\-\-cadence\fR \fI<CADENCE>\fR [default: weekly]
+Cadence: weekly | monthly | yearly
+.TP
+\fB\-\-need\fR \fI<NEEDS>\fR
+A required capability/skill package this agent needs (repeatable)
+.TP
+\fB\-\-emit\fR
+Emit upward signals (priority ask + capability gap) over the bus
+.TP
+\fB\-\-owner\fR \fI<OWNER>\fR
+Process/project owner address (priority ask). Else REGIN_PROCESS_OWNER
+.TP
+\fB\-\-cao\fR \fI<CAO>\fR
+CAO address (capability gaps). Else REGIN_CAO, else cao@hq
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
