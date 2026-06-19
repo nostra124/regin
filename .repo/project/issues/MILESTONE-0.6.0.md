@@ -55,6 +55,35 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 ## Notes
 
 - The decision-plane FEATs (028–032) depend on the memory-plane store (FEAT-021)
-  and consolidation (FEAT-024); the memory plane should land first within this
-  milestone.
-- All twelve feature files (021–032) are now minted under `feature/open/`.
+  and consolidation (FEAT-024); the memory plane lands first within this milestone.
+- All twelve feature files (021–032) are minted under `feature/open/`.
+- DISC-018 reuses DISC-009's blast-radius/reversibility judgement as the trigger for
+  deliberate mode; FEAT-031 reuses the escalation bridge (FEAT-015, shipped in
+  0.4.0) for human ratification.
+
+## Suggested delivery order
+
+1. **FEAT-021** — `identity.db` + schema (foundation; everything else builds on it).
+2. **FEAT-022** + **FEAT-023** — migrate legacy memory in; start capturing sessions/
+   transcripts (populate the store).
+3. **FEAT-024** — consolidation / Curator (the learning loop).
+4. **FEAT-025** → **FEAT-026** — activation-ranked retrieval, then additive vector
+   recall.
+5. **FEAT-027** — portability verbs (independent; any time after 021).
+6. Decision plane: **FEAT-028** (loop) → **FEAT-030** (value catalog + configurator)
+   → **FEAT-029** (Soul gate) → **FEAT-032** (deliberation capture) → **FEAT-031**
+   (principle derivation & ratification; needs 024 + 032).
+
+## Exit criteria
+
+- `identity.db` is the **single source of truth** for the memory plane; `regin.db`
+  no longer holds `episodes`/`memories` (FEAT-022 complete).
+- Memory **consolidates** (interference-resolved), **recalls** (FTS + activation,
+  vector additive), and **decays**; the identity is **portable** (`memory
+  export/import`, per-host scoping).
+- Consequential/irreversible actions route through **deliberate mode**; the **Soul
+  gate** can veto and escalate; values are **configurable** (catalog + Persona
+  overlay) and principles are **human-ratified**; deliberations are **captured** and
+  feed calibration.
+- 100% test coverage (per the milestone delivery-prerequisite pattern); no open
+  design questions remain in any 021–032 FEAT (RULE-005).

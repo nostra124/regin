@@ -196,3 +196,46 @@ toolchain**. Read it at the start of every session; append to it at the end.
   no-LLM engine invariant). Closing DISC-003 spawns FEATs in BOTH repos.
 - Nothing implemented yet — next step is to start the milestone, foundation
   tickets first (FEAT-002 data model, FEAT-005 episodic tier).
+
+### 2026-06-19 — Identity plane finalized through 0.6.0 (DISC-017 resolved, DISC-018 added, FEAT-021..032 minted)
+- **DISC-017 RESOLVED** (was logged open/pending above). Decision: portable
+  `identity.db` (Variant A), 4-tier memory model (working/episodic/medium/long),
+  topic-indexed long-term knowledge, activation-ranked FTS **+ vector** recall
+  (scoped override of DISC-002's embedding deferral, memory-plane only), active
+  decay + interference resolution; per-host `host` column travels with the identity
+  but injects only on the matching host; **move-and-delete** migration off
+  `regin.db`. Subsystem name = **memory plane**; verbs under `regin memory …`.
+  Spawned **FEAT-021..027**.
+- **DISC-018 NEW + resolved — decision plane** (`Persona / Mind / Soul / Body`):
+  - **Sharp glossary (load-bearing):** Persona = *outward* identity (role/mask,
+    FEAT-011); Mind = reasoning (plans/decides); Soul = *inner* identity
+    (values-grounded conscience); Body = execution. Dropped the earlier "ego/false
+    identity" overload on Mind — Persona is the mask, Soul is the character.
+  - **Two modes:** `act` (`Mind → Body`, fast default) vs `deliberate`
+    (`Mind ⇄ Soul → Body`: read-only plan, starved Soul votes, approved plan runs).
+  - **Q1 trigger = risk-gated**, reusing DISC-009's blast-radius/reversibility
+    judgement (+ Persona/urgency modifiers). **Q2 deadlock = Soul veto →
+    default-deny + escalate** (FEAT-015/DISC-010). **Q3 grounding = values subset**.
+    **Q4 = capture deliberations** (plan+vote+outcome) for calibration. **Q5 =
+    principles derived seed + reflection-proposes + human-ratified** (keeps the
+    conscience independent of the Mind).
+  - **Values model = core + per-role overlay** (decided with user): persistent
+    identity-core values in `identity.db` (portable) ∪ active Persona's overlay in
+    `persona.toml` (swappable). The Soul votes from the union.
+  - **Soul configurator (FEAT-030):** bundled value catalog drawn across human
+    history/literature (Stoic/cardinal, theological, Confucian, chivalric,
+    Enlightenment, Schwartz taxonomy, + agent-operational virtues); `regin soul …`
+    CLI seeds the core charter; Persona→values derivation proposes a role-default
+    set for human confirmation.
+  - Spawned **FEAT-028..032**.
+- **MILESTONE-0.6.0 — Identity plane** created (`status: planned`, depends_on 0.5.0),
+  grouping the memory plane (021–027) + decision plane (028–032), with delivery
+  order + exit criteria. **0.5.0 stays the single active milestone** (RULE-008).
+- **Naming collisions avoided:** modes are `act`/`deliberate` (NOT "reflection
+  mode" — `reflect.rs` = memory consolidation; `planning.rs` = org cadence).
+- **Reminder honoured:** did NOT create a `ROADMAP.md` (standing rule — roadmap =
+  the milestone files). Earlier in-session offer to render one was retracted.
+- **Still user-gated (discuss-first, NOT auto-finalized):** the 0.5.0 operator
+  capability backlog — DISC-009 (decided, to derive), DISC-015 (decided, to
+  derive), and open/to-open DISC-008/010/011/012/013/014/016. These need user
+  decisions before FEATs; out of scope for "till 0.6" identity-plane finalization.
