@@ -34,13 +34,13 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 
 | ID | Title | Status |
 |----|-------|--------|
-| FEAT-021 | Portable `identity.db` + full schema | to mint |
-| FEAT-022 | Migrate `episodes`/`memories` out of `regin.db` | to mint |
-| FEAT-023 | Session archival + transcript capture | to mint |
-| FEAT-024 | Consolidation pipeline (Curator) | to mint |
-| FEAT-025 | Activation-ranked retrieval | to mint |
-| FEAT-026 | Vector/embedding recall | to mint |
-| FEAT-027 | Portability verbs (`memory export/import`) | to mint |
+| FEAT-021 | Portable `identity.db` + full schema | open |
+| FEAT-022 | Migrate `episodes`/`memories` out of `regin.db` | open |
+| FEAT-023 | Session archival + transcript capture | open |
+| FEAT-024 | Consolidation pipeline (Curator) | open |
+| FEAT-025 | Activation-ranked retrieval | open |
+| FEAT-026 | Vector/embedding recall | open |
+| FEAT-027 | Portability verbs (`memory export/import`) | open |
 
 ### Decision plane (DISC-018)
 
@@ -57,5 +57,4 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 - The decision-plane FEATs (028–032) depend on the memory-plane store (FEAT-021)
   and consolidation (FEAT-024); the memory plane should land first within this
   milestone.
-- DISC-017's FEAT-021–027 were reserved at discovery; their ticket files are minted
-  when this milestone is planned in detail.
+- All twelve feature files (021–032) are now minted under `feature/open/`.
