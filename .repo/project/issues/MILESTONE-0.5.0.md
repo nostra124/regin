@@ -30,15 +30,21 @@ DISC + user decision before a FEAT is minted.
 | FEAT-019 | Man pages generated from the clap surface (clap_mangen)      | high     |
 | FEAT-020 | Regenerable `.deb` packaging (drop the checked-in staging tree) | high  |
 
-### Pending discovery (Mode-B operator — discuss before filing FEATs)
+### Discovery (Mode-B operator plane — discuss before filing FEATs)
 
-| DISC (proposed) | Topic                                                            |
-|-----------------|-----------------------------------------------------------------|
-| DISC-008        | Mode-B operator skill catalog (which skills; report vs. remediate) |
-| DISC-009        | Autonomy/guardrail model for standalone remediation (allowlist/approval/dry-run + ITIL change) |
-| DISC-010        | Notification egress for standalone mode (email/webhook/ntfy/matrix) |
-| DISC-011        | Per-skill scheduling + self-resilience (watchdog, API backoff)   |
-| DISC-012        | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) |
+The operator model (autonomous machine operator, ITIL plane) is captured across
+DISC-008..011 below; the operator/foreman plane split is the governing framing
+(see `.repo/dvalin/notes.md`). DISC-012..014 remain to be opened.
+
+| DISC     | Topic                                                            | Status |
+|----------|------------------------------------------------------------------|--------|
+| DISC-008 | Machine to-be-state model (explicit md + implicit thresholds)    | filed, open |
+| DISC-009 | Operator remediation + three-lane risk guardrail (auto/approve/problem) | filed, open |
+| DISC-010 | Mode-routed escalation + standalone login greeting               | filed, open |
+| DISC-011 | ITIL model extensions (blocking, change→problem, approval, hypotheses) | filed, open |
+| DISC-012 | Operator skill catalog (which monitors/remediations)             | to open |
+| DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | to open |
+| DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |
 
 ## Delivery prerequisites (required before alpha can start)
 

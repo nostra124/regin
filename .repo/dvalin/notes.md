@@ -47,6 +47,39 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-19 — operator model + operator/foreman plane split (MILESTONE-0.5.0)
+- **Two planes (governing framing, near-settled — confirm in guided Q&A):**
+  - **Operator plane** — regin as the autonomous operator of the *machine/
+    container* it runs on. Governed by ITIL: a declared **to-be state**, and the
+    loop deviation→**incident**→**change** (problems are the exception).
+    `operator` is a distinct role from `foreman`.
+  - **Foreman/repo-worker plane** — regin working *inside a repo* under that
+    repo's own methodology (software ≠ marketing campaign), delegating to
+    Claude/opencode or acting directly. ITIL does **not** apply here; repo
+    methodology does. (To be discussed after the operator plane.)
+- **Operator loop (converged with user):** to-be state (explicit markdown +
+  implicit monitor thresholds) is the reference. Deviation → incident (always;
+  incidents are by-definition solvable). The fix is usually a **change applied
+  directly to the incident** (e.g. `/` full → delete temp files). A **problem**
+  is raised only on (a) recurrence, or (b) a fix that is out-of-regin's-control
+  or destructive. A problem carries hypotheses, may need long-run monitoring, and
+  its real fix is a **change out of the problem** (e.g. adjust log rotation).
+- **Three-lane risk guardrail == the autonomy policy:** each candidate change is
+  judged safe-reversible (**auto-apply**) / uncertain-destructive
+  (**`pending_approval`**, ask first) / out-of-control (**problem + escalate**).
+- **Escalation routes by runtime mode:** supervisor over the bus if dvalin is
+  reachable, else **parked for the human-at-login greeting** (`regin chat` opens
+  with health status + the problems/changes it needs help with). Replaces an
+  active push channel. Note: mode is currently inferred only from persona config
+  and the escalation bridge has no offline fallback — both are gaps.
+- Captured as **DISC-008** (to-be state), **DISC-009** (remediation + guardrail),
+  **DISC-010** (mode-routed escalation + login greeting), **DISC-011** (ITIL model
+  extensions: incident `blocked`+workaround, `change.problem_id`, change
+  `pending_approval`, problem hypotheses; drop redundant `incidents.problem_id`).
+  Still to open: DISC-012 operator skill catalog, DISC-013 scheduling+resilience,
+  DISC-014 apk/rpm. All under MILESTONE-0.5.0; resolving open sub-questions via
+  guided Q&A before minting FEATs.
+
 ### 2026-06-17 — methodology install
 - Ported the dvalin V-Model methodology into this repo: `AGENTS.md`,
   `.repo/project/skills/` (canonical, verbatim), `.repo/project/audit/rules/`,
