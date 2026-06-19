@@ -18,6 +18,7 @@ pub mod protocol;
 pub mod reflect;
 pub mod remediation;
 pub mod repo;
+pub mod safelane;
 pub mod schedule;
 pub mod skillpkg;
 pub mod skills;

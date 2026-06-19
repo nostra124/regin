@@ -131,16 +131,19 @@ pub struct RemediationOutcome {
 }
 
 /// Route a candidate fix for `incident_id`, recording the ITIL artifacts and KPI:
-/// - **auto-apply**: an applied change (+ `remediation.auto`);
+/// - **auto-apply**: an applied change (+ `remediation.auto`), with the captured
+///   `backout` (FEAT-039) persisted on the change's `before` field for rollback;
 /// - **pending_approval**: a change staged for approval (counted on approval);
 /// - **escalate**: a problem linked to the incident (+ `remediation.escalated`).
 ///
 /// `ceiling_allows` is whether the capability ceiling (FEAT-038) permits the fix.
+/// `backout` is the safe-lane gate's captured rollback plan, if any.
 pub fn record_and_route(
     conn: &Connection,
     incident_id: &str,
     fix: &CandidateFix,
     ceiling_allows: bool,
+    backout: Option<&str>,
 ) -> Result<RemediationOutcome> {
     let lane = route(fix, ceiling_allows);
     let outcome = match lane {
@@ -151,7 +154,7 @@ pub fn record_and_route(
                 &fix.description,
                 Some(incident_id),
                 None,
-                None,
+                backout,
                 None,
             )?;
             db::change_apply(conn, &change.id)?;
@@ -249,11 +252,12 @@ mod tests {
     fn auto_apply_records_applied_change_and_kpi() {
         let c = conn();
         let inc = db::incident_open(&c, "disk full", "", "high", "monitor", Some("disk")).unwrap();
-        let out = record_and_route(&c, &inc.id, &fix(RiskClass::Safe, true), true).unwrap();
+        let out = record_and_route(&c, &inc.id, &fix(RiskClass::Safe, true), true, Some("restore /tmp from snapshot s1")).unwrap();
         assert_eq!(out.lane, Lane::AutoApply);
         let chg = db::change_get(&c, out.change_id.as_ref().unwrap()).unwrap().unwrap();
         assert_eq!(chg.status, "applied");
         assert_eq!(chg.incident_id.as_deref(), Some(inc.id.as_str()));
+        assert_eq!(chg.before.as_deref(), Some("restore /tmp from snapshot s1"), "backout persisted for rollback");
         assert_eq!(kpi::kpi_count(&c, kpi::M_REMEDIATION_AUTO, "1970-01-01T00:00:00Z").unwrap(), 1);
     }
 
@@ -261,7 +265,7 @@ mod tests {
     fn uncertain_fix_is_staged_for_approval() {
         let c = conn();
         let inc = db::incident_open(&c, "config drift", "", "medium", "monitor", Some("svc")).unwrap();
-        let out = record_and_route(&c, &inc.id, &fix(RiskClass::Uncertain, true), true).unwrap();
+        let out = record_and_route(&c, &inc.id, &fix(RiskClass::Uncertain, true), true, None).unwrap();
         assert_eq!(out.lane, Lane::PendingApproval);
         let chg = db::change_get(&c, out.change_id.as_ref().unwrap()).unwrap().unwrap();
         assert_eq!(chg.status, "pending_approval");
@@ -273,7 +277,7 @@ mod tests {
     fn out_of_control_opens_problem_and_escalates() {
         let c = conn();
         let inc = db::incident_open(&c, "hardware fault", "", "critical", "monitor", Some("disk")).unwrap();
-        let out = record_and_route(&c, &inc.id, &fix(RiskClass::OutOfControl, false), true).unwrap();
+        let out = record_and_route(&c, &inc.id, &fix(RiskClass::OutOfControl, false), true, None).unwrap();
         assert_eq!(out.lane, Lane::Escalate);
         let pid = out.problem_id.unwrap();
         assert!(db::problem_get(&c, &pid).unwrap().is_some());
