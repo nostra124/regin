@@ -56,14 +56,33 @@ intent*". Neither extreme is right. regin needs a self-optimizing framework that
    (false confidence, missed real deviations), regin must fall back to LLM judgment
    (demote). Promotion is reversible.
 
-5. **Measurability (the CSI metrics).** regin tracks and optimizes against:
-   - **cost** — tokens / spend per period (NanoGPT API),
-   - **coverage & precision** — incident precision/recall, missed deviations,
-   - **service outcomes** — availability/reliability of the monitored services,
-   - **problem rate** — chronic problems over time.
-   The optimization target: **reduce cost over time while holding or raising
-   reliability and lowering the problem count.** regin should derive this framework
-   itself and prove the trend with numbers.
+5. **Measurability — the KPI framework.** regin tracks a bounded KPI set (and may
+   extend it over time). Two framing rules first:
+   - **Reliability is a constraint, not a currency.** The objective is *minimize
+     cost **subject to** reliability/precision staying at or above target*. Cost may
+     never be bought at the expense of the to-be state — otherwise a naïve
+     cost-minimizer "optimizes" by judging less and missing deviations.
+   - **North-star pairing:** *cost per period* ↓ **while** *time-in-deviation* ↓
+     (cumulative time reality ≠ the to-be state). Both falling together is the proof
+     the framework works.
+
+   | Group | KPI | Why it steers |
+   |---|---|---|
+   | Economics | LLM spend & tokens / period; cost per evaluation; cost per incident caught | the spend being optimized |
+   | Economics | **Automation ratio** — % of checks served by the cheap deterministic tier vs the LLM tier | the direct measure of "senseful full automation" progress |
+   | Economics | **Notice-filter savings** — % log volume / tokens filtered before the LLM | the main cost lever |
+   | Economics | **Cost avoided** — counterfactual LLM cost displaced by promoted checks | proves promotion pays |
+   | Detection | Incident **precision** (true / raised → alert-noise) & **recall** (caught / actual → escape rate) | not too noisy, not blind |
+   | Detection | **MTTD** — mean time to detect a deviation | how fast off-target is seen |
+   | Reliability | **Time-in-deviation** + per-service availability | the actual outcome |
+   | Reliability | **MTTR** — mean time to restore to target; change success & rollback rate | how fast/cleanly we recover (ties DISC-009) |
+   | Reliability | Incident **recurrence rate** → problem rate / open-problem aging | chronic-issue pressure |
+   | Self-optim. | **Promotion error rate** — promoted checks later demoted; demotion latency | the self-optimizer must not silently degrade reliability |
+   | Autonomy | **Autonomy ratio** — % incidents auto-remediated vs escalated to a human | toil saved (ties DISC-009/010) |
+
+   regin derives and maintains this itself, and must show the **trends** (slopes),
+   not just point values. Explicitly *out* of the steering set (drill-downs, not
+   KPIs): raw event counts, per-domain dashboards, per-skill token breakdowns.
 
 ## Variants considered
 
@@ -89,17 +108,20 @@ human-approved and graduate to autonomous once the metrics are trustworthy.
 
 ## Open questions (resolving with user)
 
-1. **Metrics surface** — where do cost/coverage/reliability metrics live and how
-   are they shown? (A CSI section in the `regin chat` login greeting? a `regin
-   metrics` view? both?) Stored in SQLite alongside ITIL records?
-2. **Promotion trigger** — how many consistent LLM verdicts (and what confidence)
+1. **Objective + v1 KPI core** — is the constrained objective (minimise cost s.t.
+   reliability/precision ≥ target) the right framing? Which KPIs are v1-core vs
+   deferred?
+2. **Metrics surface** — where do the KPIs live and how are they shown? (A CSI
+   section in the `regin chat` login greeting? a `regin metrics` view? both?)
+   Stored in SQLite alongside ITIL records?
+3. **Promotion trigger** — how many consistent LLM verdicts (and what confidence)
    before a pattern is promoted to a deterministic check? Human-approved promotion
    first, or autonomous-with-audit from the start?
-3. **Notice-filter representation** — regex/rule files per log, or learned filters?
+4. **Notice-filter representation** — regex/rule files per log, or learned filters?
    Where stored — the `desired/` files, the skill, or a dedicated filters store?
-4. **Demotion signal** — how does regin detect a promoted check has gone stale or
+5. **Demotion signal** — how does regin detect a promoted check has gone stale or
    wrong, and revert to LLM judgment?
-5. **Boundary with DISC-013 (scheduling) and DISC-008 (structured layer)** — does a
+6. **Boundary with DISC-013 (scheduling) and DISC-008 (structured layer)** — does a
    promoted check write directly into the structured to-be-state file, or into a
    separate "derived checks" store that references it?
 
