@@ -34,7 +34,7 @@ DISC + user decision before a FEAT is minted.
 
 The operator model (autonomous machine operator, ITIL plane) is captured across
 DISC-008..011 below; the operator/foreman plane split is the governing framing
-(see `.repo/dvalin/notes.md`). DISC-013..014 remain to be opened.
+(see `.repo/dvalin/notes.md`). DISC-014 remains to be opened.
 
 | DISC     | Topic                                                            | Status |
 |----------|------------------------------------------------------------------|--------|
@@ -43,7 +43,7 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 | DISC-010 | Mode-routed escalation + standalone login greeting               | filed, decided |
 | DISC-011 | ITIL model extensions (blocking, change→problem, approval, hypotheses) | filed, decided |
 | DISC-012 | Operator skill catalog (which monitors/remediations)             | filed, decided |
-| DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | to open |
+| DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | filed, decided |
 | DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |
 | DISC-015 | Adaptive monitoring economics (LLM-judged triage self-optimizing to cheap checks; CSI) | filed, decided |
 | DISC-016 | Periodic operator self-audit (recurring CSI review; promoted-check demotion) | filed, decided |
