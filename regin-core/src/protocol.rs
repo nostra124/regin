@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::desired::{DesiredInfo, DesiredState};
 use crate::filters::FilterRule;
+use crate::greeting::Greeting;
 use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
     Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
@@ -198,6 +199,11 @@ pub enum Request {
     /// Report the current autonomy posture and the evidence behind it.
     #[serde(rename = "posture")]
     PostureQuery,
+
+    // --- Login greeting (FEAT-043) ---
+    /// The login greeting: health line + parked actionable items.
+    #[serde(rename = "greeting")]
+    GreetingQuery,
 }
 
 /// Response from daemon to CLI.
@@ -302,6 +308,9 @@ pub enum Response {
         change_success_rate: f64,
         promotion_error_rate: f64,
     },
+
+    #[serde(rename = "greeting")]
+    GreetingResp { greeting: Box<Greeting> },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

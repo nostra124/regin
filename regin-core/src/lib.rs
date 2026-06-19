@@ -8,6 +8,7 @@ pub mod desired;
 pub mod filters;
 pub mod escalation;
 pub mod foreman;
+pub mod greeting;
 pub mod guardrail;
 pub mod db;
 pub mod kpi;

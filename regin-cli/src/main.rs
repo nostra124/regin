@@ -192,6 +192,9 @@ enum Commands {
     /// Show the adaptive autonomy posture and the evidence behind it (FEAT-040).
     Posture,
 
+    /// Show the login greeting: health + parked items needing a decision (FEAT-043).
+    Greeting,
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -693,6 +696,7 @@ async fn main() -> Result<()> {
         },
         Commands::Mode => cmd_mode().await,
         Commands::Posture => cmd_posture().await,
+        Commands::Greeting => cmd_greeting().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1194,6 +1198,10 @@ async fn cmd_chat() -> Result<()> {
 
     println_color("regin — Linux server administration agent", Color::Yellow);
     println_color("Commands: /new  /history  /quit", Color::DarkGrey);
+    // FEAT-043: open with the login greeting (health + parked actionable items).
+    if let Ok(Response::GreetingResp { greeting }) = rpc(&Request::GreetingQuery).await {
+        render_greeting(&greeting);
+    }
     println!();
 
     let mut history: Vec<ChatMessage> = Vec::new();
@@ -1802,6 +1810,34 @@ async fn cmd_mode() -> Result<()> {
             println!("  last reachable: {}", last_ok.as_deref().unwrap_or("never"));
             println!("  consecutive failures: {failures}");
         }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+fn render_greeting(g: &regin_core::greeting::Greeting) {
+    println_color(&g.health_line(), Color::DarkGrey);
+    if !g.has_actions() {
+        return;
+    }
+    if !g.pending_changes.is_empty() {
+        println_color("changes awaiting approval:", Color::Yellow);
+        for a in &g.pending_changes {
+            println!("  {}  {}", sid(&a.id), a.title);
+        }
+    }
+    if !g.decision_problems.is_empty() {
+        println_color("problems needing a decision:", Color::Yellow);
+        for a in &g.decision_problems {
+            println!("  {}  {}", sid(&a.id), a.title);
+        }
+    }
+}
+
+async fn cmd_greeting() -> Result<()> {
+    match rpc(&Request::GreetingQuery).await? {
+        Response::GreetingResp { greeting } => render_greeting(&greeting),
         Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }

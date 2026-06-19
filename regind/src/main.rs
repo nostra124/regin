@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context, Result};
 use regin_core::{
     bus, config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
+    greeting,
     mode,
     posture,
     protocol::{Request, Response},
@@ -619,6 +620,25 @@ async fn dispatch(
                 change_success_rate: summary.change_success_rate,
                 promotion_error_rate: summary.promotion_error_rate,
             }).await?;
+        }
+
+        // --- Login greeting (FEAT-043) ---
+        Request::GreetingQuery => {
+            let configured = bus::BusClient::from_env().is_ok();
+            let g = {
+                let db = state.db.lock().expect("DB poisoned");
+                let last_ok = db::setting_get(&db, "bus.last_ok").ok().filter(|s| !s.is_empty());
+                let failures: u32 = db::setting_get(&db, "bus.failures").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let reach = mode::ReachabilityState {
+                    last_ok: last_ok.as_deref()
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.with_timezone(&chrono::Utc)),
+                    consecutive_failures: failures,
+                };
+                let m = mode::effective_mode(configured, &reach, chrono::Utc::now(), mode::ModePolicy::default());
+                greeting::build(&db, &m.to_string())?
+            };
+            send(w, &Response::GreetingResp { greeting: Box::new(g) }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
