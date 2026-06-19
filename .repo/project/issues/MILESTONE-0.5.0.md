@@ -1,7 +1,7 @@
 ---
 milestone: 0.5.0
 title: Standalone operator hardening — docs, man pages, packaging, operator skills
-status: active
+status: complete
 depends_on: 0.4.0
 ---
 
