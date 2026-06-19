@@ -195,6 +195,12 @@ enum Commands {
     /// Show the login greeting: health + parked items needing a decision (FEAT-043).
     Greeting,
 
+    /// Active push for critical items (opt-in, off by default) (FEAT-044).
+    Push {
+        #[command(subcommand)]
+        action: PushAction,
+    },
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -592,6 +598,12 @@ enum ProblemAction {
 }
 
 #[derive(Subcommand)]
+enum PushAction {
+    /// Send a test notification over the configured channel.
+    Test,
+}
+
+#[derive(Subcommand)]
 enum FiltersAction {
     /// List loaded notice-filter rules (system + user).
     List,
@@ -697,6 +709,9 @@ async fn main() -> Result<()> {
         Commands::Mode => cmd_mode().await,
         Commands::Posture => cmd_posture().await,
         Commands::Greeting => cmd_greeting().await,
+        Commands::Push { action } => match action {
+            PushAction::Test => cmd_ok(Request::PushTest).await,
+        },
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {

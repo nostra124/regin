@@ -7,6 +7,7 @@ use regin_core::{
     mode,
     posture,
     protocol::{Request, Response},
+    push,
     reflect, repo, schedule, skills,
     tools,
     types::ChatMessage,
@@ -639,6 +640,19 @@ async fn dispatch(
                 greeting::build(&db, &m.to_string())?
             };
             send(w, &Response::GreetingResp { greeting: Box::new(g) }).await?;
+        }
+
+        // --- Active push (FEAT-044) ---
+        Request::PushTest => {
+            let (channel, target) = {
+                let db = state.db.lock().expect("DB poisoned");
+                (db::setting_get(&db, "push.channel")?, db::setting_get(&db, "push.target")?)
+            };
+            let ch = push::Channel::parse(&channel);
+            match push::send(ch, &target, "regin test", "active-push test notification (FEAT-044)").await {
+                Ok(()) => send(w, &Response::Ok { message: format!("Test notification sent via {channel}") }).await?,
+                Err(e) => send(w, &Response::Error { message: format!("Push failed: {e}") }).await?,
+            }
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

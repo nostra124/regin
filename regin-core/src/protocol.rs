@@ -204,6 +204,11 @@ pub enum Request {
     /// The login greeting: health line + parked actionable items.
     #[serde(rename = "greeting")]
     GreetingQuery,
+
+    // --- Active push (FEAT-044) ---
+    /// Send a test notification over the configured push channel.
+    #[serde(rename = "push_test")]
+    PushTest,
 }
 
 /// Response from daemon to CLI.

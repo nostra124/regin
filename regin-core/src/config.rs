@@ -31,6 +31,11 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("posture.min_samples", "10", "Minimum change outcomes before auto-apply can graduate (FEAT-040)"),
     ("posture.min_success_rate", "0.9", "Change-success rate required to graduate auto-apply (FEAT-040)"),
     ("posture.max_promotion_error_rate", "0.1", "Promotion-error rate above which posture demotes to conservative (FEAT-040)"),
+    ("push.enabled", "false", "Opt-in active push for critical items (off by default, FEAT-044)"),
+    ("push.channel", "none", "Active-push channel: none|ntfy|webhook (FEAT-044)"),
+    ("push.target", "", "Active-push target URL (ntfy topic URL or webhook endpoint)"),
+    ("push.min_severity", "critical", "Minimum severity to actively push (FEAT-044)"),
+    ("push.min_interval_secs", "300", "Minimum seconds between active pushes (rate limit)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
