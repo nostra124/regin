@@ -47,6 +47,32 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-19 — DISC-015 decided (KPIs + promotion loop) + DISC-016 (self-audit) spawned
+- **DISC-015 resolved via guided Q&A.** KPI framework reviewed/expanded first:
+  reliability is a **constraint not a currency** (minimise cost s.t. reliability ≥
+  floor); north-star = cost ↓ while **time-in-deviation** ↓; added **automation
+  ratio** (the direct "senseful full automation" gauge), notice-filter savings,
+  cost-avoided, MTTD/MTTR, recurrence, **promotion-error rate**, **autonomy ratio**.
+  - Q1 objective = constrained; **all four KPI groups in v1** (schema defined now;
+    promotion-error/autonomy KPIs report once their features exist).
+  - Q2 surface = CSI summary in the login greeting (DISC-010) + a `regin metrics`
+    command; KPIs in SQLite beside ITIL records.
+  - Q3 promotion = **autonomous + audit trail**; criteria are **regin-owned and
+    self-adapting**, grounded in *both* N-consistent+confidence and a statistical
+    error-bound; governed by the promotion-error KPI, safety-netted by demotion.
+  - Q5 notice filters = regin-managed, hand-editable **rule files** in a dedicated
+    filters store (separate from `desired/`).
+  - Q6 promoted checks = a **separate machine-managed derived-checks store** that
+    references the to-be-state (not written into the human-authored structured
+    layer); scheduler (DISC-013) runs them.
+- **DISC-016 — periodic operator self-audit (NEW, from DISC-015 Q4).** Demotion is
+  just one function: a regular (e.g. monthly) wide-lens CSI review that re-judges
+  promoted checks, reviews KPI trends, tunes promotion criteria + notice filters,
+  checks to-be-state drift, and files findings as ITIL artefacts (heavier actions
+  via the DISC-009 approval gate). Immediate demotion on real-world
+  contradiction/override stays in DISC-015. Cadence/scope/authority/cost-ceiling
+  are its open questions.
+
 ### 2026-06-19 — DISC-008 resolved + DISC-015 (monitoring economics) spawned
 - **DISC-008 (to-be state) closed via guided Q&A:**
   - **Three-layer target:** explicit markdown (intent) + structured assertions

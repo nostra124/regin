@@ -125,10 +125,73 @@ human-approved and graduate to autonomous once the metrics are trustworthy.
    promoted check write directly into the structured to-be-state file, or into a
    separate "derived checks" store that references it?
 
-## Decision
+## Decision (resolving with user — guided Q&A 2026-06-19)
 
-_Pending — being resolved with the user (guided Q&A)._
+**Q1a — Objective: constrained.** Minimise cost **subject to** reliability/precision
+≥ a target floor. Reliability is never traded for cost; the optimizer only banks
+savings in the slack above the floor.
 
-## Spawned features
+**Q1b — v1 KPI scope: the full set.** All four groups ship in v1 — cost +
+automation ratio, time-in-deviation + availability, precision/recall + MTTD/MTTR,
+promotion-error + autonomy ratio. Caveat recorded: the **KPI schema is fully
+defined and stored in v1**, but the promotion-error and autonomy KPIs only begin
+**reporting** once their underlying features exist (promotion loop; auto-remediation
+per DISC-009) — v1 is not forced to build the whole promotion+remediation stack
+merely to populate a metric.
 
-_Pending DISC close._
+**Q2 — Metrics surface: greeting + command.** KPIs are stored in SQLite alongside
+the ITIL records. A short CSI summary (north-star trend + anything breaching the
+reliability floor) appears in the `regin chat` login greeting (DISC-010); a full
+`regin metrics` command exposes the trends/history on demand.
+
+**Q3 — Promotion: autonomous, with regin-owned criteria.** regin promotes a
+recurring verdict into a deterministic check **autonomously**, logging every
+promotion to a reviewable/revertible audit trail. The promotion **criteria are
+regin's own and self-adapting**, but grounded in *both* inputs: (a) N consistent
+clear-cut verdicts + high LLM confidence, and (b) a statistical error-bound on the
+candidate check. The **promotion-error KPI** governs the criteria and **demotion**
+is the safety net, so self-tuning cannot silently erode reliability (consistent
+with the constrained objective).
+
+**Q4 — Demotion: via a periodic self-audit (→ DISC-016).** Stale/wrong promoted
+checks are caught by a **regular operator self-audit** (e.g. monthly) that re-judges
+what promoted checks now decide (LLM shadow-audit style) and demotes those that
+miss/over-fire — *plus* real-world contradictions (a later incident, a human
+override) demote immediately between audits. The audit is broader than demotion
+(it also reviews KPIs, promotion criteria, drift, and more) and is **spun out to
+its own discovery — DISC-016 (periodic operator self-audit)**.
+
+**Q5 — Notice filters: regin-managed rule files.** Human-readable regex/match rules
+in a **dedicated filters store** (sibling to the `desired/` files), authored and
+maintained by regin, hand-editable and reviewable — kept separate from the
+desired-state so "what good looks like" never mixes with "what to ignore".
+
+**Q6 — Promoted checks: a separate derived-checks store.** Promoted deterministic
+checks live in their own **machine-managed derived-checks store** that *references*
+the to-be-state, distinct from the human-authored `desired/` structured layer
+(DISC-008). This keeps a clean line between human-declared intent and
+regin-synthesised checks; the scheduler (DISC-013) runs them on their promoted
+cadence.
+
+All six questions resolved. Demotion detail depends on **DISC-016**.
+
+## Spawned features (to derive on close)
+
+- **Two-tier evaluation engine** — periodic LLM review tier (judges
+  deviation-worth against the three-layer to-be state) + a cheap deterministic
+  check tier; both feed the incident/problem flow.
+- **KPI store + `regin metrics`** — full KPI schema (all four groups) in SQLite
+  alongside ITIL records, constrained-objective evaluation (cost s.t. reliability ≥
+  floor), trend tracking; CSI summary in the login greeting (DISC-010) + a
+  `regin metrics` command. Promotion-error/autonomy KPIs report once their features
+  land.
+- **Promotion loop** — autonomous, audited promotion of stable LLM verdicts into a
+  separate **derived-checks store**; regin-owned, self-adapting criteria grounded
+  in N-consistent+confidence and a statistical error-bound; governed by the
+  promotion-error KPI.
+- **Notice filters** — regin-managed, hand-editable rule files in a dedicated
+  filters store; measured by notice-filter savings.
+- **Demotion hook** — immediate demotion on real-world contradiction/override; the
+  periodic re-audit lives in **DISC-016**.
+- **"Senseful full automation" operator directive** added to regin's operator-plane
+  system prompt.
