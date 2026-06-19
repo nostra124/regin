@@ -38,10 +38,10 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 
 | DISC     | Topic                                                            | Status |
 |----------|------------------------------------------------------------------|--------|
-| DISC-008 | Machine to-be-state model (explicit md + implicit thresholds)    | filed, open |
+| DISC-008 | Machine to-be-state model (explicit md + implicit thresholds)    | filed, decided |
 | DISC-009 | Operator remediation + three-lane risk guardrail (auto/approve/problem) | filed, decided |
 | DISC-010 | Mode-routed escalation + standalone login greeting               | filed, open |
-| DISC-011 | ITIL model extensions (blocking, change→problem, approval, hypotheses) | filed, open |
+| DISC-011 | ITIL model extensions (blocking, change→problem, approval, hypotheses) | filed, decided |
 | DISC-012 | Operator skill catalog (which monitors/remediations)             | to open |
 | DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | to open |
 | DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |

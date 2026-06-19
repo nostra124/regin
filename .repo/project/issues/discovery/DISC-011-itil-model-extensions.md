@@ -61,10 +61,40 @@ yet.
 2. Hypothesis tracking depth — minimal (list + status) for now?
 3. Recurrence threshold (default 3) — keep, or make it part of the to-be-state doc?
 
-## Decision
+## Decision (resolved with user — guided Q&A 2026-06-19)
 
-_Pending — being resolved with the user (guided Q&A)._
+**Q1 — `blocked` is a first-class incident status.** Add `blocked` to the incident
+lifecycle + a `workaround` TEXT field. An incident linked to an open problem can be
+parked in `blocked` and run on the recorded workaround until the problem's resolving
+change lands. Explicit, queryable, auditable — **not** derived (derivation conflates
+"has a workaround" with "is blocked").
+
+**Q2 — Hypotheses: minimal structured rows.** A lightweight `problem_hypotheses`
+table (`id`, `problem_id`, `text`, `status` ∈ `created|validating|confirmed|rejected`,
+timestamps), optionally with a temporary monitor attached for long-run validation. No
+experiment/evidence framework yet (deferred).
+
+**Q3 — Recurrence threshold: global default + per-domain override.** A global config
+default `operator.recurrence_threshold` (default **3**), overridable per-domain in the
+DISC-008 to-be-state doc; the loop raises a problem when an incident recurs beyond the
+effective threshold for its domain.
+
+Settled (confirmed from Describe / Variants):
+- **`change.problem_id`** added — a change can resolve a *problem* (ride out of it),
+  not just an incident.
+- **Change approval gate** — `pending_approval` state between `planned` and `applied`,
+  with `approved_by` + `approved_at` (the DISC-009 lanes; audit trail).
+- **Cleanup** — drop the redundant `incidents.problem_id` column; keep the
+  `problem_incidents` join (many incidents → one problem).
 
 ## Spawned features
 
-_Pending DISC close._
+- **ITIL schema extensions** — incident `blocked` status + `workaround`;
+  `change.problem_id`; change `pending_approval` + `approved_by` / `approved_at`;
+  `problem_hypotheses` table; drop `incidents.problem_id` (keep the join). Idempotent
+  additive migration on `regin-core` `types.rs` + `db.rs`; CLI verbs updated to set/
+  show the new fields (e.g. `incident block`, `change approve`, `problem hypothesis
+  …`). Milestone 0.5.0.
+- **Recurrence-to-problem rule** — global `operator.recurrence_threshold` (default 3)
+  + per-domain override read from the to-be-state doc (DISC-008); the operator loop
+  raises a problem once recurrence exceeds the effective threshold. Milestone 0.5.0.
