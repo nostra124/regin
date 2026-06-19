@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::desired::{DesiredInfo, DesiredState};
 use crate::filters::FilterRule;
+use crate::audit::Finding;
 use crate::greeting::Greeting;
 use crate::promotion::DerivedCheck;
 use crate::kpi::{KpiSummary, Objective};
@@ -215,6 +216,11 @@ pub enum Request {
     /// List active derived (promoted) deterministic checks.
     #[serde(rename = "checks_list")]
     ChecksList,
+
+    // --- Self-audit (FEAT-055) ---
+    /// Run the periodic CSI self-audit now and file its findings.
+    #[serde(rename = "audit_run")]
+    AuditRun,
 }
 
 /// Response from daemon to CLI.
@@ -325,6 +331,9 @@ pub enum Response {
 
     #[serde(rename = "derived_checks")]
     DerivedChecks { checks: Vec<DerivedCheck> },
+
+    #[serde(rename = "audit")]
+    AuditResult { findings: Vec<Finding>, trimmed: bool, opened: usize },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

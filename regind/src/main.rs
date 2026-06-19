@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    bus, config, context, db, desired, filters, kpi,
+    audit, bus, config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
+    opskill,
     greeting,
     mode,
     posture,
@@ -660,6 +661,28 @@ async fn dispatch(
         Request::ChecksList => {
             let checks = { let db = state.db.lock().expect("DB poisoned"); promotion::active_checks(&db)? };
             send(w, &Response::DerivedChecks { checks }).await?;
+        }
+
+        // --- Self-audit (FEAT-055) ---
+        Request::AuditRun => {
+            let skill_domains: Vec<String> = opskill::load_all(
+                &config::system_operator_skills_dir(),
+                &config::user_operator_skills_dir().unwrap_or_default(),
+            ).into_iter().map(|s| s.domain).collect();
+            let desired_domains: Vec<String> = desired::load_all_desired(
+                &config::system_desired_dir(),
+                &config::user_desired_dir().unwrap_or_default(),
+            ).into_iter().map(|d| d.domain).collect();
+            let since = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            let (report, opened) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let floor: f64 = db::setting_get(&db, "kpi.reliability_floor")?.parse().unwrap_or(0.95);
+                let summary = kpi::summary(&db, &since)?;
+                let report = audit::run_audit(&summary, floor, &skill_domains, &desired_domains, false);
+                let opened = audit::file_findings(&db, &report)?;
+                (report, opened)
+            };
+            send(w, &Response::AuditResult { findings: report.findings, trimmed: report.trimmed, opened }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

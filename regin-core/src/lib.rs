@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod audit;
 pub mod bus;
 pub mod chair;
 pub mod config;

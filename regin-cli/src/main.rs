@@ -204,6 +204,9 @@ enum Commands {
     /// List active derived (promoted) deterministic checks (FEAT-051).
     Checks,
 
+    /// Run the periodic CSI self-audit now and file its findings (FEAT-055).
+    Audit,
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -716,6 +719,7 @@ async fn main() -> Result<()> {
             PushAction::Test => cmd_ok(Request::PushTest).await,
         },
         Commands::Checks => cmd_checks().await,
+        Commands::Audit => cmd_audit().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1852,6 +1856,28 @@ fn render_greeting(g: &regin_core::greeting::Greeting) {
             println!("  {}  {}", sid(&a.id), a.title);
         }
     }
+}
+
+async fn cmd_audit() -> Result<()> {
+    match rpc(&Request::AuditRun).await? {
+        Response::AuditResult { findings, trimmed, opened } => {
+            if trimmed {
+                println_color("(audit trimmed to stay within budget)", Color::DarkGrey);
+            }
+            if findings.is_empty() {
+                println_color("Self-audit clean — no findings.", Color::Green);
+                return Ok(());
+            }
+            for f in &findings {
+                print_color(&format!("  [{}] ", f.area), Color::Yellow);
+                println!("{}", f.message);
+            }
+            println_color(&format!("{opened} new problem(s) filed for review.", ), Color::DarkGrey);
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
 }
 
 async fn cmd_checks() -> Result<()> {
