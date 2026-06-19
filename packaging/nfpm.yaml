@@ -18,10 +18,10 @@ homepage: "https://github.com/nostra124/regin"
 license: "MIT"
 
 contents:
-  # binaries
-  - src: ./target/release/regin
+  # binaries (musl static-pie: one build runs on glibc and musl/Alpine)
+  - src: ./target/x86_64-unknown-linux-musl/release/regin
     dst: /usr/bin/regin
-  - src: ./target/release/regind
+  - src: ./target/x86_64-unknown-linux-musl/release/regind
     dst: /usr/bin/regind
 
   # man pages (generated from the clap surface, FEAT-019)

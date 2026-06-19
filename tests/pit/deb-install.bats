@@ -10,8 +10,7 @@ setup() {
 @test "deb: installs and regin runs on debian:stable-slim" {
   run podman run --rm -v "$BATS_TEST_DIRNAME/../../dist:/dist:ro" debian:stable-slim sh -c '
     set -e
-    apt-get update -qq
-    apt-get install -y -qq /dist/regin_*.deb
+    dpkg -i /dist/regin_*.deb
     regin --version
     regin --help >/dev/null
     test -f /usr/share/man/man1/regin.1
