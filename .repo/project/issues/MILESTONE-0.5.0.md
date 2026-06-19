@@ -34,7 +34,8 @@ DISC + user decision before a FEAT is minted.
 
 The operator model (autonomous machine operator, ITIL plane) is captured across
 DISC-008..011 below; the operator/foreman plane split is the governing framing
-(see `.repo/dvalin/notes.md`). DISC-014 remains to be opened.
+(see `.repo/dvalin/notes.md`). All operator-plane discoveries (DISC-008..016) are
+now filed and decided.
 
 | DISC     | Topic                                                            | Status |
 |----------|------------------------------------------------------------------|--------|
@@ -44,7 +45,7 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 | DISC-011 | ITIL model extensions (blocking, change→problem, approval, hypotheses) | filed, decided |
 | DISC-012 | Operator skill catalog (which monitors/remediations)             | filed, decided |
 | DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | filed, decided |
-| DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |
+| DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | filed, decided |
 | DISC-015 | Adaptive monitoring economics (LLM-judged triage self-optimizing to cheap checks; CSI) | filed, decided |
 | DISC-016 | Periodic operator self-audit (recurring CSI review; promoted-check demotion) | filed, decided |
 
@@ -53,7 +54,7 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 | Prerequisite | Ticket | Status |
 |---|---|---|
 | 100% test coverage | (file at planning) | pending |
-| Native packages, all platforms + GitHub release | FEAT-020 (deb); DISC-012 (apk/rpm) | in-flight |
+| Native packages, all platforms + GitHub release | FEAT-020 → nfpm deb+rpm+apk (DISC-014) | in-flight |
 | Install script (PIT-tested) | (file at planning) | pending |
 | GitHub wiki landing page | (file at planning) | pending |
 | Mobile app (if defined by project) | N/A | n/a |

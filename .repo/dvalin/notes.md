@@ -239,3 +239,49 @@ toolchain**. Read it at the start of every session; append to it at the end.
   capability backlog — DISC-009 (decided, to derive), DISC-015 (decided, to
   derive), and open/to-open DISC-008/010/011/012/013/014/016. These need user
   decisions before FEATs; out of scope for "till 0.6" identity-plane finalization.
+
+### 2026-06-19 — Operator plane fully decided (DISC-011/010/016 resolved; DISC-012/013/014 opened + resolved)
+- All operator-plane discoveries (DISC-008..016) are now **filed + decided**. MILESTONE
+  -0.5.0 table updated to match (several were stale "open"). FEATs not yet minted —
+  derive as the 0.5.0 capability batch.
+- **DISC-011 (ITIL extensions):** `blocked` = first-class incident status + `workaround`;
+  hypotheses = minimal structured rows (text + created→validating→confirmed/rejected);
+  recurrence threshold = global default 3 + per-domain override in the to-be-state doc.
+  Confirmed: `change.problem_id`, change `pending_approval` + approver/approved_at, drop
+  redundant `incidents.problem_id` (keep join). → 2 features.
+- **DISC-010 (escalation + greeting):** mode detection = Variant C (effective mode =
+  configured target AND recent reachability). Login greeting = actionable items
+  (pending-approval changes + problems) + one-line health (counts open incidents).
+  **Critical push = opt-in, critical-only, OFF by default, IN v1** (ntfy/webhook/email)
+  — user upgraded from my "defer". On bus recovery = auto-flush parked items,
+  re-validated. Distinct from FEAT-015 (dev-plane ticket mint vs human decision/approval).
+  → 5 features.
+- **DISC-016 (periodic self-audit):** Variant A scheduled audit skill. Cadence =
+  adaptive (monthly default). Scope = full CSI sweep (demotion, KPI review, criteria
+  tuning, filter hygiene, to-be-state drift, coverage), modular per dependency. Output =
+  report + ITIL artefacts + summary in `regin metrics`/login greeting. Authority = reuse
+  DISC-009 lanes; to-be-state edits ALWAYS need approval. Cost = budgeted; skip/trim is a
+  tracked event. → 2 features.
+- **DISC-012 (operator skill catalog) — opened + resolved:** anatomy = structured bundle
+  (monitor + to-be-state domain file + remediation playbook, fixes tagged for DISC-009
+  lanes), one skill per domain. v1 scope = **broad ~12 domains** (disk, services, memory/
+  load, logs, security-updates, certificates, backups, network, time-sync, users/auth,
+  processes, firewall) — user chose broad over my core-8. Remediation = mixed per-domain
+  (remediate disk/services/logs/time-sync/backups/security-updates; monitor-only +
+  escalate the rest). Packaging = `regin-operator-skills` system package (3 existing
+  report-only skills fold in), user-overridable. → 3 features. Distinct from DISC-007
+  (org/role packaging).
+- **DISC-013 (scheduling + resilience) — opened + resolved:** cadence = skill-declared
+  default + user/config override (+ optional to-be-state per-domain tune); automatic
+  jitter. LLM outage/over-budget = exponential backoff + **degrade to DISC-015
+  deterministic checks** + self-incident if prolonged. Missed runs = coalesced run-once
+  catch-up (staleness-checked). Watchdog = systemd lingering service + internal heartbeat
+  + self-incident on repeated skill failure. → 4 features.
+- **DISC-014 (apk/rpm) — opened + resolved:** add **both** rpm + apk; build via **nfpm**
+  (one config → deb+rpm+apk, replacing the deb-only FEAT-020 recipe); land **in 0.5.0**.
+  Consequence: **profile §7 deb-only → deb/rpm/apk first-class** (gate removed); FEAT-020
+  reworked to nfpm. → 3 features (nfpm packaging, per-format install PITs, profile §7
+  update).
+- **Next:** mint the 0.5.0 operator-capability FEATs from DISC-009/010/011/012/013/014/
+  015/016 (currently all decided, features listed but not yet ticketed), then sequence
+  0.5.0 delivery. profile.md §7 still says deb-only — update when FEAT work starts.
