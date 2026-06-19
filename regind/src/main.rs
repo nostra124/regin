@@ -140,7 +140,7 @@ async fn handle_connection(stream: tokio::net::UnixStream, state: Arc<AppState>)
     Ok(())
 }
 
-async fn send(w: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> Result<()> {
+async fn send<W: tokio::io::AsyncWrite + Unpin>(w: &mut W, r: &Response) -> Result<()> {
     let mut json = serde_json::to_string(r)?;
     json.push('\n');
     w.write_all(json.as_bytes()).await?;
@@ -196,12 +196,12 @@ fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
 
 /// The agentic loop: call LLM with tools, execute tool calls, repeat until text.
 /// Streams text chunks and tool activity to the client.
-async fn agentic_chat(
+async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
     state: &Arc<AppState>,
     _conversation_id: &str,
     user_messages: &[ChatMessage],
     cwd: Option<&str>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<String> {
     let client = state.llm_client()?;
     // FEAT-011: a configured persona scopes the tool ceiling + shapes the prompt.
@@ -262,10 +262,10 @@ async fn agentic_chat(
     }
 }
 
-async fn dispatch(
+async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
     req: Request,
     state: &Arc<AppState>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<()> {
     match req {
         Request::Ping => send(w, &Response::Pong).await?,
@@ -747,11 +747,11 @@ async fn dispatch(
 }
 
 /// Run a skill through the agentic loop (with tools).
-async fn exec_skill_agentic(
+async fn exec_skill_agentic<W: tokio::io::AsyncWrite + Unpin>(
     skill: &skills::Skill,
     state: &Arc<AppState>,
     cwd: Option<&str>,
-    w: &mut tokio::net::unix::OwnedWriteHalf,
+    w: &mut W,
 ) -> Result<regin_core::types::TaskRun> {
     info!(skill = %skill.name, "Running skill (agentic)");
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -916,4 +916,83 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let mut term = signal::unix::signal(signal::unix::SignalKind::terminate()).expect("SIGTERM");
     tokio::select! { _ = ctrl_c => {} _ = term.recv() => {} }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    use regin_core::db;
+    use tokio::io::AsyncReadExt;
+
+    fn state() -> Arc<AppState> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        Arc::new(AppState { db: Mutex::new(conn) })
+    }
+
+    /// Drive the real dispatch over an in-memory duplex and collect responses.
+    async fn run(req: Request, st: &Arc<AppState>) -> Vec<Response> {
+        let (mut client, mut server) = tokio::io::duplex(256 * 1024);
+        dispatch(req, st, &mut server).await.unwrap();
+        drop(server); // EOF for the reader
+        let mut out = String::new();
+        client.read_to_string(&mut out).await.unwrap();
+        out.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<Response>(l).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn ping_pongs() {
+        let st = state();
+        assert!(matches!(run(Request::Ping, &st).await.as_slice(), [Response::Pong]));
+    }
+
+    #[tokio::test]
+    async fn itil_incident_and_change_flow() {
+        let st = state();
+        // open an incident, then list it
+        let r = run(Request::IncidentOpen { title: "disk full".into(), description: "x".into(), severity: "high".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Ok { .. }]));
+        let listed = run(Request::IncidentList { status: None }, &st).await;
+        match listed.as_slice() {
+            [Response::Incidents { incidents }] => assert_eq!(incidents.len(), 1),
+            other => panic!("expected one incident, got {other:?}"),
+        }
+        // record a change, then list it
+        run(Request::ChangeRecord { title: "fix".into(), description: "".into(), incident_id: None, problem_id: None, before: None, after: None }, &st).await;
+        let changes = run(Request::ChangeList, &st).await;
+        match changes.as_slice() {
+            [Response::Changes { changes }] => assert_eq!(changes.len(), 1),
+            other => panic!("expected one change, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_queries_respond() {
+        let st = state();
+        assert!(matches!(run(Request::Metrics { since_days: Some(7) }, &st).await.as_slice(), [Response::Metrics { .. }]));
+        assert!(matches!(run(Request::ModeQuery, &st).await.as_slice(), [Response::ModeInfo { .. }]));
+        assert!(matches!(run(Request::FiltersList, &st).await.as_slice(), [Response::Filters { .. }]));
+        assert!(matches!(run(Request::DesiredList, &st).await.as_slice(), [Response::DesiredListResp { .. }]));
+        assert!(matches!(run(Request::ProblemList { status: None }, &st).await.as_slice(), [Response::Problems { .. }]));
+    }
+
+    #[tokio::test]
+    async fn unknown_incident_show_errors() {
+        let st = state();
+        let r = run(Request::IncidentShow { id: "nope".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn send_serializes_one_line_per_response() {
+        let mut buf: Vec<u8> = Vec::new();
+        // Vec<u8> implements tokio AsyncWrite
+        send(&mut buf, &Response::Pong).await.unwrap();
+        send(&mut buf, &Response::Ok { message: "hi".into() }).await.unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s.lines().count(), 2);
+    }
 }
