@@ -30,5 +30,6 @@ pub mod schedule;
 pub mod skillpkg;
 pub mod skills;
 pub mod tools;
+pub mod two_tier;
 pub mod types;
 pub mod worker;
