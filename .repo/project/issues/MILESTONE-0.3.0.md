@@ -1,3 +1,8 @@
+---
+status: done
+phase: alpha
+---
+
 # v0.3.0 — Cave foreman & messaging-bus client
 
 regin becomes a first-class citizen of the dvalin organization: it runs as the
@@ -19,6 +24,19 @@ local CLI workers (claude/opencode), and adopts a **role persona** with its
 
 ## Depends on
 - dvalin **MILESTONE-1.1.0** (bus) + **1.2.0** (skill deployment). Cross-repo.
+
+## Tickets (derived from DISC-004/005/007)
+
+| FEAT | Title | depends_on | Status |
+|------|-------|-----------|--------|
+| FEAT-010 | Bus client (identity, inbox/outbox, two modes) | — | **done** |
+| FEAT-011 | Role-persona config + capability(=tool) ceiling | — | **done** |
+| FEAT-012 | Local CLI-worker supervisor (claude/opencode) | — | **done** |
+| FEAT-013 | Foreman mode: intake → supervise → handover | 010, 012 | **done** |
+| FEAT-014 | Skill-package structure (base + role/area) | — | **done** |
+| FEAT-015 | Escalation bridge: problem → dvalin ticket | 010 | **done** |
+
+Order: 010/011/012/014 → 013 → 015.
 
 ## Out of scope
 - A `ROADMAP.md` (the roadmap is the collective `MILESTONE-*.md` files).

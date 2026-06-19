@@ -1,3 +1,8 @@
+---
+status: done
+phase: alpha
+---
+
 # v0.4.0 — Governance & continuity participation
 
 regin participates in the organization's governance and resilience: it **chairs
@@ -21,3 +26,13 @@ regin's half of dvalin MILESTONE-1.4.0 (governance) and 1.5.0 (continuity).
 
 ## Out of scope
 - A `ROADMAP.md` (the roadmap is the collective `MILESTONE-*.md` files).
+
+## Tickets (derived from DISC-004/006/007/037)
+
+| FEAT | Title | depends_on | Status |
+|------|-------|-----------|--------|
+| FEAT-016 | Meeting-chair: agenda → minutes + action-items over the bus | 010 | **done** |
+| FEAT-017 | Individual planning cycle (When/Which → plan; emit upward) | 010 | **done** |
+| FEAT-018 | Deputy mode: continuity brief + observer + failover | 011, 014 | **done** |
+
+Order: 016/017/018 independent.

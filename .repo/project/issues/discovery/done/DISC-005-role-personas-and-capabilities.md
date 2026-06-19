@@ -2,7 +2,7 @@
 id: DISC-005
 type: discovery
 priority: medium
-status: open
+status: done
 complexity: L
 spawned_features: ~
 ---

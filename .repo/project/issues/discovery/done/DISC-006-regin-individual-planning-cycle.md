@@ -2,7 +2,7 @@
 id: DISC-006
 type: discovery
 priority: medium
-status: open
+status: done
 spawned_features: ~
 complexity: M
 ---

@@ -181,10 +181,18 @@ async fn agentic_chat(
     w: &mut tokio::net::unix::OwnedWriteHalf,
 ) -> Result<String> {
     let client = state.llm_client()?;
-    let tool_defs = tools::tool_definitions();
+    // FEAT-011: a configured persona scopes the tool ceiling + shapes the prompt.
+    let persona = regin_core::persona::Persona::from_env().unwrap_or(None);
+    let tool_defs = tools::tool_definitions_for(persona.as_ref());
 
-    // Build full message list: system context + user conversation
-    let mut msgs: Vec<Value> = build_context(state, cwd);
+    // Build full message list: persona preamble + system context + user conversation
+    let mut msgs: Vec<Value> = Vec::new();
+    if let Some(p) = &persona {
+        if !p.prompt.is_empty() {
+            msgs.push(serde_json::json!({ "role": "system", "content": p.prompt }));
+        }
+    }
+    msgs.extend(build_context(state, cwd));
     for m in user_messages {
         msgs.push(NanoGptClient::msg_to_value(m));
     }
@@ -204,7 +212,7 @@ async fn agentic_chat(
                         arguments: call.function.arguments.clone(),
                     }).await?;
 
-                    let result = tools::execute_tool(call, cwd).await;
+                    let result = tools::execute_tool_gated(call, cwd, persona.as_ref()).await;
 
                     send(w, &Response::ToolResultEvent {
                         name: result.name.clone(),

@@ -47,6 +47,15 @@ pub struct ToolResult {
     pub success: bool,
 }
 
+/// Tool definitions filtered to a persona's capability ceiling (FEAT-011), so the
+/// LLM is only offered tools it is allowed to call. `None` → all tools.
+pub fn tool_definitions_for(persona: Option<&crate::persona::Persona>) -> Vec<ToolDef> {
+    tool_definitions()
+        .into_iter()
+        .filter(|d| crate::persona::allows(persona, &d.function.name))
+        .collect()
+}
+
 /// Return all tool definitions for the LLM.
 pub fn tool_definitions() -> Vec<ToolDef> {
     vec![
@@ -152,6 +161,28 @@ pub fn tool_definitions() -> Vec<ToolDef> {
             },
         },
     ]
+}
+
+/// Execute a tool call, enforcing a persona's capability ceiling (FEAT-011): a
+/// tool outside the persona's allowed set is refused before it runs.
+pub async fn execute_tool_gated(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    persona: Option<&crate::persona::Persona>,
+) -> ToolResult {
+    if !crate::persona::allows(persona, &call.function.name) {
+        let role = persona.map(|p| p.role.as_str()).unwrap_or("?");
+        return ToolResult {
+            tool_call_id: call.id.clone(),
+            name: call.function.name.clone(),
+            output: format!(
+                "Refused: tool '{}' is outside the '{}' persona's capability ceiling",
+                call.function.name, role
+            ),
+            success: false,
+        };
+    }
+    execute_tool(call, default_cwd).await
 }
 
 /// Execute a tool call and return the result.
@@ -371,4 +402,36 @@ fn strip_tags(s: &str) -> String {
         .replace("&quot;", "\"")
         .replace("&#x27;", "'")
         .replace("&nbsp;", " ")
+}
+
+#[cfg(test)]
+mod persona_gate_tests {
+    use super::*;
+    use crate::persona::Persona;
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: FunctionCall { name: name.into(), arguments: "{}".into() },
+        }
+    }
+
+    #[tokio::test]
+    async fn gated_tool_outside_ceiling_is_refused() {
+        let p = Persona::from_toml("role = \"reader\"\ntools = [\"read_file\"]\n").unwrap();
+        let r = execute_tool_gated(&call("web_search"), None, Some(&p)).await;
+        assert!(!r.success);
+        assert!(r.output.contains("ceiling"), "got: {}", r.output);
+    }
+
+    #[test]
+    fn filtered_definitions_match_the_ceiling() {
+        let p = Persona::from_toml("role = \"reader\"\ntools = [\"read_file\", \"web_search\"]\n").unwrap();
+        let names: Vec<String> = tool_definitions_for(Some(&p)).into_iter().map(|d| d.function.name).collect();
+        assert!(names.contains(&"read_file".to_string()) && names.contains(&"web_search".to_string()));
+        assert!(!names.contains(&"bash".to_string()), "bash filtered out");
+        // unscoped sees everything
+        assert_eq!(tool_definitions_for(None).len(), tool_definitions().len());
+    }
 }

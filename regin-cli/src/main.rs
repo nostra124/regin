@@ -173,8 +173,137 @@ enum Commands {
         action: ContextAction,
     },
 
+    /// Messaging bus: send · inbox (role@cave, via the cave inbox/outbox files).
+    Bus {
+        #[command(subcommand)]
+        action: BusAction,
+    },
+
+    /// Show the active role persona (REGIN_PERSONA) and its capability ceiling.
+    Persona,
+
+    /// Chair a meeting: collect inbox reports → compile minutes → emit to dvalin.
+    Meeting {
+        #[command(subcommand)]
+        action: MeetingAction,
+    },
+
+    /// Run the individual planning cycle (aggregate When/Which → plan; emit upward).
+    Plan {
+        /// Cadence: weekly | monthly | yearly
+        #[arg(long, default_value = "weekly")]
+        cadence: String,
+        /// A required capability/skill package this agent needs (repeatable)
+        #[arg(long = "need")]
+        needs: Vec<String>,
+        /// Emit upward signals (priority ask + capability gap) over the bus
+        #[arg(long)]
+        emit: bool,
+        /// Process/project owner address (priority ask). Else REGIN_PROCESS_OWNER.
+        #[arg(long)]
+        owner: Option<String>,
+        /// CAO address (capability gaps). Else REGIN_CAO, else cao@hq.
+        #[arg(long)]
+        cao: Option<String>,
+    },
+
+    /// Foreman mode: drain the inbox, run cave-tasks on local workers, hand over.
+    Foreman {
+        #[command(subcommand)]
+        action: ForemanAction,
+    },
+
+    /// Skill packages: install a regin-*-skills package · list installed.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+
+    /// Deputy mode: assign · show · brief · activate · handback (continuity).
+    Deputy {
+        #[command(subcommand)]
+        action: DeputyAction,
+    },
+
     /// Check if the daemon (regind) is running.
     Ping,
+}
+
+#[derive(Subcommand)]
+enum DeputyAction {
+    /// Assign this regin as the deputy of a role held by a primary
+    Assign { role: String, primary: String },
+    /// Show the current deputy assignment + state + brief
+    Show,
+    /// Set the standing continuity brief (maintained by the primary)
+    Brief { text: String },
+    /// Activate on failover (requires --confirmed by the supervisor)
+    Activate {
+        /// Supervisor confirmation of the failover
+        #[arg(long)]
+        confirmed: bool,
+    },
+    /// Hand back to the primary when it returns
+    Handback,
+}
+
+#[derive(Subcommand)]
+enum SkillAction {
+    /// Install a skill package directory (regin-*-skills) into the user skills store.
+    Install {
+        /// Path to the package directory (contains package.toml + skills/)
+        dir: std::path::PathBuf,
+    },
+    /// List installed skill packages.
+    Packages,
+}
+
+#[derive(Subcommand)]
+enum MeetingAction {
+    /// Chair a meeting: compile minutes from inbox reports and emit them.
+    Chair {
+        /// Meeting name (e.g. board)
+        name: String,
+        /// An agenda item (repeatable; defaults to a standard agenda)
+        #[arg(long = "agenda")]
+        agenda: Vec<String>,
+        /// Address to send the minutes to (else REGIN_MEETING_RECORDER, else dvalin@hq)
+        #[arg(long)]
+        to: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ForemanAction {
+    /// Drain the inbox once: handle each cave-task and post handovers.
+    RunOnce {
+        /// Plan only — show what would run without spawning workers.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BusAction {
+    /// Send a message to a role@cave address (appends to the cave outbox).
+    Send {
+        /// Recipient address (role@cave or owner)
+        to: String,
+        /// Message body
+        body: String,
+        /// Send as a structured (typed JSON) message instead of free text
+        #[arg(long)]
+        structured: bool,
+        /// Optional reference id (e.g. a ticket/handover ref)
+        #[arg(long)]
+        ref_id: Option<String>,
+    },
+    /// Show inbox messages bound for this agent (advances the read cursor).
+    Inbox {
+        /// Peek without advancing the cursor
+        #[arg(long)]
+        peek: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -399,6 +528,17 @@ enum ProblemAction {
     Link { problem_id: String, incident_id: String },
     /// Promote a problem to a known error with a root cause.
     KnownError { id: String, root_cause: String },
+    /// Escalate a problem to dvalin as a BUG/FEAT (structured bus message).
+    Escalate {
+        /// Problem id
+        id: String,
+        /// Ticket kind to request
+        #[arg(long = "as", default_value = "bug")]
+        kind: String,
+        /// dvalin exec address to escalate to (else REGIN_ESCALATION_TO, else cio@hq)
+        #[arg(long)]
+        to: Option<String>,
+    },
     /// Close a problem.
     Close { id: String },
 }
@@ -469,6 +609,7 @@ async fn main() -> Result<()> {
             ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
             ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
             ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
         },
         Commands::Context { action } => match action {
@@ -477,8 +618,275 @@ async fn main() -> Result<()> {
                 cmd_ok(Request::ContextSet { cwd: Some(cwd_string()), content }).await
             }
         },
+        Commands::Bus { action } => match action {
+            BusAction::Send { to, body, structured, ref_id } => cmd_bus_send(&to, &body, structured, ref_id.as_deref()),
+            BusAction::Inbox { peek } => cmd_bus_inbox(peek),
+        },
+        Commands::Persona => cmd_persona(),
+        Commands::Meeting { action } => match action {
+            MeetingAction::Chair { name, agenda, to } => cmd_meeting_chair(&name, agenda, to).await,
+        },
+        Commands::Plan { cadence, needs, emit, owner, cao } => cmd_plan(&cadence, needs, emit, owner, cao).await,
+        Commands::Foreman { action } => match action {
+            ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
+        },
+        Commands::Skill { action } => match action {
+            SkillAction::Install { dir } => cmd_skill_install(&dir),
+            SkillAction::Packages => cmd_skill_packages(),
+        },
+        Commands::Deputy { action } => cmd_deputy(action),
         Commands::Ping => cmd_ping().await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bus (FEAT-010): file-based cave inbox/outbox — no daemon round-trip needed.
+
+fn cmd_bus_send(to: &str, body: &str, structured: bool, ref_id: Option<&str>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED, KIND_UNSTRUCTURED};
+    let client = BusClient::from_env()?;
+    let kind = if structured { KIND_STRUCTURED } else { KIND_UNSTRUCTURED };
+    client.send(to, kind, body, ref_id)?;
+    println!("regin: sent {} -> {to}", client.address());
+    Ok(())
+}
+
+fn cmd_bus_inbox(peek: bool) -> Result<()> {
+    use regin_core::bus::BusClient;
+    let client = BusClient::from_env()?;
+    let msgs = client.inbox(!peek)?;
+    if msgs.is_empty() {
+        println!("regin: inbox empty ({})", client.address());
+        return Ok(());
+    }
+    for m in &msgs {
+        let r = m.ref_id.as_deref().map(|r| format!(" [{r}]")).unwrap_or_default();
+        println!("{} → {} ({}){}: {}", m.sender, m.recipient, m.kind, r, m.body);
+    }
+    Ok(())
+}
+
+async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::foreman::{handover_body, handover_recipient, plan_handover, CaveTask};
+    use regin_core::worker;
+
+    let client = BusClient::from_env()?;
+    // dry-run peeks (does not consume); a real run consumes the inbox.
+    let messages = client.inbox(!dry_run)?;
+    let mut handled = 0;
+    for m in &messages {
+        let Some(task) = CaveTask::from_message(m) else { continue };
+        handled += 1;
+        if dry_run {
+            println!("would run [{}] worker={} task={:?}", task.ref_id.as_deref().unwrap_or("-"), task.worker, task.task);
+            continue;
+        }
+        let kind = match task.worker_kind() {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("skipping cave-task: {e}");
+                continue;
+            }
+        };
+        // NEEDS-LIVE-VERIFICATION: spawns the claude/opencode worker in the cave.
+        let run = worker::run(kind, &task.task, task.cwd.as_deref());
+        let (handover, incident) = plan_handover(&task, &run);
+        let to = handover_recipient(&task, m);
+        client.send(&to, KIND_STRUCTURED, &handover_body(&handover)?, task.ref_id.as_deref())?;
+        println!("handover [{}] outcome={} -> {to}", handover.ref_id.as_deref().unwrap_or("-"), handover.outcome);
+        // discipline boundary: a broken in-cave step becomes an ITIL incident.
+        if let Some(draft) = incident {
+            match rpc(&Request::IncidentOpen { title: draft.title, description: draft.description, severity: draft.severity }).await {
+                Ok(_) => println!("  opened incident for the failed worker run"),
+                Err(e) => eprintln!("  (could not open incident — daemon down? {e})"),
+            }
+        }
+    }
+    println!("regin foreman: handled {handled} cave-task(s)");
+    Ok(())
+}
+
+async fn cmd_problem_escalate(id: &str, kind: &str, to: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::escalation::{body, build, EscalationKind};
+
+    let ekind = EscalationKind::parse(kind)?;
+    // fetch the problem so the escalation carries its title + (root-cause) description
+    let problem = match rpc(&Request::ProblemShow { id: id.to_string() }).await? {
+        Response::Problems { problems } => problems.into_iter().next()
+            .ok_or_else(|| anyhow!("no problem {id}"))?,
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("unexpected: {other:?}")),
+    };
+    let description = problem.root_cause.clone().unwrap_or_else(|| problem.description.clone());
+
+    let client = BusClient::from_env()?;
+    let target = to
+        .or_else(|| std::env::var("REGIN_ESCALATION_TO").ok())
+        .unwrap_or_else(|| "cio@hq".to_string());
+    let esc = build(&problem.id, &problem.title, &description, ekind, client.address());
+    client.send(&target, KIND_STRUCTURED, &body(&esc)?, Some(&esc.ref_id))?;
+
+    // record the escalation on the regin side (a memory note keyed for recall)
+    let note = format!(
+        "Escalated problem {} to dvalin as {} (ref {}) -> {target}",
+        esc.problem_id, esc.ticket, esc.ref_id
+    );
+    let _ = rpc(&Request::MemorySave { category: "escalation".into(), content: note.clone() }).await;
+    println!("regin: {note}");
+    println!("(dvalin will reply with the ticket id, correlated by {})", esc.ref_id);
+    Ok(())
+}
+
+fn cmd_deputy(action: DeputyAction) -> Result<()> {
+    use regin_core::deputy::DeputyStore;
+    let store = DeputyStore::from_env()?;
+    match action {
+        DeputyAction::Assign { role, primary } => {
+            let r = store.assign(&role, &primary)?;
+            println!("regin: deputy of {} (primary {}) — {:?}", r.role, r.primary, r.state);
+        }
+        DeputyAction::Show => match store.load()? {
+            Some(r) => {
+                println!("role:    {}", r.role);
+                println!("primary: {}", r.primary);
+                println!("state:   {:?}", r.state);
+                println!("brief:   {}", if r.brief.is_empty() { "(none)" } else { &r.brief });
+            }
+            None => println!("regin: no deputy assignment"),
+        },
+        DeputyAction::Brief { text } => {
+            store.set_brief(&text)?;
+            println!("regin: continuity brief updated");
+        }
+        DeputyAction::Activate { confirmed } => {
+            let r = store.activate(confirmed)?;
+            println!("regin: deputy ACTIVATED for {} — {:?}", r.role, r.state);
+        }
+        DeputyAction::Handback => {
+            let r = store.handback()?;
+            println!("regin: handed back to primary {} — {:?}", r.primary, r.state);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_skill_install(dir: &std::path::Path) -> Result<()> {
+    use regin_core::skillpkg::Package;
+    let dest = regin_core::config::user_skills_dir()?;
+    let pkg = Package::load(dir)?;
+    let installed = pkg.install(&dest)?;
+    println!("regin: installed {} ({} skills) into {}", pkg.manifest.name, installed.len(), dest.display());
+    for s in installed {
+        println!("  + {s}");
+    }
+    Ok(())
+}
+
+fn cmd_skill_packages() -> Result<()> {
+    let dest = regin_core::config::user_skills_dir()?;
+    let pkgs = regin_core::skillpkg::installed_packages(&dest);
+    if pkgs.is_empty() {
+        println!("regin: no skill packages installed");
+    } else {
+        for p in pkgs {
+            println!("{p}");
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_meeting_chair(name: &str, agenda: Vec<String>, to: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::chair::{collect_reports, compile, minutes_message_body};
+
+    let client = BusClient::from_env()?;
+    let reports = collect_reports(&client.inbox(true)?);
+    // pull the chair's own open ITIL count (best-effort — discipline feed)
+    let open_itil = match rpc(&Request::IncidentList { status: Some("open".into()) }).await {
+        Ok(Response::Incidents { incidents }) => incidents.len(),
+        _ => 0,
+    };
+    let agenda = if agenda.is_empty() {
+        vec!["incidents & problems".to_string(), "delivery status".to_string(), "priorities".to_string()]
+    } else {
+        agenda
+    };
+    let minutes = compile(&agenda, &reports, open_itil);
+    let target = to
+        .or_else(|| std::env::var("REGIN_MEETING_RECORDER").ok())
+        .unwrap_or_else(|| "dvalin@hq".to_string());
+    client.send(&target, KIND_STRUCTURED, &minutes_message_body(name, &minutes), Some(name))?;
+    println!("regin: chaired {name} — {} report(s), {} decision(s), {} action(s) → {target}",
+        reports.len(), minutes.decisions.len(), minutes.action_items.len());
+    Ok(())
+}
+
+async fn cmd_plan(cadence: &str, needs: Vec<String>, emit: bool, owner: Option<String>, cao: Option<String>) -> Result<()> {
+    use regin_core::bus::{BusClient, KIND_STRUCTURED};
+    use regin_core::planning::{build_plan, capability_gap_body, cadence_scope, priority_ask_body};
+
+    if cadence_scope(cadence).is_none() {
+        return Err(anyhow!("unknown cadence {cadence:?} (use weekly|monthly|yearly)"));
+    }
+    // gather decentralized signals (best-effort — work without the daemon too)
+    let schedules: Vec<String> = match rpc(&Request::TaskSchedules).await {
+        Ok(Response::SchedulesList { schedules }) => schedules.into_iter().map(|s| s.skill).collect(),
+        _ => Vec::new(),
+    };
+    let count = |resp: Result<Response>| -> usize {
+        match resp {
+            Ok(Response::Incidents { incidents }) => incidents.len(),
+            Ok(Response::Problems { problems }) => problems.len(),
+            _ => 0,
+        }
+    };
+    let open_incidents = count(rpc(&Request::IncidentList { status: Some("open".into()) }).await);
+    let open_problems = count(rpc(&Request::ProblemList { status: Some("open".into()) }).await);
+    let available = regin_core::config::user_skills_dir().ok()
+        .map(|d| regin_core::skillpkg::installed_packages(&d)).unwrap_or_default();
+
+    let plan = build_plan(cadence, &schedules, &needs, &available, open_incidents, open_problems);
+    println!("{}", serde_json::to_string_pretty(&plan).unwrap_or_default());
+
+    if emit {
+        let client = BusClient::from_env()?;
+        let owner = owner.or_else(|| std::env::var("REGIN_PROCESS_OWNER").ok());
+        if let Some(o) = owner {
+            client.send(&o, KIND_STRUCTURED, &priority_ask_body(&plan), Some(cadence))?;
+            println!("regin: priority ask → {o}");
+        }
+        if let Some(body) = capability_gap_body(&plan) {
+            let cao = cao.or_else(|| std::env::var("REGIN_CAO").ok()).unwrap_or_else(|| "cao@hq".to_string());
+            client.send(&cao, KIND_STRUCTURED, &body, Some(cadence))?;
+            println!("regin: capability gap → {cao} ({} gap(s))", plan.capability_gaps.len());
+        }
+    }
+    Ok(())
+}
+
+fn cmd_persona() -> Result<()> {
+    use regin_core::persona::{Persona, ALL_TOOLS};
+    match Persona::from_env()? {
+        Some(p) => {
+            println!("role:  {}", p.role);
+            if !p.title.is_empty() {
+                println!("title: {}", p.title);
+            }
+            let ceiling = if p.tools.is_empty() {
+                format!("(unscoped — all tools: {})", ALL_TOOLS.join(", "))
+            } else {
+                p.tools.join(", ")
+            };
+            println!("tools: {ceiling}");
+            if !p.prompt.is_empty() {
+                println!("\n{}", p.prompt);
+            }
+        }
+        None => println!("regin: no persona configured (REGIN_PERSONA unset) — running unscoped"),
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
