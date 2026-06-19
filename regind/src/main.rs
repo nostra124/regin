@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    config, context, db, desired, filters, kpi,
+    bus, config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
+    mode,
     protocol::{Request, Response},
     reflect, repo, skills,
     tools,
@@ -561,6 +562,25 @@ async fn dispatch(
                 None => "NOT filtered (would reach the LLM review tier)".to_string(),
             };
             send(w, &Response::Ok { message }).await?;
+        }
+
+        // --- Effective mode (FEAT-041) ---
+        Request::ModeQuery => {
+            let configured = bus::BusClient::from_env().is_ok();
+            let (last_ok, failures) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let last_ok = db::setting_get(&db, "bus.last_ok").ok().filter(|s| !s.is_empty());
+                let failures: u32 = db::setting_get(&db, "bus.failures").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                (last_ok, failures)
+            };
+            let reach = mode::ReachabilityState {
+                last_ok: last_ok.as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|d| d.with_timezone(&chrono::Utc)),
+                consecutive_failures: failures,
+            };
+            let m = mode::effective_mode(configured, &reach, chrono::Utc::now(), mode::ModePolicy::default());
+            send(w, &Response::ModeInfo { mode: m.to_string(), configured, last_ok, failures }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

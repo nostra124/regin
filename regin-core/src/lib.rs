@@ -11,6 +11,7 @@ pub mod guardrail;
 pub mod db;
 pub mod kpi;
 pub mod llm;
+pub mod mode;
 pub mod persona;
 pub mod planning;
 pub mod protocol;

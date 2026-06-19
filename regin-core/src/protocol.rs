@@ -188,6 +188,11 @@ pub enum Request {
     /// Test whether an observation would be filtered.
     #[serde(rename = "filters_test")]
     FiltersTest { domain: String, text: String },
+
+    // --- Effective mode (FEAT-041) ---
+    /// Report regin's effective operating mode (org vs standalone).
+    #[serde(rename = "mode")]
+    ModeQuery,
 }
 
 /// Response from daemon to CLI.
@@ -279,6 +284,9 @@ pub enum Response {
 
     #[serde(rename = "filters")]
     Filters { rules: Vec<FilterRule> },
+
+    #[serde(rename = "mode")]
+    ModeInfo { mode: String, configured: bool, last_ok: Option<String>, failures: u32 },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

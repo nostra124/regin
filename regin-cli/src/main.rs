@@ -186,6 +186,9 @@ enum Commands {
         action: FiltersAction,
     },
 
+    /// Show regin's effective operating mode: org (supervisor) vs standalone (FEAT-041).
+    Mode,
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -685,6 +688,7 @@ async fn main() -> Result<()> {
             FiltersAction::List => cmd_filters_list().await,
             FiltersAction::Test { domain, text } => cmd_ok(Request::FiltersTest { domain, text }).await,
         },
+        Commands::Mode => cmd_mode().await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1782,6 +1786,22 @@ fn fmt_secs(secs: i64) -> String {
     } else {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     }
+}
+
+async fn cmd_mode() -> Result<()> {
+    match rpc(&Request::ModeQuery).await? {
+        Response::ModeInfo { mode, configured, last_ok, failures } => {
+            let color = if mode == "org" { Color::Green } else { Color::Yellow };
+            print!("effective mode: ");
+            println_color(&mode, color);
+            println!("  bus configured: {configured}");
+            println!("  last reachable: {}", last_ok.as_deref().unwrap_or("never"));
+            println!("  consecutive failures: {failures}");
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
 }
 
 async fn cmd_filters_list() -> Result<()> {

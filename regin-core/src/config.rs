@@ -25,6 +25,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),
     ("monitor.recurrence_threshold", "3", "Incidents of one skill before a problem is opened"),
     ("kpi.reliability_floor", "0.95", "Minimum incident-resolution rate the CSI objective must hold (cost is minimized subject to this)"),
+    ("bus.last_ok", "", "Last successful supervisor-bus interaction (RFC3339); drives effective-mode detection"),
+    ("bus.failures", "0", "Consecutive supervisor-bus failures since the last success (effective-mode debounce)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
