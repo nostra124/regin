@@ -2,9 +2,9 @@
 id: DISC-018
 type: discovery
 priority: high
-status: open
+status: done
 complexity: L
-spawned_features: ~
+spawned_features: [FEAT-028, FEAT-029, FEAT-030, FEAT-031, FEAT-032]
 ---
 
 # DISC-018 — Body / Soul / Mind: dual decision modes and the soul gate
@@ -17,40 +17,58 @@ regin knows* (the memory plane), this is *how regin decides*. It introduces an
 **thinking mode**, so that consequential actions are checked against the agent's
 true identity before they execute.
 
-The framing is body / soul / mind:
+## Sharp glossary (load-bearing — used verbatim in the spawned features)
 
-| Concept | Human | regin |
+Four non-overlapping terms. Identity is split cleanly: **Persona** is the *outward*
+identity (the mask), **Soul** is the *inner* identity (the values). The **Mind** is
+not an identity at all — it is the reasoning engine; its tendency to rationalize is
+*why* the Soul exists, not a second self.
+
+| Term | One line | In regin |
 |---|---|---|
-| **Body** | action | tool dispatch + answer + memory read/write — **already built** |
-| **Mind** | logic, planning, decision; *home of the ego / "false" identity* | the main LLM context — decides and derives actions |
-| **Soul** | emotion, gut, the *true / inner identity* | a second, deliberately **starved** LLM call that returns a **feeling**, grounded only in long-term identity memory |
+| **Persona** | the *outward* identity — the role regin acts as (the mask) | role id + system-prompt preamble + capability/tool ceiling (FEAT-011) + a per-role **value overlay** (FEAT-030) |
+| **Mind** | the *reasoning* — plans and decides | the planning/deciding LLM call; emits a plan + actions |
+| **Soul** | the *inner* identity — the values-grounded conscience | a deliberately **starved** LLM vote on the Mind's plan; sees plan intent + values only |
+| **Body** | *execution* | tool dispatch — **already built** |
+
+**Where values live (decided 2026-06-19): core + per-role overlay.** The Soul votes
+from the agent's persistent **identity-core values** (portable, in `identity.db`,
+travels across machines *and* across Persona changes) **plus** the **active Persona's
+value overlay** (role-specific emphasis, in `persona.toml`, swappable with the role).
+Persona is the *hat*; the Soul's core is the *character*. The hat adds emphasis; it
+never resets the character.
+
+The two runtime modes, in this vocabulary:
+
+- **Act** — `Mind → Body`. One pass. Fast. The default.
+- **Deliberate** — `Mind ⇄ Soul → Body`. Mind plans read-only, Soul votes, they
+  iterate, the approved plan is executed.
 
 ## Describe
 
-Today regin runs one way: the **mind** receives input, decides, and emits tool
-calls (`mind → body`). That is the right behaviour under pressure and for routine
-work — but it leaves the clever-but-rationalizing mind (the ego) unchecked on
-consequential, novel decisions. Good decisions, in the body/soul/mind model, need
-the **soul's** approval: a non-logical, identity-aligned *feeling* on whether the
+Today regin runs one way: the **Mind** receives input, decides, and emits tool
+calls (`Mind → Body`). That is the right behaviour under pressure and for routine
+work — but it leaves the Mind's reasoning unchecked on consequential, novel
+decisions, where a clever chain of logic can rationalize the wrong thing. Good
+decisions need the **Soul's** approval: a values-grounded *feeling* on whether the
 plan is the right thing to do. This is not folklore — it mirrors dual-process
 theory (System 1 gut vs System 2 logic) and Damasio's somatic-marker hypothesis
 (emotion as the gate on sound decisions).
 
-Two runtime modes:
+The two modes in detail:
 
-- **Act mode** (`mind → body`): input → mind decides → body executes tool calls +
-  answers. One pass. Fast. The default.
-- **Deliberate mode** (`mind ⇄ soul → body`):
-  1. The mind plans **read-only** (may read memory + environment, **no side
+- **Act** (`Mind → Body`): input → Mind decides → Body executes. One pass. Fast.
+  The default.
+- **Deliberate** (`Mind ⇄ Soul → Body`):
+  1. The Mind plans **read-only** (may read memory + environment, **no side
      effects**) and produces a plan + reasoning.
-  2. A second, constrained call — the **soul** — returns a confidence/feeling vote
-     on the plan. It is deliberately **starved**: it sees the plan's *intent /
-     summary* and the identity-memory subset only — **not** the mind's full
-     reasoning, the tools, or the environment. That starvation is the mechanism
-     that makes it a *feeling* and not a second round of logic the ego could
-     out-argue.
-  3. Mind and soul iterate until aligned.
-  4. The approved plan is handed to the action executor to run.
+  2. The **Soul** returns a confidence/feeling vote on the plan. It is deliberately
+     **starved**: it sees the plan's *intent / summary* and the values subset only —
+     **not** the Mind's full reasoning, the tools, or the environment. That
+     starvation is what makes it a *feeling* and not a second round of logic the
+     Mind could out-argue.
+  3. Mind and Soul iterate until aligned.
+  4. The approved plan is handed to the executor to run.
 
 Deliberate mode is therefore, structurally, a **safety gate**: read-only planning
 plus a veto before any side-effecting / outward / irreversible action — an
@@ -83,7 +101,7 @@ automated form of "confirm before doing something hard to undo."
 
 | Variant | Summary | Key trade-off |
 |---|---|---|
-| A | No soul — mind only (status quo) | Simplest; the ego is unchecked, no identity alignment |
+| A | No Soul — Mind only (status quo) | Simplest; the Mind's reasoning is unchecked, no values alignment |
 | B | Soul as a *smarter critic* with full context (LLM-as-judge / Reflexion) | Strong logic check; but it merely re-runs the mind's reasoning — not a *feeling*, and can be out-argued |
 | C | Soul as a **starved, identity-grounded feeling vote with veto** | A true gut-check the ego can't out-argue; needs mode plumbing + grounding curation |
 | D | Hard-coded rule/policy gate | Predictable; can't capture identity nuance, brittle on novel decisions |
@@ -103,10 +121,13 @@ After the iteration cap without alignment, the action is **denied** and **escala
 to a human** via the escalation bridge (FEAT-015), routed by runtime mode
 (DISC-010). Humans break genuine mind/soul ties.
 
-**Q3 — Soul grounding: a values/principles subset (the "true identity").** The soul
+**Q3 — Soul grounding: a values/principles subset (the "true identity").** The Soul
 reads a deliberately narrow slice of long-term memory: **pinned + human-authored
-facts + a new `principle` (values) category + topic summaries** — not arbitrary
-facts/trivia. This is the identity it votes from.
+facts + the `principle` (values) category + topic summaries** — not arbitrary
+facts/trivia. The active grounding is the **identity-core values** (portable, in
+`identity.db`) **unioned with the active Persona's value overlay** (per-role, in
+`persona.toml`) — core + overlay (decided 2026-06-19). This is the identity it votes
+from.
 
 **Q4 — Calibration: capture & learn.** Each deliberation (plan + soul vote +
 eventual outcome) is recorded as a new episode kind **`deliberation`** and fed to
@@ -115,10 +136,9 @@ over time — the identity grows wiser, closing the self-improvement loop with t
 memory plane.
 
 **Q5 — Deriving the principles: seed + reflection-proposes + human-ratified.**
-Principles are **not** ordinary reflection output — that would let the mind (ego)
-author the very values it is checked against (the conscience would not be
-independent). Instead, a **three-stage pipeline** with reflection bounded to a
-*proposing* role:
+Principles are **not** ordinary reflection output — that would let the Mind author
+the very values it is checked against (the conscience would not be independent).
+Instead, a **three-stage pipeline** with reflection bounded to a *proposing* role:
 
 1. **Seed (constitution).** A small **human/owner-authored charter** of core values +
    red-lines, set once and **not runtime-rewritable by the agent** — same
@@ -165,17 +185,23 @@ day-to-day logic.
 3. Tuning the soul's confidence threshold / posture (conservative ↔ trusting) —
    possibly **adaptive** like DISC-009 Q2 (earn-trust-with-evidence on KPIs).
 
-## Spawned features (to derive on close)
+## Spawned features (derived — see `feature/open/`)
 
-- **Dual-mode agent loop** — act vs deliberate; mode selection from action risk
-  (DISC-009) + persona/role + urgency.
-- **The soul gate** — constrained, identity-grounded vote (confidence + verdict),
-  veto, iteration cap, default-deny + escalate (DISC-010/FEAT-015).
-- **Values/principles grounding & derivation** — `principle` memory category +
-  human-authored seed charter; reflection proposes principle *candidates* from
-  `deliberation` outcomes; **human-ratified promotion** to active principle
-  (FEAT-015/DISC-010); sticky / slow-decay; extends DISC-017.
-- **Deliberation capture** — `deliberation` episode kind (plan + vote + outcome)
-  wired into consolidation for calibration (extends DISC-017).
-- **Read-only planner / executor split** — planning has no side effects; the
-  approved plan is executed separately.
+- **FEAT-028 — Dual-mode agent loop** (act vs deliberate): mode selection from
+  action risk (DISC-009) + Persona + urgency; deliberate = read-only Mind plan →
+  gate → executor (the planner/executor split lives here).
+- **FEAT-029 — The Soul gate**: starved, values-grounded vote (confidence +
+  `{approve | revise | veto}`), veto, iteration cap, default-deny + escalate
+  (DISC-010/FEAT-015).
+- **FEAT-030 — Soul configurator + value catalog**: bundled catalog of prominent
+  values from human history/literature; CLI to seed the charter; Persona→values
+  defaults (derive a starting set from the role). This is the Q5 *seed* stage.
+- **FEAT-031 — Principle derivation & ratification**: `principle` memory category;
+  reflection proposes candidates from `deliberation` outcomes; **human-ratified**
+  promotion; sticky / slow-decay. The Q5 *propose* + *promote* stages.
+- **FEAT-032 — Deliberation capture**: `deliberation` episode kind (plan + vote +
+  outcome) wired into consolidation for calibration (Q4).
+
+FEAT-030/031 extend the DISC-017 memory schema (add the `principle` category);
+FEAT-032 adds the `deliberation` episode kind — both as additive migrations on the
+FEAT-021 store.
