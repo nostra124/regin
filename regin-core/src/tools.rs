@@ -163,22 +163,21 @@ pub fn tool_definitions() -> Vec<ToolDef> {
     ]
 }
 
-/// Execute a tool call, enforcing a persona's capability ceiling (FEAT-011): a
-/// tool outside the persona's allowed set is refused before it runs.
+/// Execute a tool call, enforcing the guardrail (FEAT-038): the static global
+/// red-lines and the editable per-role capability ceiling (FEAT-011). A denial is
+/// refused before the tool runs, with an audit message naming the deciding layer.
 pub async fn execute_tool_gated(
     call: &ToolCall,
     default_cwd: Option<&str>,
     persona: Option<&crate::persona::Persona>,
 ) -> ToolResult {
-    if !crate::persona::allows(persona, &call.function.name) {
-        let role = persona.map(|p| p.role.as_str()).unwrap_or("?");
+    let decision = crate::guardrail::check_tool_call(call, persona);
+    if let Some(audit) = decision.audit() {
+        tracing::warn!(tool = %call.function.name, "guardrail refused: {audit}");
         return ToolResult {
             tool_call_id: call.id.clone(),
             name: call.function.name.clone(),
-            output: format!(
-                "Refused: tool '{}' is outside the '{}' persona's capability ceiling",
-                call.function.name, role
-            ),
+            output: format!("Refused: {audit}"),
             success: false,
         };
     }

@@ -6,6 +6,7 @@ pub mod deputy;
 pub mod desired;
 pub mod escalation;
 pub mod foreman;
+pub mod guardrail;
 pub mod db;
 pub mod kpi;
 pub mod llm;
