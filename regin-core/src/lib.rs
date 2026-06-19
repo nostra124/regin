@@ -17,6 +17,7 @@ pub mod planning;
 pub mod protocol;
 pub mod reflect;
 pub mod repo;
+pub mod schedule;
 pub mod skillpkg;
 pub mod skills;
 pub mod tools;

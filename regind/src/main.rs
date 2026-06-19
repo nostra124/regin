@@ -5,7 +5,7 @@ use regin_core::{
     llm::{LlmTurn, NanoGptClient},
     mode,
     protocol::{Request, Response},
-    reflect, repo, skills,
+    reflect, repo, schedule, skills,
     tools,
     types::ChatMessage,
 };
@@ -297,8 +297,20 @@ async fn dispatch(
         }
 
         Request::TaskSchedule { skill, interval } => {
-            let _ = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &skill)?;
-            let next_run = compute_next_run(&interval)?;
+            let loaded = skills::load_skill(&config::system_skills_dir(), &config::user_skills_dir()?, &skill)?;
+            // FEAT-047: "default" resolves the skill's declared cadence, overridden
+            // by a to-be-state per-domain tune; an explicit interval wins outright.
+            let interval = if interval == "default" {
+                let skill_default = schedule::parse_skill_cadence(&loaded.prompt);
+                let tune = desired::cadence_tune(
+                    &config::system_desired_dir(), &config::user_desired_dir().unwrap_or_default(), &skill,
+                );
+                schedule::resolve_cadence(skill_default.as_deref(), None, tune.as_deref())
+                    .ok_or_else(|| anyhow!("no cadence declared for '{skill}' (pass an explicit interval)"))?
+            } else {
+                interval
+            };
+            let next_run = compute_next_run(&interval, &skill)?;
             { let db = state.db.lock().expect("DB poisoned"); db::save_schedule(&db, &skill, &interval, &next_run)?; }
             send(w, &Response::Ok { message: format!("'{skill}' scheduled {interval} (next: {next_run})") }).await?;
         }
@@ -738,7 +750,7 @@ async fn schedule_checker(state: Arc<AppState>) {
                 }
             }
             let last_run = chrono::Utc::now().to_rfc3339();
-            if let Ok(next) = compute_next_run(&sched.interval) {
+            if let Ok(next) = compute_next_run(&sched.interval, &sched.skill) {
                 let db = state.db.lock().expect("DB poisoned");
                 let _ = db::update_schedule_after_run(&db, &sched.skill, &last_run, &next);
             }
@@ -781,7 +793,7 @@ async fn reflection_checker(state: Arc<AppState>) {
             let db = state.db.lock().expect("DB poisoned");
             db::setting_get(&db, "memory.reflect_interval").unwrap_or_else(|_| "daily".into())
         };
-        let dur = parse_interval(&interval_str)
+        let dur = schedule::parse_interval(&interval_str)
             .ok()
             .and_then(|d| d.to_std().ok())
             .unwrap_or_else(|| std::time::Duration::from_secs(86_400));
@@ -801,30 +813,10 @@ async fn reflection_checker(state: Arc<AppState>) {
     }
 }
 
-fn parse_interval(interval: &str) -> Result<chrono::Duration> {
-    match interval {
-        "hourly" => Ok(chrono::Duration::hours(1)),
-        "daily" => Ok(chrono::Duration::days(1)),
-        "weekly" => Ok(chrono::Duration::weeks(1)),
-        "monthly" => Ok(chrono::Duration::days(30)),
-        s if s.starts_with("every ") => {
-            let spec = &s[6..];
-            let unit = spec.chars().last().ok_or_else(|| anyhow!("Empty interval"))?;
-            let num: i64 = spec[..spec.len() - 1].parse().context("Bad number")?;
-            match unit {
-                's' => Ok(chrono::Duration::seconds(num)),
-                'm' => Ok(chrono::Duration::minutes(num)),
-                'h' => Ok(chrono::Duration::hours(num)),
-                'd' => Ok(chrono::Duration::days(num)),
-                _ => Err(anyhow!("Unknown unit: {unit}")),
-            }
-        }
-        _ => Err(anyhow!("Unknown interval: {interval}")),
-    }
-}
-
-fn compute_next_run(interval: &str) -> Result<String> {
-    Ok((chrono::Utc::now() + parse_interval(interval)?).to_rfc3339())
+/// Next run for a skill, with deterministic per-skill jitter to smooth load
+/// (FEAT-047). Up to 10% of the interval is added, staggered by skill name.
+fn compute_next_run(interval: &str, skill: &str) -> Result<String> {
+    Ok(schedule::next_run_with_jitter(interval, skill, 0.1, chrono::Utc::now())?.to_rfc3339())
 }
 
 async fn shutdown_signal() {

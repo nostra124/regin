@@ -112,6 +112,8 @@ pub struct DesiredState {
     pub assertions: Vec<Assertion>,
     /// Per-domain override for the recurrence→problem threshold (FEAT-036).
     pub recurrence_threshold: Option<usize>,
+    /// Per-domain monitor cadence tune (FEAT-047), e.g. `hourly` / `every 15m`.
+    pub cadence: Option<String>,
     pub source: DesiredSource,
     pub path: PathBuf,
 }
@@ -132,6 +134,7 @@ pub struct DesiredInfo {
 #[derive(Deserialize)]
 struct AssertionsToml {
     recurrence_threshold: Option<usize>,
+    cadence: Option<String>,
     #[serde(default, rename = "assert")]
     asserts: Vec<AssertToml>,
 }
@@ -195,7 +198,7 @@ pub fn parse_desired_state(
     path: PathBuf,
 ) -> Result<DesiredState> {
     let (intent, block) = split_assertions_block(content);
-    let (assertions, recurrence_threshold) = match block {
+    let (assertions, recurrence_threshold, cadence) = match block {
         Some(src) => {
             let parsed: AssertionsToml = toml::from_str(&src)
                 .with_context(|| format!("invalid assertions block in desired state `{domain}`"))?;
@@ -210,15 +213,16 @@ pub fn parse_desired_state(
                     description: a.description,
                 });
             }
-            (asserts, parsed.recurrence_threshold)
+            (asserts, parsed.recurrence_threshold, parsed.cadence)
         }
-        None => (Vec::new(), None),
+        None => (Vec::new(), None, None),
     };
     Ok(DesiredState {
         domain: domain.to_string(),
         intent,
         assertions,
         recurrence_threshold,
+        cadence,
         source,
         path,
     })
@@ -309,6 +313,15 @@ pub fn recurrence_threshold(
     match load_desired(system_dir, user_dir, domain) {
         Ok(Some(ds)) => ds.recurrence_threshold.unwrap_or(default),
         _ => default,
+    }
+}
+
+/// The per-domain cadence tune from the to-be-state doc, if any (FEAT-047).
+/// Fail-safe — a missing/unreadable file yields `None`.
+pub fn cadence_tune(system_dir: &Path, user_dir: &Path, domain: &str) -> Option<String> {
+    match load_desired(system_dir, user_dir, domain) {
+        Ok(Some(ds)) => ds.cadence,
+        _ => None,
     }
 }
 
@@ -523,6 +536,7 @@ Anything above is a deviation worth attention.
         assert!(ds.intent.contains("deviation worth attention"));
         assert!(!ds.intent.contains("[[assert]]"), "structured block excluded from intent");
         assert_eq!(ds.recurrence_threshold, Some(5));
+        assert_eq!(ds.cadence, None);
         assert_eq!(ds.assertions.len(), 2);
         assert_eq!(ds.assertions[0].key, "disk.root.use_percent");
         assert_eq!(ds.assertions[0].op, AssertOp::Lt);
@@ -640,7 +654,7 @@ Anything above is a deviation worth attention.
         bad.domain = "memory".into();
 
         // good alone -> no problem
-        assert!(check_and_open_problems(&conn, &[good.clone()]).unwrap().is_empty());
+        assert!(check_and_open_problems(&conn, std::slice::from_ref(&good)).unwrap().is_empty());
         assert_eq!(db::problem_list(&conn, None).unwrap().len(), 0);
 
         // bad -> one problem, not an incident
@@ -652,6 +666,19 @@ Anything above is a deviation worth attention.
         // idempotent: re-checking does not open a second problem
         check_and_open_problems(&conn, &[bad]).unwrap();
         assert_eq!(db::problem_list(&conn, None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cadence_tune_is_read_from_to_be_state() {
+        let sys = tmpdir();
+        let user = tmpdir();
+        fs::write(sys.join("disk.md"), "# d\n\n```assertions\ncadence = \"every 15m\"\n[[assert]]\nkey=\"a\"\nop=\"lt\"\nvalue=1\n```\n").unwrap();
+        fs::write(sys.join("net.md"), "# n\n").unwrap();
+        assert_eq!(cadence_tune(&sys, &user, "disk").as_deref(), Some("every 15m"));
+        assert_eq!(cadence_tune(&sys, &user, "net"), None);
+        assert_eq!(cadence_tune(&sys, &user, "absent"), None);
+        fs::remove_dir_all(&sys).ok();
+        fs::remove_dir_all(&user).ok();
     }
 
     #[test]
