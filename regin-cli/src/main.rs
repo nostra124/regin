@@ -67,8 +67,11 @@ enum Commands {
     /// Start an interactive chat session with the agent.
     ///
     /// The agent has access to tools: bash, file read/write/edit, and web
-    /// search. It loads context from ~/.config/regin/context.md and
-    /// .repo/regin/context.md (if present in cwd), plus all saved memories.
+    /// search. It loads per-repo context, skills, and memories from regin's
+    /// own store (SQLite under the XDG data dir), keyed by the current repo's
+    /// filesystem path — manage it with `regin context`. A global user context
+    /// (~/.config/regin/context.md), if present, applies everywhere; all saved
+    /// memories are injected too.
     ///
     /// In-session commands:
     ///   /new       Start a new conversation

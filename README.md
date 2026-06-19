@@ -28,26 +28,21 @@ interactive chat interface.
 ## Quick Start
 
 ```bash
-# Build
+# Build (or install a native package — see Daemon below)
 cargo build --release
 
-# Set your NanoGPT API key
-vim ~/.config/regin/config.toml
-# nanogpt_api_key = "your-key-here"
+# Set your NanoGPT API key (settings live in SQLite, not a config file)
+./target/release/regin config set nanogpt.api_key "your-key-here"
 
-# List skills
-./target/release/regin skill list
-
-# Run a skill
-./target/release/regin skill run disk-usage
+# List operational tasks (skills) and run one
+./target/release/regin task list
+./target/release/regin task exec disk-usage
 
 # Interactive chat
 ./target/release/regin chat
 
-# Show config
-./target/release/regin config
-
-# Show task run history
+# Show settings and recent task-run history
+./target/release/regin config list
 ./target/release/regin runs
 ```
 
@@ -72,47 +67,63 @@ skills/
 
 ## Daemon (regind)
 
-Install as a systemd service:
+`regind` runs scheduled tasks and the operator loop in the background. It takes
+**no command-line flags** — all settings live in SQLite (see Configuration).
 
+Enable it as a per-user systemd service (regin auto-registers the unit):
 ```bash
-sudo cp regind.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now regind
+regin config set daemon.enabled true
 ```
 
-Manage:
+Or run it directly in the foreground:
 ```bash
-systemctl status regind
-journalctl -u regind -f
+regind
 ```
 
-Flags:
-- `--config <PATH>` — override config file location
-- `--once` — run all skills once and exit
+Inspect:
+```bash
+systemctl --user status regind
+journalctl --user -u regind -f
+regin ping            # check the daemon is up
+```
 
 ## Configuration
 
-`~/.config/regin/config.toml`:
+regin is **config-file-free** — every setting lives in the SQLite DB and is
+managed with `regin config`:
 
-```toml
-nanogpt_api_key = "your-nanogpt-api-key"
-nanogpt_model = "claude-sonnet-4-20250514"
-nanogpt_base_url = "https://nano-gpt.com/api/v1"
-db_path = "~/.config/regin/regin.db"
-skills_dir = "~/.config/regin/skills"
-schedule_interval_secs = 3600
+```bash
+regin config list
+regin config get nanogpt.model
+regin config set nanogpt.api_key "your-nanogpt-api-key"
 ```
+
+Common keys: `nanogpt.api_key`, `nanogpt.model`, `nanogpt.base_url`,
+`daemon.enabled`, `monitor.recurrence_threshold`, `kpi.reliability_floor`.
 
 ## CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `regin chat` | Interactive streaming chat with LLM |
-| `regin skill list` | List available skills |
-| `regin skill run <name>` | Execute a skill |
-| `regin skill show <name>` | View skill prompt + files |
-| `regin runs [--skill X]` | Show task run history |
-| `regin config` | Display current config |
+| `regin chat` | Interactive agent chat (tools: bash, files, web) |
+| `regin task list \| show <n> \| exec <n> [--schedule X]` | Manage & run operational tasks (skills) |
+| `regin runs [--skill X]` | Task-run history |
+| `regin config list \| get \| set` | Settings (SQLite-backed) |
+| `regin memory …` | Long-term memory |
+| `regin incident \| change \| problem …` | ITIL records |
+| `regin desired list \| show \| check` | Desired (to-be) state |
+| `regin metrics` | CSI KPIs + cost-vs-reliability objective |
+| `regin filters list \| test` | Notice filters |
+| `regin mode` | Effective operating mode (org vs standalone) |
+| `regin posture` | Adaptive autonomy posture |
+| `regin greeting` | Login greeting: health + parked items |
+| `regin push …` | Critical active-push channel (opt-in) |
+| `regin checks` | Active promoted deterministic checks |
+| `regin audit` | Run the CSI self-audit now |
+| `regin context …` | Per-repo context store (keyed by repo path) |
+| `regin skill …` | Skill-*package* manager (`regin-*-skills`) |
+| `regin ping` | Check the daemon is running |
+| `regin persona \| bus \| meeting \| plan \| foreman \| deputy` | Org / Mode-A coordination |
 
 ## License
 
