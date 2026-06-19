@@ -173,6 +173,13 @@ enum Commands {
         action: DesiredAction,
     },
 
+    /// Show CSI metrics: KPIs + the cost-vs-reliability objective (FEAT-050).
+    Metrics {
+        /// Window in days (default 30).
+        #[arg(long)]
+        days: Option<u32>,
+    },
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -659,6 +666,7 @@ async fn main() -> Result<()> {
             DesiredAction::Show { domain } => cmd_desired_show(&domain).await,
             DesiredAction::Check => cmd_ok(Request::DesiredCheck).await,
         },
+        Commands::Metrics { days } => cmd_metrics(days).await,
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1739,6 +1747,55 @@ async fn cmd_desired_show(domain: &str) -> Result<()> {
                     println!();
                 }
             }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+fn fmt_secs(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
+    }
+}
+
+async fn cmd_metrics(days: Option<u32>) -> Result<()> {
+    match rpc(&Request::Metrics { since_days: days }).await? {
+        Response::Metrics { summary: s, objective: o } => {
+            println_color(&format!("CSI metrics — last {} days", days.unwrap_or(30)), Color::Cyan);
+
+            println_color("\nObjective (minimize cost s.t. reliability >= floor)", Color::Yellow);
+            let verdict = if o.meets_floor { "MEETS floor" } else { "BELOW floor" };
+            let vcolor = if o.meets_floor { Color::Green } else { Color::Red };
+            print!("  reliability {:.0}% (floor {:.0}%)  ", o.reliability * 100.0, o.reliability_floor * 100.0);
+            println_color(verdict, vcolor);
+            println!("  LLM cost: ${:.2}", o.cost_llm_usd);
+
+            println_color("\nReliability / quality", Color::Yellow);
+            println!("  incidents: {} opened, {} resolved, {} open", s.incidents_opened, s.incidents_resolved, s.open_incidents);
+            println!("  time in deviation: {}", fmt_secs(s.time_in_deviation_secs));
+            match s.mttr_secs {
+                Some(m) => println!("  MTTR: {}", fmt_secs(m)),
+                None => println!("  MTTR: n/a"),
+            }
+            println!("  recurring problems: {}", s.recurring_problems);
+
+            println_color("\nAutomation / autonomy", Color::Yellow);
+            println!("  remediations: {} auto, {} approved, {} escalated", s.remediations_auto, s.remediations_approved, s.remediations_escalated);
+            println!("  automation ratio: {:.0}%   autonomy ratio: {:.0}%", s.automation_ratio * 100.0, s.autonomy_ratio * 100.0);
+
+            println_color("\nCost / efficiency", Color::Yellow);
+            println!("  LLM spend: ${:.2}   avoided: ${:.2}   notices filtered: {}", s.cost_llm_usd, s.cost_avoided_usd, s.notice_filter_saved);
+
+            println_color("\nLearning / health", Color::Yellow);
+            println!("  promotions: {}   errors: {}   error rate: {:.0}%", s.promotions, s.promotion_errors, s.promotion_error_rate * 100.0);
         }
         Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),

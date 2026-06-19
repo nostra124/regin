@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    config, context, db, desired,
+    config, context, db, desired, kpi,
     llm::{LlmTurn, NanoGptClient},
     protocol::{Request, Response},
     reflect, repo, skills,
@@ -531,6 +531,22 @@ async fn dispatch(
                 format!("Conflicts in {} domain(s): {} — problem(s) opened for human review.", conflicted.len(), conflicted.join(", "))
             };
             send(w, &Response::Ok { message }).await?;
+        }
+
+        // --- CSI metrics (FEAT-050) ---
+        Request::Metrics { since_days } => {
+            let days = since_days.unwrap_or(30).max(1) as i64;
+            let since = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+            let (summary, objective) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let floor: f64 = db::setting_get(&db, "kpi.reliability_floor")?
+                    .parse()
+                    .unwrap_or(0.95);
+                let summary = kpi::summary(&db, &since)?;
+                let objective = kpi::objective(&summary, floor);
+                (summary, objective)
+            };
+            send(w, &Response::Metrics { summary: Box::new(summary), objective }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

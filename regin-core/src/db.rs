@@ -159,7 +159,18 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             detail TEXT,
             created_at TEXT NOT NULL,
             reflected INTEGER NOT NULL DEFAULT 0
-        );",
+        );
+
+        CREATE TABLE IF NOT EXISTS kpi_events (
+            id TEXT PRIMARY KEY,
+            recorded_at TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            value REAL NOT NULL,
+            meta TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_kpi_events_metric_time
+            ON kpi_events (metric, recorded_at);",
     )
     .context("Failed to create database tables")?;
 

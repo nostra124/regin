@@ -21,6 +21,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("monitor.auto_incident", "false", "Auto-open incidents from failed scheduled runs"),
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),
     ("monitor.recurrence_threshold", "3", "Incidents of one skill before a problem is opened"),
+    ("kpi.reliability_floor", "0.95", "Minimum incident-resolution rate the CSI objective must hold (cost is minimized subject to this)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/

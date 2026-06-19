@@ -7,6 +7,7 @@ pub mod desired;
 pub mod escalation;
 pub mod foreman;
 pub mod db;
+pub mod kpi;
 pub mod llm;
 pub mod persona;
 pub mod planning;

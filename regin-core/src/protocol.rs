@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::desired::{DesiredInfo, DesiredState};
+use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
     Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
     SkillInfo, TaskRun,
@@ -173,6 +174,11 @@ pub enum Request {
     /// Re-check all desired states, opening problems for contradictory targets.
     #[serde(rename = "desired_check")]
     DesiredCheck,
+
+    // --- CSI metrics (FEAT-050) ---
+    /// Compute the KPI snapshot + constrained objective over the last N days.
+    #[serde(rename = "metrics")]
+    Metrics { since_days: Option<u32> },
 }
 
 /// Response from daemon to CLI.
@@ -258,6 +264,9 @@ pub enum Response {
 
     #[serde(rename = "desired_detail")]
     DesiredDetail { state: Box<DesiredState> },
+
+    #[serde(rename = "metrics")]
+    Metrics { summary: Box<KpiSummary>, objective: Objective },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },
