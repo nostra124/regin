@@ -12,6 +12,11 @@ milestone: 0.5.0
 
 # FEAT-020 — Regenerable `.deb` packaging (drop the checked-in staging tree)
 
+> **Superseded by FEAT-053** (nfpm multi-format packaging, DISC-014). The deb recipe
+> is folded into a single `nfpm` config that also produces rpm + apk; the "drop the
+> checked-in staging tree / version from `Cargo.toml`" requirements carry over to
+> FEAT-053. Kept here for history; do not implement separately.
+
 ## Description
 **As a** maintainer
 **I want** the Debian package built from source by a committed, repeatable recipe
