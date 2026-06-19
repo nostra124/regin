@@ -478,6 +478,8 @@ enum IncidentAction {
     },
     /// Resolve an incident with a resolution note.
     Resolve { id: String, resolution: String },
+    /// Block an incident on a workaround while its problem awaits a fix.
+    Block { id: String, workaround: String },
     /// Close an incident.
     Close { id: String },
 }
@@ -493,6 +495,9 @@ enum ChangeAction {
         /// The incident this change remediates
         #[arg(long)]
         incident: Option<String>,
+        /// The problem this change resolves
+        #[arg(long)]
+        problem: Option<String>,
         #[arg(long)]
         before: Option<String>,
         #[arg(long)]
@@ -502,6 +507,15 @@ enum ChangeAction {
     List,
     /// Show one change by id.
     Show { id: String },
+    /// Move a change to pending_approval (awaiting a decision).
+    RequestApproval { id: String },
+    /// Approve a pending change, recording the approver.
+    Approve {
+        id: String,
+        /// Who approved it
+        #[arg(long, default_value = "operator")]
+        by: String,
+    },
     /// Mark a change applied.
     Apply { id: String },
     /// Close a change.
@@ -528,6 +542,12 @@ enum ProblemAction {
     Link { problem_id: String, incident_id: String },
     /// Promote a problem to a known error with a root cause.
     KnownError { id: String, root_cause: String },
+    /// Add a root-cause hypothesis to a problem.
+    HypothesisAdd { problem_id: String, text: String },
+    /// List a problem's hypotheses.
+    HypothesisList { problem_id: String },
+    /// Set a hypothesis's status: created|validating|confirmed|rejected.
+    HypothesisStatus { id: String, status: String },
     /// Escalate a problem to dvalin as a BUG/FEAT (structured bus message).
     Escalate {
         /// Problem id
@@ -592,14 +612,17 @@ async fn main() -> Result<()> {
             IncidentAction::Show { id } => cmd_incidents(Request::IncidentShow { id }).await,
             IncidentAction::Update { id, status } => cmd_ok(Request::IncidentUpdate { id, status }).await,
             IncidentAction::Resolve { id, resolution } => cmd_ok(Request::IncidentResolve { id, resolution }).await,
+            IncidentAction::Block { id, workaround } => cmd_ok(Request::IncidentBlock { id, workaround }).await,
             IncidentAction::Close { id } => cmd_ok(Request::IncidentClose { id }).await,
         },
         Commands::Change { action } => match action {
-            ChangeAction::Record { title, desc, incident, before, after } => {
-                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, before, after }).await
+            ChangeAction::Record { title, desc, incident, problem, before, after } => {
+                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, problem_id: problem, before, after }).await
             }
             ChangeAction::List => cmd_changes(Request::ChangeList).await,
             ChangeAction::Show { id } => cmd_changes(Request::ChangeShow { id }).await,
+            ChangeAction::RequestApproval { id } => cmd_ok(Request::ChangeRequestApproval { id }).await,
+            ChangeAction::Approve { id, by } => cmd_ok(Request::ChangeApprove { id, approved_by: by }).await,
             ChangeAction::Apply { id } => cmd_ok(Request::ChangeApply { id }).await,
             ChangeAction::Close { id } => cmd_ok(Request::ChangeClose { id }).await,
         },
@@ -609,6 +632,9 @@ async fn main() -> Result<()> {
             ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
             ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
             ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::HypothesisAdd { problem_id, text } => cmd_ok(Request::ProblemHypothesisAdd { problem_id, text }).await,
+            ProblemAction::HypothesisList { problem_id } => cmd_hypotheses(Request::ProblemHypothesisList { problem_id }).await,
+            ProblemAction::HypothesisStatus { id, status } => cmd_ok(Request::ProblemHypothesisStatus { id, status }).await,
             ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
         },
@@ -1577,8 +1603,8 @@ async fn cmd_incidents(req: Request) -> Result<()> {
                 if !i.description.is_empty() {
                     println!("            {}", i.description);
                 }
-                if let Some(p) = &i.problem_id {
-                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
+                if let Some(w) = &i.workaround {
+                    println_color(&format!("            workaround: {w}"), Color::DarkGrey);
                 }
                 if let Some(r) = &i.resolution {
                     println_color(&format!("            resolution: {r}"), Color::Green);
@@ -1605,6 +1631,9 @@ async fn cmd_changes(req: Request) -> Result<()> {
                 if let Some(inc) = &c.incident_id {
                     println_color(&format!("            incident: {}", sid(inc)), Color::DarkGrey);
                 }
+                if let Some(p) = &c.problem_id {
+                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
+                }
                 if c.before.is_some() || c.after.is_some() {
                     println!(
                         "            {} -> {}",
@@ -1612,6 +1641,28 @@ async fn cmd_changes(req: Request) -> Result<()> {
                         c.after.as_deref().unwrap_or("?")
                     );
                 }
+                if let Some(by) = &c.approved_by {
+                    println_color(&format!("            approved by {by}"), Color::Green);
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_hypotheses(req: Request) -> Result<()> {
+    match rpc(&req).await? {
+        Response::Hypotheses { hypotheses } => {
+            if hypotheses.is_empty() {
+                println!("No hypotheses.");
+                return Ok(());
+            }
+            for h in &hypotheses {
+                print_color(&format!("  {}", sid(&h.id)), Color::DarkGrey);
+                print_color(&format!("  [{:<10}] ", h.status), Color::Cyan);
+                println!("{}", h.text);
             }
         }
         Response::Error { message } => return Err(anyhow!("{message}")),

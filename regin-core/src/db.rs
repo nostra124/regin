@@ -4,7 +4,8 @@ use std::path::Path;
 use tracing::{debug, info};
 
 use crate::types::{
-    Change, Conversation, Episode, Incident, Memory, Message, Problem, Schedule, TaskRun,
+    Change, Conversation, Episode, Incident, Memory, Message, Problem, ProblemHypothesis, Schedule,
+    TaskRun,
 };
 
 /// Initialize the SQLite database at the given path, creating tables if needed.
@@ -102,7 +103,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL,
             source TEXT NOT NULL,
             skill_name TEXT,
-            problem_id TEXT,
+            workaround TEXT,
             opened_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             resolved_at TEXT,
@@ -115,8 +116,11 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             description TEXT NOT NULL,
             status TEXT NOT NULL,
             incident_id TEXT,
+            problem_id TEXT,
             before_state TEXT,
             after_state TEXT,
+            approved_by TEXT,
+            approved_at TEXT,
             created_at TEXT NOT NULL,
             applied_at TEXT
         );
@@ -138,6 +142,15 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (problem_id, incident_id)
         );
 
+        CREATE TABLE IF NOT EXISTS problem_hypotheses (
+            id TEXT PRIMARY KEY,
+            problem_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS episodes (
             id TEXT PRIMARY KEY,
             kind TEXT NOT NULL,
@@ -155,6 +168,17 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "memories", "strength", "INTEGER NOT NULL DEFAULT 1")?;
     add_column_if_missing(conn, "memories", "last_seen", "TEXT")?;
     add_column_if_missing(conn, "memories", "source", "TEXT NOT NULL DEFAULT 'human'")?;
+
+    // FEAT-035: ITIL schema extensions (idempotent on pre-existing databases).
+    add_column_if_missing(conn, "incidents", "workaround", "TEXT")?;
+    // The redundant incidents.problem_id is dropped; the problem_incidents join is
+    // the single source of linkage (DISC-011). Any prior linkage was already
+    // mirrored into that join by link_incident_to_problem.
+    migrate_incident_problem_id_to_join(conn)?;
+    drop_column_if_exists(conn, "incidents", "problem_id")?;
+    add_column_if_missing(conn, "changes", "problem_id", "TEXT")?;
+    add_column_if_missing(conn, "changes", "approved_by", "TEXT")?;
+    add_column_if_missing(conn, "changes", "approved_at", "TEXT")?;
 
     // Seed defaults for any missing settings
     for (key, default, _desc) in crate::config::SETTINGS {
@@ -179,6 +203,45 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
         .unwrap_or(false);
     if !exists {
         conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
+}
+
+/// Drop `column` from `table` if it still exists (idempotent migration). Used to
+/// retire the redundant `incidents.problem_id` (DISC-011/FEAT-035).
+fn drop_column_if_exists(conn: &Connection, table: &str, column: &str) -> Result<()> {
+    let exists: bool = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
+            params![column],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if exists {
+        conn.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+    }
+    Ok(())
+}
+
+/// Before dropping `incidents.problem_id`, fold any linkage it still holds into the
+/// `problem_incidents` join so no data is lost (FEAT-035). No-op once the column is
+/// gone.
+fn migrate_incident_problem_id_to_join(conn: &Connection) -> Result<()> {
+    let has_col: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('incidents') WHERE name = 'problem_id'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|c| c > 0)
+        .unwrap_or(false);
+    if has_col {
+        conn.execute(
+            "INSERT OR IGNORE INTO problem_incidents (problem_id, incident_id)
+             SELECT problem_id, id FROM incidents WHERE problem_id IS NOT NULL",
+            [],
+        )?;
     }
     Ok(())
 }
@@ -746,7 +809,7 @@ pub fn update_schedule_after_run(
 // ---------------------------------------------------------------------------
 
 const INCIDENT_COLS: &str =
-    "id, title, description, severity, status, source, skill_name, problem_id, \
+    "id, title, description, severity, status, source, skill_name, workaround, \
      opened_at, updated_at, resolved_at, resolution";
 
 fn row_to_incident(row: &rusqlite::Row) -> rusqlite::Result<Incident> {
@@ -758,7 +821,7 @@ fn row_to_incident(row: &rusqlite::Row) -> rusqlite::Result<Incident> {
         status: row.get(4)?,
         source: row.get(5)?,
         skill_name: row.get(6)?,
-        problem_id: row.get(7)?,
+        workaround: row.get(7)?,
         opened_at: row.get(8)?,
         updated_at: row.get(9)?,
         resolved_at: row.get(10)?,
@@ -779,13 +842,24 @@ pub fn incident_open(
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO incidents
-            (id, title, description, severity, status, source, skill_name, problem_id,
+            (id, title, description, severity, status, source, skill_name, workaround,
              opened_at, updated_at, resolved_at, resolution)
          VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6, NULL, ?7, ?7, NULL, NULL)",
         params![&id, title, description, severity, source, skill_name, &now],
     )?;
     debug!(id, title, "Incident opened");
     incident_get(conn, &id)?.context("incident vanished after insert")
+}
+
+/// Block an incident on a workaround (status = blocked) while its underlying
+/// problem awaits a real fix (FEAT-035).
+pub fn incident_block(conn: &Connection, id: &str, workaround: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE incidents SET status = 'blocked', workaround = ?1, updated_at = ?2 WHERE id = ?3",
+        params![workaround, &now, id],
+    )?;
+    Ok(())
 }
 
 pub fn incident_get(conn: &Connection, id: &str) -> Result<Option<Incident>> {
@@ -848,7 +922,8 @@ pub fn incident_close(conn: &Connection, id: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 const CHANGE_COLS: &str =
-    "id, title, description, status, incident_id, before_state, after_state, created_at, applied_at";
+    "id, title, description, status, incident_id, problem_id, before_state, after_state, \
+     approved_by, approved_at, created_at, applied_at";
 
 fn row_to_change(row: &rusqlite::Row) -> rusqlite::Result<Change> {
     Ok(Change {
@@ -857,19 +932,24 @@ fn row_to_change(row: &rusqlite::Row) -> rusqlite::Result<Change> {
         description: row.get(2)?,
         status: row.get(3)?,
         incident_id: row.get(4)?,
-        before: row.get(5)?,
-        after: row.get(6)?,
-        created_at: row.get(7)?,
-        applied_at: row.get(8)?,
+        problem_id: row.get(5)?,
+        before: row.get(6)?,
+        after: row.get(7)?,
+        approved_by: row.get(8)?,
+        approved_at: row.get(9)?,
+        created_at: row.get(10)?,
+        applied_at: row.get(11)?,
     })
 }
 
-/// Record a change (status = planned).
+/// Record a change (status = planned). `incident_id` and `problem_id` link the
+/// change to what it remediates / resolves (either or both may be `None`).
 pub fn change_record(
     conn: &Connection,
     title: &str,
     description: &str,
     incident_id: Option<&str>,
+    problem_id: Option<&str>,
     before: Option<&str>,
     after: Option<&str>,
 ) -> Result<Change> {
@@ -877,11 +957,34 @@ pub fn change_record(
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO changes
-            (id, title, description, status, incident_id, before_state, after_state, created_at, applied_at)
-         VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, ?7, NULL)",
-        params![&id, title, description, incident_id, before, after, &now],
+            (id, title, description, status, incident_id, problem_id, before_state, after_state,
+             approved_by, approved_at, created_at, applied_at)
+         VALUES (?1, ?2, ?3, 'planned', ?4, ?5, ?6, ?7, NULL, NULL, ?8, NULL)",
+        params![&id, title, description, incident_id, problem_id, before, after, &now],
     )?;
     change_get(conn, &id)?.context("change vanished after insert")
+}
+
+/// Move a change to `pending_approval` — staged but awaiting a human/supervisor
+/// decision before it may be applied (FEAT-035).
+pub fn change_request_approval(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE changes SET status = 'pending_approval' WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Approve a `pending_approval` change, recording the approver and time. The
+/// change returns to `planned` so the normal apply path can run; `approved_at`
+/// stamps the decision (FEAT-035).
+pub fn change_approve(conn: &Connection, id: &str, approved_by: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE changes SET status = 'planned', approved_by = ?1, approved_at = ?2 WHERE id = ?3",
+        params![approved_by, &now, id],
+    )?;
+    Ok(())
 }
 
 pub fn change_get(conn: &Connection, id: &str) -> Result<Option<Change>> {
@@ -1000,17 +1103,15 @@ pub fn problem_close(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Link an incident to a problem (idempotent) and set the incident's problem_id.
+/// Link an incident to a problem (idempotent). Linkage lives solely in the
+/// `problem_incidents` join (the `incidents.problem_id` column was retired in
+/// FEAT-035); the incident's `updated_at` is bumped to reflect the change.
 pub fn link_incident_to_problem(conn: &Connection, problem_id: &str, incident_id: &str) -> Result<()> {
     conn.execute(
         "INSERT OR IGNORE INTO problem_incidents (problem_id, incident_id) VALUES (?1, ?2)",
         params![problem_id, incident_id],
     )?;
-    let now = chrono::Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE incidents SET problem_id = ?1, updated_at = ?2 WHERE id = ?3",
-        params![problem_id, &now, incident_id],
-    )?;
+    incident_touch(conn, incident_id)?;
     Ok(())
 }
 
@@ -1022,6 +1123,74 @@ pub fn problem_incident_ids(conn: &Connection, problem_id: &str) -> Result<Vec<S
         .query_map(params![problem_id], |row| row.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+/// The problem an incident is linked to, if any (via the join). Replaces the old
+/// `incidents.problem_id` column read (FEAT-035).
+pub fn incident_problem_id(conn: &Connection, incident_id: &str) -> Result<Option<String>> {
+    let r: std::result::Result<String, _> = conn.query_row(
+        "SELECT problem_id FROM problem_incidents WHERE incident_id = ?1 LIMIT 1",
+        params![incident_id],
+        |row| row.get(0),
+    );
+    match r {
+        Ok(p) => Ok(Some(p)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ITIL: Problem hypotheses (FEAT-035)
+// ---------------------------------------------------------------------------
+
+const HYPOTHESIS_COLS: &str = "id, problem_id, text, status, created_at, updated_at";
+
+fn row_to_hypothesis(row: &rusqlite::Row) -> rusqlite::Result<ProblemHypothesis> {
+    Ok(ProblemHypothesis {
+        id: row.get(0)?,
+        problem_id: row.get(1)?,
+        text: row.get(2)?,
+        status: row.get(3)?,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+/// Add a hypothesis to a problem (status = created).
+pub fn hypothesis_add(conn: &Connection, problem_id: &str, text: &str) -> Result<ProblemHypothesis> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO problem_hypotheses (id, problem_id, text, status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'created', ?4, ?4)",
+        params![&id, problem_id, text, &now],
+    )?;
+    let sql = format!("SELECT {HYPOTHESIS_COLS} FROM problem_hypotheses WHERE id = ?1");
+    conn.query_row(&sql, params![&id], row_to_hypothesis)
+        .context("hypothesis vanished after insert")
+}
+
+/// List a problem's hypotheses, oldest first.
+pub fn hypothesis_list(conn: &Connection, problem_id: &str) -> Result<Vec<ProblemHypothesis>> {
+    let sql = format!(
+        "SELECT {HYPOTHESIS_COLS} FROM problem_hypotheses WHERE problem_id = ?1 ORDER BY created_at ASC, rowid ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![problem_id], row_to_hypothesis)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Set a hypothesis's status (created | validating | confirmed | rejected).
+pub fn hypothesis_set_status(conn: &Connection, id: &str, status: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE problem_hypotheses SET status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, &now, id],
+    )?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,7 +1363,15 @@ pub fn monitor_evaluate(
 
     let all = incidents_for_skill(conn, skill_name)?;
     let problem_id = if recurrence_threshold > 0 && all.len() >= recurrence_threshold {
-        let pid = match all.iter().find_map(|i| i.problem_id.clone()) {
+        // Reuse an existing problem already linked to any of this skill's incidents.
+        let mut existing_pid = None;
+        for i in &all {
+            if let Some(p) = incident_problem_id(conn, &i.id)? {
+                existing_pid = Some(p);
+                break;
+            }
+        }
+        let pid = match existing_pid {
             Some(existing) => existing,
             None => {
                 problem_open(
@@ -1266,6 +1443,7 @@ mod tests {
             "restart nginx",
             "remediate the outage",
             Some(&inc.id),
+            None,
             Some("stopped"),
             Some("running"),
         )
@@ -1302,7 +1480,7 @@ mod tests {
         let mut expected = vec![i1.id.clone(), i2.id.clone()];
         expected.sort();
         assert_eq!(linked, expected);
-        assert_eq!(incident_get(&conn, &i1.id).unwrap().unwrap().problem_id.as_deref(), Some(prob.id.as_str()));
+        assert_eq!(incident_problem_id(&conn, &i1.id).unwrap().as_deref(), Some(prob.id.as_str()));
 
         problem_set_known_error(&conn, &prob.id, "deadlock in cron lock").unwrap();
         let ke = problem_get(&conn, &prob.id).unwrap().unwrap();
@@ -1503,5 +1681,118 @@ mod tests {
         let o4 = monitor_evaluate(&conn, "flapper", "error", "x", "low", 3).unwrap();
         assert_eq!(o4.problem_id.as_deref(), Some(pid.as_str()));
         assert_eq!(problem_list(&conn, None).unwrap().len(), 1);
+    }
+
+    // --- FEAT-035: ITIL schema extensions ---
+
+    #[test]
+    fn incident_block_sets_status_and_workaround() {
+        let conn = test_conn();
+        let inc = incident_open(&conn, "db slow", "high latency", "high", "monitor", Some("db")).unwrap();
+        assert!(inc.workaround.is_none());
+
+        incident_block(&conn, &inc.id, "serving from read replica").unwrap();
+        let got = incident_get(&conn, &inc.id).unwrap().unwrap();
+        assert_eq!(got.status, "blocked");
+        assert_eq!(got.workaround.as_deref(), Some("serving from read replica"));
+    }
+
+    #[test]
+    fn change_links_problem_and_runs_approval_gate() {
+        let conn = test_conn();
+        let prob = problem_open(&conn, "leak", "memory grows").unwrap();
+        let chg = change_record(
+            &conn,
+            "bump heap + patch",
+            "resolve the leak",
+            None,
+            Some(&prob.id),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(chg.status, "planned");
+        assert_eq!(chg.problem_id.as_deref(), Some(prob.id.as_str()));
+        assert!(chg.approved_by.is_none() && chg.approved_at.is_none());
+
+        // planned -> pending_approval -> approved (back to planned, stamped)
+        change_request_approval(&conn, &chg.id).unwrap();
+        assert_eq!(change_get(&conn, &chg.id).unwrap().unwrap().status, "pending_approval");
+
+        change_approve(&conn, &chg.id, "rene").unwrap();
+        let approved = change_get(&conn, &chg.id).unwrap().unwrap();
+        assert_eq!(approved.status, "planned");
+        assert_eq!(approved.approved_by.as_deref(), Some("rene"));
+        assert!(approved.approved_at.is_some());
+
+        change_apply(&conn, &chg.id).unwrap();
+        assert_eq!(change_get(&conn, &chg.id).unwrap().unwrap().status, "applied");
+    }
+
+    #[test]
+    fn problem_hypotheses_round_trip() {
+        let conn = test_conn();
+        let prob = problem_open(&conn, "flaky deploys", "intermittent 500s").unwrap();
+        assert!(hypothesis_list(&conn, &prob.id).unwrap().is_empty());
+
+        let h1 = hypothesis_add(&conn, &prob.id, "connection pool exhausted").unwrap();
+        let h2 = hypothesis_add(&conn, &prob.id, "DNS flapping").unwrap();
+        assert_eq!(h1.status, "created");
+
+        let list = hypothesis_list(&conn, &prob.id).unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, h1.id, "oldest first");
+
+        hypothesis_set_status(&conn, &h1.id, "validating").unwrap();
+        hypothesis_set_status(&conn, &h1.id, "confirmed").unwrap();
+        hypothesis_set_status(&conn, &h2.id, "rejected").unwrap();
+        let list = hypothesis_list(&conn, &prob.id).unwrap();
+        assert_eq!(list[0].status, "confirmed");
+        assert_eq!(list[1].status, "rejected");
+        assert!(list[0].updated_at >= list[0].created_at);
+    }
+
+    #[test]
+    fn linkage_lives_in_join_and_is_queryable() {
+        let conn = test_conn();
+        let prob = problem_open(&conn, "p", "d").unwrap();
+        let inc = incident_open(&conn, "i", "d", "low", "manual", None).unwrap();
+        assert!(incident_problem_id(&conn, &inc.id).unwrap().is_none());
+        link_incident_to_problem(&conn, &prob.id, &inc.id).unwrap();
+        assert_eq!(incident_problem_id(&conn, &inc.id).unwrap().as_deref(), Some(prob.id.as_str()));
+    }
+
+    #[test]
+    fn migrates_legacy_incident_problem_id_into_join_then_drops_column() {
+        // Simulate a pre-FEAT-035 database: incidents carries a problem_id column.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE incidents (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                description TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL,
+                source TEXT NOT NULL, skill_name TEXT, problem_id TEXT, opened_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, resolved_at TEXT, resolution TEXT);
+             INSERT INTO incidents VALUES ('i1','t','d','low','open','manual',NULL,'p1',
+                '2020-01-01','2020-01-01',NULL,NULL);",
+        )
+        .unwrap();
+
+        // Running the schema migrates the legacy linkage and drops the column.
+        init_schema(&conn).unwrap();
+
+        let col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('incidents') WHERE name = 'problem_id'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(col, 0, "legacy incidents.problem_id column is dropped");
+        assert_eq!(
+            incident_problem_id(&conn, "i1").unwrap().as_deref(),
+            Some("p1"),
+            "legacy linkage folded into the join"
+        );
+        // Idempotent second pass.
+        init_schema(&conn).unwrap();
     }
 }

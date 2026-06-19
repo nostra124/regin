@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    Change, ChatMessage, Conversation, Incident, Memory, Problem, Schedule, SkillInfo, TaskRun,
+    Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
+    SkillInfo, TaskRun,
 };
 
 /// Request from CLI to daemon.
@@ -109,6 +110,9 @@ pub enum Request {
     IncidentResolve { id: String, resolution: String },
     #[serde(rename = "incident_close")]
     IncidentClose { id: String },
+    /// Block an incident on a workaround while its problem awaits a fix (FEAT-035).
+    #[serde(rename = "incident_block")]
+    IncidentBlock { id: String, workaround: String },
 
     // --- ITIL: Changes ---
     #[serde(rename = "change_record")]
@@ -116,6 +120,7 @@ pub enum Request {
         title: String,
         description: String,
         incident_id: Option<String>,
+        problem_id: Option<String>,
         before: Option<String>,
         after: Option<String>,
     },
@@ -123,6 +128,12 @@ pub enum Request {
     ChangeList,
     #[serde(rename = "change_show")]
     ChangeShow { id: String },
+    /// Move a change to pending_approval (FEAT-035).
+    #[serde(rename = "change_request_approval")]
+    ChangeRequestApproval { id: String },
+    /// Approve a pending change, recording the approver (FEAT-035).
+    #[serde(rename = "change_approve")]
+    ChangeApprove { id: String, approved_by: String },
     #[serde(rename = "change_apply")]
     ChangeApply { id: String },
     #[serde(rename = "change_close")]
@@ -141,6 +152,15 @@ pub enum Request {
     ProblemKnownError { id: String, root_cause: String },
     #[serde(rename = "problem_close")]
     ProblemClose { id: String },
+    /// Add a root-cause hypothesis to a problem (FEAT-035).
+    #[serde(rename = "problem_hypothesis_add")]
+    ProblemHypothesisAdd { problem_id: String, text: String },
+    /// List a problem's hypotheses (FEAT-035).
+    #[serde(rename = "problem_hypothesis_list")]
+    ProblemHypothesisList { problem_id: String },
+    /// Set a hypothesis's status: created|validating|confirmed|rejected (FEAT-035).
+    #[serde(rename = "problem_hypothesis_status")]
+    ProblemHypothesisStatus { id: String, status: String },
 }
 
 /// Response from daemon to CLI.
@@ -217,6 +237,9 @@ pub enum Response {
     #[serde(rename = "problems")]
     Problems { problems: Vec<Problem> },
 
+    #[serde(rename = "hypotheses")]
+    Hypotheses { hypotheses: Vec<ProblemHypothesis> },
+
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },
 
@@ -250,9 +273,16 @@ mod tests {
             title: "c".into(),
             description: "".into(),
             incident_id: Some("i".into()),
+            problem_id: Some("p".into()),
             before: None,
             after: Some("up".into()),
         });
+        req_roundtrip(&Request::IncidentBlock { id: "i".into(), workaround: "wa".into() });
+        req_roundtrip(&Request::ChangeRequestApproval { id: "c".into() });
+        req_roundtrip(&Request::ChangeApprove { id: "c".into(), approved_by: "rene".into() });
+        req_roundtrip(&Request::ProblemHypothesisAdd { problem_id: "p".into(), text: "t".into() });
+        req_roundtrip(&Request::ProblemHypothesisList { problem_id: "p".into() });
+        req_roundtrip(&Request::ProblemHypothesisStatus { id: "h".into(), status: "confirmed".into() });
         req_roundtrip(&Request::ProblemLink { problem_id: "p".into(), incident_id: "i".into() });
         req_roundtrip(&Request::ProblemKnownError { id: "p".into(), root_cause: "rc".into() });
     }

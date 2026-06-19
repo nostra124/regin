@@ -413,12 +413,24 @@ async fn dispatch(
             { let db = state.db.lock().expect("DB poisoned"); db::incident_close(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Incident {id} closed") }).await?;
         }
+        Request::IncidentBlock { id, workaround } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::incident_block(&db, &id, &workaround)?; }
+            send(w, &Response::Ok { message: format!("Incident {id} blocked (workaround recorded)") }).await?;
+        }
 
         // --- ITIL: Changes ---
-        Request::ChangeRecord { title, description, incident_id, before, after } => {
+        Request::ChangeRecord { title, description, incident_id, problem_id, before, after } => {
             let c = { let db = state.db.lock().expect("DB poisoned");
-                db::change_record(&db, &title, &description, incident_id.as_deref(), before.as_deref(), after.as_deref())? };
+                db::change_record(&db, &title, &description, incident_id.as_deref(), problem_id.as_deref(), before.as_deref(), after.as_deref())? };
             send(w, &Response::Ok { message: format!("Change recorded: {}", c.id) }).await?;
+        }
+        Request::ChangeRequestApproval { id } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_request_approval(&db, &id)?; }
+            send(w, &Response::Ok { message: format!("Change {id} -> pending_approval") }).await?;
+        }
+        Request::ChangeApprove { id, approved_by } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::change_approve(&db, &id, &approved_by)?; }
+            send(w, &Response::Ok { message: format!("Change {id} approved by {approved_by}") }).await?;
         }
         Request::ChangeList => {
             let changes = { let db = state.db.lock().expect("DB poisoned"); db::change_list(&db)? };
@@ -467,6 +479,18 @@ async fn dispatch(
         Request::ProblemClose { id } => {
             { let db = state.db.lock().expect("DB poisoned"); db::problem_close(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Problem {id} closed") }).await?;
+        }
+        Request::ProblemHypothesisAdd { problem_id, text } => {
+            let h = { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_add(&db, &problem_id, &text)? };
+            send(w, &Response::Ok { message: format!("Hypothesis added: {}", h.id) }).await?;
+        }
+        Request::ProblemHypothesisList { problem_id } => {
+            let hypotheses = { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_list(&db, &problem_id)? };
+            send(w, &Response::Hypotheses { hypotheses }).await?;
+        }
+        Request::ProblemHypothesisStatus { id, status } => {
+            { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_set_status(&db, &id, &status)?; }
+            send(w, &Response::Ok { message: format!("Hypothesis {id} -> {status}") }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
