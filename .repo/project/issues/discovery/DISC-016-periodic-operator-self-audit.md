@@ -75,10 +75,44 @@ gate.
 5. **Cost ceiling** — does the audit get a budget, and is skipping/trimming it when
    over-budget itself a tracked event?
 
-## Decision
+## Decision (resolved with user — guided Q&A 2026-06-19)
 
-_Pending — to be discussed with the user (guided Q&A)._
+**Mechanism — Variant A.** A scheduled operator self-audit skill that emits a review
+report and files findings as ITIL artefacts, heavier actions routed through the
+DISC-009 approval gate.
+
+**Q1 — Cadence: adaptive, monthly default.** Runs more often while the system is young
+/ KPIs volatile, less once stable; anchored at a monthly default — same
+earn-with-evidence ethos as DISC-015.
+
+**Q2 — Scope: full CSI sweep (items 1–6), modular.** Demotion (periodic re-judge of
+promoted checks), KPI/CSI trend review, promotion-criteria tuning, notice-filter
+hygiene, to-be-state drift, coverage & toil. Each function is a module that activates
+as its dependency lands (DISC-015 checks/filters/KPIs, DISC-008 to-be-state, DISC-012
+catalog). Item 7 ("and more") is the extensibility seam.
+
+**Q3 — Output: report + ITIL artefacts + surfaced.** A stored audit report; findings
+filed as normal incidents/problems/changes; a summary joins `regin metrics` and the
+login greeting (DISC-010 / DISC-015 Q2).
+
+**Q4 — Authority: reuse DISC-009 lanes.** Audit-proposed actions flow through the
+existing three-lane guardrail — safe/reversible auto-apply (e.g. demote a missing
+check, re-tune a filter within bounds); uncertain/wide → `pending_approval`;
+out-of-control → problem + escalate. **To-be-state edits always require approval**
+(never silently rewrite human-authored intent — DISC-008).
+
+**Q5 — Cost ceiling: budgeted, skip/trim tracked.** The audit gets a per-run cost
+budget; when it would exceed, it trims scope (samples less) or defers, recording that
+as a tracked event so chronic skipping/trimming surfaces as a problem. The audit's own
+cost is a KPI input.
 
 ## Spawned features
 
-_Pending DISC close._
+- **Scheduled operator self-audit** — a CSI-review skill on an adaptive cadence
+  (monthly default) running the full sweep (items 1–6), emitting a report and filing
+  findings as ITIL artefacts; a summary joins `regin metrics` + the login greeting;
+  actions routed via DISC-009 lanes (to-be-state edits always → approval). Reuses
+  DISC-015's promotion/demotion, KPI, and filter machinery rather than duplicating it.
+  Milestone 0.5.0.
+- **Audit cost governance** — per-run budget; trim/defer-when-over with the skip/trim
+  recorded as a tracked KPI event. Milestone 0.5.0.

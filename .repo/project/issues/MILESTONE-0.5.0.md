@@ -46,7 +46,7 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 | DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | to open |
 | DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |
 | DISC-015 | Adaptive monitoring economics (LLM-judged triage self-optimizing to cheap checks; CSI) | filed, decided |
-| DISC-016 | Periodic operator self-audit (recurring CSI review; promoted-check demotion) | filed, open |
+| DISC-016 | Periodic operator self-audit (recurring CSI review; promoted-check demotion) | filed, decided |
 
 ## Delivery prerequisites (required before alpha can start)
 
