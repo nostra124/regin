@@ -118,10 +118,13 @@ This is the governing supported-platform list for RULE-010 "Platform packages".
 | Platform | Arch | Package format | Service manager |
 |---|---|---|---|
 | Linux (Debian/Ubuntu) | x86_64 | `.deb` | systemd (user service) |
+| Linux (RHEL/Fedora/openSUSE) | x86_64 | `.rpm` | systemd (user service) |
+| Linux (Alpine) | x86_64 | `.apk` | systemd (user service) |
 
-Linux + systemd is the only first-class target. The daemon is a per-user
-service (lingering), not a system daemon. Other platforms are out of scope
-until a DISC ticket establishes demand.
+Linux is the first-class target. Per DISC-014, deb/rpm/apk are all first-class
+and built from a single `nfpm` recipe (`packaging/nfpm.yaml`, FEAT-053). The
+daemon is a per-user service (lingering), not a system daemon. Other platforms
+are out of scope until a DISC ticket establishes demand.
 
 ## 8. Versioning and release phases
 

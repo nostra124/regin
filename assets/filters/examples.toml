@@ -1,0 +1,12 @@
+# Example notice filters (FEAT-052). Each rule drops a known-noise observation
+# before it reaches the LLM review tier. Edit/extend under
+# ~/.config/regin/filters/*.toml (user rules override system rules by name).
+
+[[rule]]
+name = "kernel-audit-noise"
+contains = "audit: type=1400"
+
+[[rule]]
+name = "systemd-session-churn"
+contains = "Started Session"
+domain = "logs"

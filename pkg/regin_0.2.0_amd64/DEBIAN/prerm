@@ -1,5 +1,0 @@
-#!/bin/sh
-set -e
-# User service cleanup is left to the user (regin config set daemon.enabled false)
-#DEBHELPER#
-exit 0
