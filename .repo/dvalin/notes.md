@@ -47,6 +47,32 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-19 — DISC-017 opened (portable identity vs machine apparatus)
+- **New orthogonal axis (corrected with user):** *identity* (portable, travels with
+  the agent) vs *machine apparatus* (local, rebuilt per box). Distinct from the
+  operator/foreman plane axis. Identity = self-improving memory (archived sessions,
+  documented transcripts, topic-based knowledge summaries, distilled semantic
+  memory) in its **own SQLite DB**, copyable container→container. Machine apparatus
+  = ITIL records (incident/change/problem/KPI), **audit results**, local
+  tools/skills/docs, desired-state/filters/derived-checks — stays in `regin.db` +
+  files on the box.
+- **Audit is apparatus, NOT identity.** `operations/audit.md` + DISC-016 self-audit
+  execute rules and raise ITIL incidents bound to the machine; nothing to do with
+  self-improvement. Do not conflate.
+- **"Hermes" = external reference project** (NousResearch hermes-agent), the
+  *inspiration* for the memory design — not a regin subsystem. DISC-002/FEAT-006's
+  internal "Hermes" nickname is loose; not rewritten (shipped tickets are immutable
+  per audit rule). New subsystem name is a DISC-017 open question.
+- **Current state violates the split:** DISC-002 → FEAT-005 (episodic) + FEAT-006
+  (semantic reflection) put memory in the *same* `regin.db` as ITIL/runs/settings.
+  DISC-017 reconsiders where that store lives AND extends it (sessions/transcripts/
+  topic knowledge), which DISC-002 never covered.
+- DISC-017 filed **open/pending** (decision via guided Q&A, like DISC-008/016).
+  Open questions: boundary (where do chats/runs fall?), store shape (2nd SQLite vs
+  files+index vs hybrid), topic-knowledge schema + consolidation pipeline,
+  portability mechanics (export/import verb, identity id, relation to DISC-003 dwarf
+  identity), machine-scoped knowledge, migration off `regin.db`, naming.
+
 ### 2026-06-19 — DISC-009 decided (three-lane remediation guardrail)
 - **Q1 mechanism = Hybrid (H):** capability ceiling + declarative safe-action
   fast-path + LLM judgement within bounds.
