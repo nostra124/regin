@@ -45,6 +45,7 @@ DISC-008..011 below; the operator/foreman plane split is the governing framing
 | DISC-012 | Operator skill catalog (which monitors/remediations)             | to open |
 | DISC-013 | Per-skill scheduling + self-resilience (watchdog, API backoff)   | to open |
 | DISC-014 | Platform-list expansion to `.apk` + `.rpm` (profile §7 is deb-only today) | to open |
+| DISC-015 | Adaptive monitoring economics (LLM-judged triage self-optimizing to cheap checks; CSI) | filed, open |
 
 ## Delivery prerequisites (required before alpha can start)
 

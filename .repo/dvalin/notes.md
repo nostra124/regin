@@ -47,6 +47,31 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-19 — DISC-008 resolved + DISC-015 (monitoring economics) spawned
+- **DISC-008 (to-be state) closed via guided Q&A:**
+  - **Three-layer target:** explicit markdown (intent) + structured assertions
+    (machine-checkable) + implicit monitor-skill thresholds. They must agree —
+    **deviation from target → incident**; **conflict *within* the target →
+    problem** (the definition is ambiguous, needs a human).
+  - **Stored as files, like skills** (not SQLite) — a scoped, deliberate exception
+    to "all state in SQLite": desired-state is authored *content*, so it follows
+    the skills precedent (`~/.config/regin/desired/` over a possible
+    `/etc/regin/desired/`; `regind` is a per-user service). **Per-domain files**
+    (`disk.md`, `services.md`, …), mapping 1:1 to the operator skill catalog
+    (DISC-012).
+  - **Deviation is LLM-judged, not raw events** — not every monitoring event is an
+    incident; judging worth-against-intent is the point of the LLM.
+- **DISC-015 — adaptive monitoring economics (NEW, spawned from DISC-008 Q4):** the
+  ITIL **CSI** loop on regin's own monitoring. Guiding principle = **"senseful full
+  automation"** (René's professor): automate fully but only where it makes sense.
+  Two tiers (periodic LLM review ↔ cheap hourly deterministic checks); a
+  **promotion loop** distils crystal-clear LLM verdicts into deterministic checks
+  (land in DISC-008's structured layer; cadence per DISC-013); **notice filters**
+  cut tokens before the LLM; reversible **demotion**; and **measurable** metrics
+  (cost ↓ over time while reliability ↑, problems ↓). **"Senseful full automation"
+  goes into regin's operator-plane system prompt** (baseline operator directive,
+  cf. `regin-core/src/context.rs`).
+
 ### 2026-06-19 — operator model + operator/foreman plane split (MILESTONE-0.5.0)
 - **Two planes (governing framing, near-settled — confirm in guided Q&A):**
   - **Operator plane** — regin as the autonomous operator of the *machine/
