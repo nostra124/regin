@@ -12,14 +12,15 @@ regin has two operating modes: **(A) dvalin foreman** (built out across 0.3.0/
 independent 24/7 operator of a Linux/unix environment** (the original scheduled-
 skill runner + ITIL + Hermes memory + tool-using chat). Mode B works but is
 thin and its docs have drifted from the shipped CLI. This milestone hardens
-Mode B: it first removes the accumulated documentation/packaging drift, then
-(pending discovery) builds out the operator's skill catalog, remediation
-guardrails, notification egress, and scheduling.
+Mode B: it removes the accumulated documentation/packaging drift **and** builds out
+the operator's to-be-state, remediation guardrails, skill catalog, escalation,
+monitoring economics, scheduling/resilience, and multi-format packaging.
 
-The doc/man/packaging items below are filed now (uncontroversial corrections).
-The Mode-B capability items are **pending discovery** — they expand behaviour and,
-in the case of apk/rpm, the supported-platform list (profile §7), so each needs a
-DISC + user decision before a FEAT is minted.
+**Planning status:** all operator-plane discoveries (DISC-008..016) are decided and
+their features minted (FEAT-033..055), the docs/packaging items are filed
+(BUG-002/003, FEAT-019, FEAT-053 supersedes FEAT-020), and the release-readiness
+prerequisites are ticketed (FEAT-056..059). The milestone is **fully planned**;
+what remains is implementation (one ticket → one PR, in the delivery order below).
 
 ## Issues
 
@@ -60,6 +61,15 @@ DISC + user decision before a FEAT is minted.
 | FEAT-054 | Per-format install PITs | DISC-014 |
 | FEAT-055 | Scheduled operator self-audit (CSI review) | DISC-016 |
 
+### Release readiness (delivery prerequisites)
+
+| ID | Title |
+|----|-------|
+| FEAT-056 | Cross-platform install script (PIT-tested) |
+| FEAT-057 | GitHub wiki landing page |
+| FEAT-058 | Test-coverage measurement + CI gate |
+| FEAT-059 | Release automation (GitHub release with packages) |
+
 ### Discovery (Mode-B operator plane — discuss before filing FEATs)
 
 The operator model (autonomous machine operator, ITIL plane) is captured across
@@ -83,10 +93,11 @@ now filed and decided.
 
 | Prerequisite | Ticket | Status |
 |---|---|---|
-| 100% test coverage | (file at planning) | pending |
-| Native packages, all platforms + GitHub release | FEAT-020 → nfpm deb+rpm+apk (DISC-014) | in-flight |
-| Install script (PIT-tested) | (file at planning) | pending |
-| GitHub wiki landing page | (file at planning) | pending |
+| 100% test coverage | FEAT-058 (coverage + CI gate) | filed |
+| Native packages, all platforms | FEAT-053 (nfpm deb+rpm+apk) · FEAT-054 (install PITs) | filed |
+| GitHub release | FEAT-059 (release automation) | filed |
+| Install script (PIT-tested) | FEAT-056 | filed |
+| GitHub wiki landing page | FEAT-057 | filed |
 | Mobile app (if defined by project) | N/A | n/a |
 
 ## Suggested delivery order
@@ -107,6 +118,9 @@ now filed and decided.
 7. **Optimisation & resilience** — FEAT-051 (promotion/demotion) · FEAT-040 (adaptive
    posture) · FEAT-048 (resilience) · FEAT-055 (self-audit).
 8. **Packaging** — FEAT-053 (nfpm deb+rpm+apk) · FEAT-054 (per-format install PITs).
+9. **Release readiness** — FEAT-059 (release automation) · FEAT-056 (install script) ·
+   FEAT-057 (wiki landing page). FEAT-058 (coverage CI gate) lands early and runs
+   throughout.
 
 ## Exit criteria
 

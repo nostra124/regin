@@ -285,3 +285,20 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - **Next:** mint the 0.5.0 operator-capability FEATs from DISC-009/010/011/012/013/014/
   015/016 (currently all decided, features listed but not yet ticketed), then sequence
   0.5.0 delivery. profile.md §7 still says deb-only — update when FEAT work starts.
+
+### 2026-06-19 — MILESTONE-0.5.0 fully planned (FEAT-033..059 minted)
+- Minted the **operator-capability FEATs (FEAT-033..055)** from the decided operator
+  discoveries, and the **release-readiness FEATs (FEAT-056..059)** for the delivery
+  prerequisites (install script, wiki, coverage CI gate, release automation).
+- **FEAT-020 superseded by FEAT-053** (nfpm folds the deb recipe into one config that
+  also builds rpm + apk). Noted in both files + the milestone.
+- MILESTONE-0.5.0 reworked: docs/packaging + operator-capability + release-readiness
+  issue tables, dependency-ordered delivery plan (foundation→evaluation→skills→
+  remediation loop→optimisation→packaging→release), operator-loop exit criteria,
+  prerequisites table now all "filed". Intro no longer says "pending discovery".
+- 0.5.0 is **fully planned** (every DISC decided, every FEAT minted, no "(file at
+  planning)" gaps). Remaining = implementation only (one ticket → one PR, V-Model
+  phases). Kept as a single milestone (user: split "does not matter").
+- Still pending at IMPLEMENTATION time (not planning gaps): update profile.md §7 to
+  deb/rpm/apk (FEAT-053); the milestone is large (~29 FEATs incl. release readiness) —
+  split remains an option if desired.
