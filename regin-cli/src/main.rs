@@ -167,6 +167,12 @@ enum Commands {
         action: ProblemAction,
     },
 
+    /// Inspect the desired (to-be) state per domain (FEAT-033).
+    Desired {
+        #[command(subcommand)]
+        action: DesiredAction,
+    },
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -563,6 +569,16 @@ enum ProblemAction {
     Close { id: String },
 }
 
+#[derive(Subcommand)]
+enum DesiredAction {
+    /// List loaded desired-state domains (system + user), flagging conflicts.
+    List,
+    /// Show one domain's intent + assertions.
+    Show { domain: String },
+    /// Re-check targets, opening a problem for any contradictory domain.
+    Check,
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -637,6 +653,11 @@ async fn main() -> Result<()> {
             ProblemAction::HypothesisStatus { id, status } => cmd_ok(Request::ProblemHypothesisStatus { id, status }).await,
             ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
             ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
+        },
+        Commands::Desired { action } => match action {
+            DesiredAction::List => cmd_desired_list().await,
+            DesiredAction::Show { domain } => cmd_desired_show(&domain).await,
+            DesiredAction::Check => cmd_ok(Request::DesiredCheck).await,
         },
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
@@ -1663,6 +1684,60 @@ async fn cmd_hypotheses(req: Request) -> Result<()> {
                 print_color(&format!("  {}", sid(&h.id)), Color::DarkGrey);
                 print_color(&format!("  [{:<10}] ", h.status), Color::Cyan);
                 println!("{}", h.text);
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_desired_list() -> Result<()> {
+    match rpc(&Request::DesiredList).await? {
+        Response::DesiredListResp { items } => {
+            if items.is_empty() {
+                println!("No desired-state domains. Add files under ~/.config/regin/desired/<domain>.md");
+                return Ok(());
+            }
+            for d in &items {
+                print_color(&format!("  {:<16}", d.domain), Color::Cyan);
+                print_color(&format!("[{}] ", d.source), Color::DarkGrey);
+                print!("{} assertion(s)", d.assertions);
+                if let Some(rt) = d.recurrence_threshold {
+                    print!(", recurrence>={rt}");
+                }
+                println!();
+                for c in &d.conflicts {
+                    println_color(&format!("        conflict: {c}"), Color::Red);
+                }
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_desired_show(domain: &str) -> Result<()> {
+    match rpc(&Request::DesiredShow { domain: domain.to_string() }).await? {
+        Response::DesiredDetail { state } => {
+            print_color(&format!("{} ", state.domain), Color::Cyan);
+            println_color(&format!("[{}] {}", state.source, state.path.display()), Color::DarkGrey);
+            if let Some(rt) = state.recurrence_threshold {
+                println_color(&format!("recurrence threshold: {rt}"), Color::DarkGrey);
+            }
+            if !state.intent.is_empty() {
+                println!("\n{}", state.intent);
+            }
+            if !state.assertions.is_empty() {
+                println_color("\nassertions:", Color::Yellow);
+                for a in &state.assertions {
+                    print!("  {a}");
+                    if let Some(d) = &a.description {
+                        print_color(&format!("  — {d}"), Color::DarkGrey);
+                    }
+                    println!();
+                }
             }
         }
         Response::Error { message } => return Err(anyhow!("{message}")),

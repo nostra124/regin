@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    config, context, db,
+    config, context, db, desired,
     llm::{LlmTurn, NanoGptClient},
     protocol::{Request, Response},
     reflect, repo, skills,
@@ -50,6 +50,23 @@ async fn main() -> Result<()> {
     let db_path = config::db_path()?;
     let conn = db::init_db(&db_path)?;
     info!("Database: {}", db_path.display());
+
+    // FEAT-033: load the desired (to-be) state and surface contradictory targets
+    // as problems for a human (fail-safe: malformed files are skipped, logged).
+    {
+        let states = desired::load_all_desired(
+            &config::system_desired_dir(),
+            &config::user_desired_dir()?,
+        );
+        info!("Loaded {} desired-state domain(s)", states.len());
+        match desired::check_and_open_problems(&conn, &states) {
+            Ok(c) if !c.is_empty() => {
+                warn!("Desired-state conflicts opened problems for: {}", c.join(", "));
+            }
+            Ok(_) => {}
+            Err(e) => warn!("Desired-state conflict check failed: {e:#}"),
+        }
+    }
 
     let socket_path = config::socket_path()?;
     if let Some(parent) = socket_path.parent() {
@@ -491,6 +508,29 @@ async fn dispatch(
         Request::ProblemHypothesisStatus { id, status } => {
             { let db = state.db.lock().expect("DB poisoned"); db::hypothesis_set_status(&db, &id, &status)?; }
             send(w, &Response::Ok { message: format!("Hypothesis {id} -> {status}") }).await?;
+        }
+
+        // --- Desired state (to-be) — FEAT-033 ---
+        Request::DesiredList => {
+            let states = desired::load_all_desired(&config::system_desired_dir(), &config::user_desired_dir()?);
+            send(w, &Response::DesiredListResp { items: desired::summaries(&states) }).await?;
+        }
+        Request::DesiredShow { domain } => {
+            let ds = desired::load_desired(&config::system_desired_dir(), &config::user_desired_dir()?, &domain)?;
+            match ds {
+                Some(state) => send(w, &Response::DesiredDetail { state: Box::new(state) }).await?,
+                None => send(w, &Response::Error { message: format!("No desired state for domain `{domain}`") }).await?,
+            }
+        }
+        Request::DesiredCheck => {
+            let states = desired::load_all_desired(&config::system_desired_dir(), &config::user_desired_dir()?);
+            let conflicted = { let db = state.db.lock().expect("DB poisoned"); desired::check_and_open_problems(&db, &states)? };
+            let message = if conflicted.is_empty() {
+                format!("Checked {} desired-state domain(s); no conflicts.", states.len())
+            } else {
+                format!("Conflicts in {} domain(s): {} — problem(s) opened for human review.", conflicted.len(), conflicted.join(", "))
+            };
+            send(w, &Response::Ok { message }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

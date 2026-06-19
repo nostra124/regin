@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::desired::{DesiredInfo, DesiredState};
 use crate::types::{
     Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
     SkillInfo, TaskRun,
@@ -161,6 +162,17 @@ pub enum Request {
     /// Set a hypothesis's status: created|validating|confirmed|rejected (FEAT-035).
     #[serde(rename = "problem_hypothesis_status")]
     ProblemHypothesisStatus { id: String, status: String },
+
+    // --- Desired state (to-be) — FEAT-033 ---
+    /// List loaded desired-state domains (with conflict flags).
+    #[serde(rename = "desired_list")]
+    DesiredList,
+    /// Show one domain's desired state.
+    #[serde(rename = "desired_show")]
+    DesiredShow { domain: String },
+    /// Re-check all desired states, opening problems for contradictory targets.
+    #[serde(rename = "desired_check")]
+    DesiredCheck,
 }
 
 /// Response from daemon to CLI.
@@ -239,6 +251,13 @@ pub enum Response {
 
     #[serde(rename = "hypotheses")]
     Hypotheses { hypotheses: Vec<ProblemHypothesis> },
+
+    // --- Desired state (FEAT-033) ---
+    #[serde(rename = "desired_list")]
+    DesiredListResp { items: Vec<DesiredInfo> },
+
+    #[serde(rename = "desired_detail")]
+    DesiredDetail { state: Box<DesiredState> },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

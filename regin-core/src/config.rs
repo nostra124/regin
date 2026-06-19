@@ -2,8 +2,11 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use tracing::debug;
 
-/// System-wide skills directory (shipped with the .deb package).
+/// System-wide skills directory (shipped with the package).
 pub const SYSTEM_SKILLS_DIR: &str = "/usr/share/regin/skills";
+
+/// System-wide desired-state (to-be) directory, shipped with the package (FEAT-033).
+pub const SYSTEM_DESIRED_DIR: &str = "/usr/share/regin/desired";
 
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
@@ -56,6 +59,17 @@ pub fn user_skills_dir() -> Result<PathBuf> {
 /// Returns system skills dir: /usr/share/regin/skills/
 pub fn system_skills_dir() -> PathBuf {
     PathBuf::from(SYSTEM_SKILLS_DIR)
+}
+
+/// Returns user desired-state dir: ~/.config/regin/desired/ (FEAT-033)
+pub fn user_desired_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("desired"))
+}
+
+/// Returns system desired-state dir: /usr/share/regin/desired/ (FEAT-033)
+pub fn system_desired_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_DESIRED_DIR)
 }
 
 /// Returns the user systemd unit dir: ~/.config/systemd/user/
