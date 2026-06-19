@@ -1,0 +1,2 @@
+domain = "memory-load"
+monitor_command = "free | awk '/Mem:/{printf \"mem.used_percent=%.0f\\n\", $3/$2*100}'; awk '{c=0; while((getline l < \"/proc/cpuinfo\")>0) if(l ~ /^processor/) c++; printf \"load.per_core=%.2f\\n\", $1/(c>0?c:1)}' /proc/loadavg"

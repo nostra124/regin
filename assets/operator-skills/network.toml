@@ -1,0 +1,2 @@
+domain = "network"
+monitor_command = "ip route | grep -q '^default' && echo network.default_route=up || echo network.default_route=down; getent hosts deb.debian.org >/dev/null 2>&1 && echo network.dns_ok=yes || echo network.dns_ok=no"

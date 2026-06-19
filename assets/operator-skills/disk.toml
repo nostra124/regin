@@ -1,0 +1,20 @@
+domain = "disk"
+monitor_command = "df --output=pcent,target | awk 'NR>1 && $2==\"/\"{gsub(/%/,\"\",$1); print \"disk.root.use_percent=\"$1}'"
+
+[[remediation]]
+tag = "clear_temp"
+title = "clear /tmp"
+description = "Remove stale files under /tmp to reclaim space."
+command = "find /tmp -mindepth 1 -mtime +1 -delete"
+
+[[remediation]]
+tag = "rotate_logs"
+title = "rotate logs"
+description = "Force a logrotate pass."
+command = "logrotate -f /etc/logrotate.conf"
+
+[[remediation]]
+tag = "clean_pkg_cache"
+title = "clean package cache"
+description = "Clear the apt package cache."
+command = "apt-get clean"

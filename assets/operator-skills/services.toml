@@ -1,0 +1,8 @@
+domain = "services"
+monitor_command = "echo services.failed_units=$(systemctl --failed --no-legend | wc -l)"
+
+[[remediation]]
+tag = "restart_unit"
+title = "restart a failed unit"
+description = "Restart the systemd unit that entered a failed state."
+command = "systemctl reset-failed && systemctl restart \"$UNIT\""

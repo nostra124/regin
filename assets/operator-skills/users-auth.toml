@@ -1,0 +1,2 @@
+domain = "users-auth"
+monitor_command = "echo users-auth.failed_logins_1h=$(journalctl --since '1 hour ago' 2>/dev/null | grep -c 'authentication failure')"

@@ -1,0 +1,2 @@
+domain = "firewall"
+monitor_command = "(systemctl is-active --quiet firewalld || systemctl is-active --quiet nftables || ufw status 2>/dev/null | grep -q 'Status: active') && echo firewall.active=yes || echo firewall.active=no"

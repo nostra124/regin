@@ -1,0 +1,2 @@
+domain = "certificates"
+monitor_command = "min=99999; for c in /etc/ssl/certs/*.pem /etc/letsencrypt/live/*/cert.pem; do [ -f \"$c\" ] || continue; e=$(date -d \"$(openssl x509 -enddate -noout -in \"$c\" 2>/dev/null | cut -d= -f2)\" +%s 2>/dev/null) || continue; d=$(( (e - $(date +%s)) / 86400 )); [ $d -lt $min ] && min=$d; done; echo certificates.min_days_to_expiry=$min"

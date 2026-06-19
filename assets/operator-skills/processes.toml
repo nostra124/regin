@@ -1,0 +1,2 @@
+domain = "processes"
+monitor_command = "echo processes.zombies=$(ps -eo stat | grep -c '^Z')"
