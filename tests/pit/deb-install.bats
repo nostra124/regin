@@ -13,8 +13,10 @@ setup() {
     dpkg -i /dist/regin_*.deb
     regin --version
     regin --help >/dev/null
-    test -f /usr/share/man/man1/regin.1
     test -d /usr/share/regin/operator-skills
+    # slim Debian images path-exclude /usr/share/man on install, so verify the
+    # package *ships* the man page rather than that it survived the exclusion.
+    dpkg-deb -c /dist/regin_*.deb | grep -q "usr/share/man/man1/regin.1"
   '
   [ "$status" -eq 0 ]
 }
