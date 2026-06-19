@@ -4,6 +4,7 @@ pub mod config;
 pub mod context;
 pub mod deputy;
 pub mod desired;
+pub mod filters;
 pub mod escalation;
 pub mod foreman;
 pub mod guardrail;

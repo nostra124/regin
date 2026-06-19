@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::desired::{DesiredInfo, DesiredState};
+use crate::filters::FilterRule;
 use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
     Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
@@ -179,6 +180,14 @@ pub enum Request {
     /// Compute the KPI snapshot + constrained objective over the last N days.
     #[serde(rename = "metrics")]
     Metrics { since_days: Option<u32> },
+
+    // --- Notice filters (FEAT-052) ---
+    /// List loaded notice-filter rules (system + user).
+    #[serde(rename = "filters_list")]
+    FiltersList,
+    /// Test whether an observation would be filtered.
+    #[serde(rename = "filters_test")]
+    FiltersTest { domain: String, text: String },
 }
 
 /// Response from daemon to CLI.
@@ -267,6 +276,9 @@ pub enum Response {
 
     #[serde(rename = "metrics")]
     Metrics { summary: Box<KpiSummary>, objective: Objective },
+
+    #[serde(rename = "filters")]
+    Filters { rules: Vec<FilterRule> },
 
     #[serde(rename = "context")]
     Context { repo_key: Option<String>, content: Option<String> },

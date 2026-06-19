@@ -180,6 +180,12 @@ enum Commands {
         days: Option<u32>,
     },
 
+    /// Inspect notice filters that suppress known noise before the LLM (FEAT-052).
+    Filters {
+        #[command(subcommand)]
+        action: FiltersAction,
+    },
+
     /// Show or set the per-repo context (stored in regin's own DB, keyed by repo path).
     Context {
         #[command(subcommand)]
@@ -577,6 +583,14 @@ enum ProblemAction {
 }
 
 #[derive(Subcommand)]
+enum FiltersAction {
+    /// List loaded notice-filter rules (system + user).
+    List,
+    /// Test whether an observation would be filtered before reaching the LLM.
+    Test { domain: String, text: String },
+}
+
+#[derive(Subcommand)]
 enum DesiredAction {
     /// List loaded desired-state domains (system + user), flagging conflicts.
     List,
@@ -667,6 +681,10 @@ async fn main() -> Result<()> {
             DesiredAction::Check => cmd_ok(Request::DesiredCheck).await,
         },
         Commands::Metrics { days } => cmd_metrics(days).await,
+        Commands::Filters { action } => match action {
+            FiltersAction::List => cmd_filters_list().await,
+            FiltersAction::Test { domain, text } => cmd_ok(Request::FiltersTest { domain, text }).await,
+        },
         Commands::Context { action } => match action {
             ContextAction::Show => cmd_context_show().await,
             ContextAction::Set { content } => {
@@ -1764,6 +1782,29 @@ fn fmt_secs(secs: i64) -> String {
     } else {
         format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
     }
+}
+
+async fn cmd_filters_list() -> Result<()> {
+    match rpc(&Request::FiltersList).await? {
+        Response::Filters { rules } => {
+            if rules.is_empty() {
+                println!("No notice filters. Add rule files under ~/.config/regin/filters/*.toml");
+                return Ok(());
+            }
+            for r in &rules {
+                print_color(&format!("  {:<20}", r.name), Color::Cyan);
+                print_color(&format!("[{}] ", r.source), Color::DarkGrey);
+                print!("contains {:?}", r.contains);
+                if let Some(d) = &r.domain {
+                    print!(" (domain: {d})");
+                }
+                println!();
+            }
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
 }
 
 async fn cmd_metrics(days: Option<u32>) -> Result<()> {

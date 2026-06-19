@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    config, context, db, desired, kpi,
+    config, context, db, desired, filters, kpi,
     llm::{LlmTurn, NanoGptClient},
     protocol::{Request, Response},
     reflect, repo, skills,
@@ -547,6 +547,20 @@ async fn dispatch(
                 (summary, objective)
             };
             send(w, &Response::Metrics { summary: Box::new(summary), objective }).await?;
+        }
+
+        // --- Notice filters (FEAT-052) ---
+        Request::FiltersList => {
+            let rules = filters::load_filters(&config::system_filters_dir(), &config::user_filters_dir()?);
+            send(w, &Response::Filters { rules }).await?;
+        }
+        Request::FiltersTest { domain, text } => {
+            let rules = filters::load_filters(&config::system_filters_dir(), &config::user_filters_dir()?);
+            let message = match filters::first_match(&rules, &domain, &text) {
+                Some(r) => format!("FILTERED by rule `{}` (would be dropped before the LLM)", r.name),
+                None => "NOT filtered (would reach the LLM review tier)".to_string(),
+            };
+            send(w, &Response::Ok { message }).await?;
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---

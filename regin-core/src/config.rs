@@ -8,6 +8,9 @@ pub const SYSTEM_SKILLS_DIR: &str = "/usr/share/regin/skills";
 /// System-wide desired-state (to-be) directory, shipped with the package (FEAT-033).
 pub const SYSTEM_DESIRED_DIR: &str = "/usr/share/regin/desired";
 
+/// System-wide notice-filter directory, shipped with the package (FEAT-052).
+pub const SYSTEM_FILTERS_DIR: &str = "/usr/share/regin/filters";
+
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("nanogpt.api_key", "", "NanoGPT API key"),
@@ -71,6 +74,17 @@ pub fn user_desired_dir() -> Result<PathBuf> {
 /// Returns system desired-state dir: /usr/share/regin/desired/ (FEAT-033)
 pub fn system_desired_dir() -> PathBuf {
     PathBuf::from(SYSTEM_DESIRED_DIR)
+}
+
+/// Returns user notice-filter dir: ~/.config/regin/filters/ (FEAT-052)
+pub fn user_filters_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("filters"))
+}
+
+/// Returns system notice-filter dir: /usr/share/regin/filters/ (FEAT-052)
+pub fn system_filters_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_FILTERS_DIR)
 }
 
 /// Returns the user systemd unit dir: ~/.config/systemd/user/
