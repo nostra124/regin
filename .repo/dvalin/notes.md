@@ -47,6 +47,24 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-19 — DISC-009 decided (three-lane remediation guardrail)
+- **Q1 mechanism = Hybrid (H):** capability ceiling + declarative safe-action
+  fast-path + LLM judgement within bounds.
+- **Q2 posture = adaptive (earn autonomy):** start conservative; safe-lane
+  graduates to auto-apply as change-success / autonomy KPIs prove trust — same
+  earn-trust pattern as DISC-015 promotion, same KPI store.
+- **Q3 safe-lane gate = rollback plan + dry-run:** auto-apply only if a concrete
+  backout/undo is captured *before* applying (snapshot/backup/reversible) with
+  bounded blast radius, plus dry-run where supported. Allowlist = fast-path of
+  pre-blessed reversible ops.
+- **Q4 ceiling = own operator ceiling + minimal static global red-lines.** Operator
+  ceiling (editable) does day-to-day work; a tiny non-runtime-adjustable global
+  red-line set protects the safety substrate (backups/snapshots/audit/KPI store),
+  governance (service stop, escalation channel, kill-switch) and bars catastrophic
+  host actions. Rationale: operator ceiling is editable + regin ingests logs
+  (prompt-injection surface), so the global layer is defense-in-depth. Note: Q3's
+  safe-lane *requires* the "never delete rollback/audit substrate" red-line.
+
 ### 2026-06-19 — DISC-015 decided (KPIs + promotion loop) + DISC-016 (self-audit) spawned
 - **DISC-015 resolved via guided Q&A.** KPI framework reviewed/expanded first:
   reliability is a **constraint not a currency** (minimise cost s.t. reliability ≥
