@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
     audit, bus, config, context, db, desired, filters, kpi,
-    llm::{LlmTurn, NanoGptClient},
+    llm::{LlmTurn, MimirClient},
     opskill,
     greeting,
     mode,
@@ -29,15 +29,18 @@ unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
 
 impl AppState {
-    fn llm_client(&self) -> Result<NanoGptClient> {
+    fn llm_client(&self) -> Result<MimirClient> {
         let db = self.db.lock().expect("DB poisoned");
-        let base_url = db::setting_get(&db, "nanogpt.base_url")?;
-        let api_key = db::setting_get(&db, "nanogpt.api_key")?;
-        let model = db::setting_get(&db, "nanogpt.model")?;
-        if api_key.is_empty() {
-            return Err(anyhow!("nanogpt.api_key not set. Run: regin config set nanogpt.api_key <key>"));
+        let base_url = db::setting_get(&db, "mimir.base_url")?;
+        let fingerprint = db::setting_get(&db, "mimir.fingerprint")?;
+        let model = db::setting_get(&db, "mimir.model")?;
+        if fingerprint.is_empty() {
+            return Err(anyhow!(
+                "mimir.fingerprint not set. Regin reaches its LLM through Mimir — set the \
+                 approved access credential: regin config set mimir.fingerprint <fingerprint>"
+            ));
         }
-        Ok(NanoGptClient::new(base_url, api_key, model))
+        Ok(MimirClient::new(base_url, fingerprint, model))
     }
 
 }
@@ -217,7 +220,7 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
     }
     msgs.extend(build_context(state, cwd));
     for m in user_messages {
-        msgs.push(NanoGptClient::msg_to_value(m));
+        msgs.push(MimirClient::msg_to_value(m));
     }
 
     // Agentic loop
@@ -244,7 +247,7 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
                     }).await?;
 
                     // Add tool result to conversation
-                    msgs.push(NanoGptClient::tool_result_message(&result.tool_call_id, &result.output));
+                    msgs.push(MimirClient::tool_result_message(&result.tool_call_id, &result.output));
                 }
                 // Continue the loop — call LLM again with tool results
             }

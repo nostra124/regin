@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::db;
-use crate::llm::NanoGptClient;
+use crate::llm::MimirClient;
 use crate::types::{ChatMessage, Episode, Memory};
 
 /// A proposed semantic memory produced by reflection.
@@ -128,7 +128,7 @@ pub fn reflection_prompt(episodes: &[Episode], existing: &[Memory]) -> String {
 /// is the decay cutoff (RFC3339).
 pub async fn reflect_once(
     conn: &Connection,
-    client: &NanoGptClient,
+    client: &MimirClient,
     window: usize,
     decay_before: &str,
 ) -> Result<ReflectionStats> {

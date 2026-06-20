@@ -16,9 +16,9 @@ pub const SYSTEM_OPERATOR_SKILLS_DIR: &str = "/usr/share/regin/operator-skills";
 
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
-    ("nanogpt.api_key", "", "NanoGPT API key"),
-    ("nanogpt.model", "auto", "LLM model (auto routes via the subscription)"),
-    ("nanogpt.base_url", "https://nano-gpt.com/api/v1", "NanoGPT API base URL"),
+    ("mimir.base_url", "http://127.0.0.1:8700/v1", "Mimir gateway OpenAI-compatible base URL"),
+    ("mimir.fingerprint", "", "Mimir access credential — the approved client-cert SHA-256 fingerprint, sent as X-Client-Cert-Sha256 (provision via Dvalin / the Mimir console)"),
+    ("mimir.model", "auto", "LLM model (auto routes via Mimir)"),
     ("daemon.enabled", "false", "Keep daemon running permanently via user systemd"),
     ("daemon.auto_register", "true", "On first use, auto-register the systemd user service (set false to only spawn transiently)"),
     ("memory.episodic_retention_days", "30", "Days to retain reflected episodic memories"),

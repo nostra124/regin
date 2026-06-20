@@ -10,13 +10,25 @@ use tracing::{debug, trace};
 use crate::tools::{ToolCall, ToolDef};
 use crate::types::ChatMessage;
 
+/// Client for the **Mimir** gateway's OpenAI-compatible `/v1` surface.
+///
+/// Regin reaches its LLM only through Mimir (the on-premise gateway).
+/// Mimir authenticates a consumer by the SHA-256 fingerprint of its
+/// client cert, presented in the `X-Client-Cert-Sha256` header — the
+/// agent's opaque access credential, provisioned and approved out of band
+/// (e.g. by Dvalin via `PUT /api/mimir/v1/consumers/{fingerprint}`).
 #[derive(Debug, Clone)]
-pub struct NanoGptClient {
+pub struct MimirClient {
     pub base_url: String,
-    pub api_key: String,
+    /// The approved consumer credential (client-cert SHA-256 fingerprint),
+    /// sent as `X-Client-Cert-Sha256`.
+    pub fingerprint: String,
     pub model: String,
     pub client: Client,
 }
+
+/// Header Mimir reads to identify an approved consumer.
+const CERT_FINGERPRINT_HEADER: &str = "X-Client-Cert-Sha256";
 
 // -- Request types --
 
@@ -72,11 +84,15 @@ pub enum LlmTurn {
     },
 }
 
-impl NanoGptClient {
-    pub fn new(base_url: impl Into<String>, api_key: impl Into<String>, model: impl Into<String>) -> Self {
+impl MimirClient {
+    pub fn new(
+        base_url: impl Into<String>,
+        fingerprint: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
-            api_key: api_key.into(),
+            fingerprint: fingerprint.into(),
             model: model.into(),
             client: Client::new(),
         }
@@ -109,7 +125,7 @@ impl NanoGptClient {
 
         let response = self.client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header(CERT_FINGERPRINT_HEADER, &self.fingerprint)
             .json(&body)
             .send()
             .await
@@ -189,7 +205,7 @@ impl NanoGptClient {
 
         let response = self.client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header(CERT_FINGERPRINT_HEADER, &self.fingerprint)
             .json(&body)
             .send()
             .await
