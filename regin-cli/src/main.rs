@@ -26,7 +26,7 @@ use tokio::net::UnixStream;
 /// in SQLite — no config files needed.
 ///
 /// Quick start:
-///   regin config set nanogpt.api_key <key>
+///   regin config set mimir.fingerprint <credential>
 ///   regin chat
 ///
 /// Skills are markdown-defined tasks in /usr/share/regin/skills/ (system)
@@ -43,7 +43,7 @@ use tokio::net::UnixStream;
         The daemon (regind) starts automatically. All configuration is stored\n\
         in SQLite. No config files needed.\n\n\
         GETTING STARTED:\n\
-        \x20 regin config set nanogpt.api_key YOUR_KEY\n\
+        \x20 regin config set mimir.fingerprint YOUR_CREDENTIAL\n\
         \x20 regin chat\n\n\
         See regin(1) and regind(1) for full documentation.",
     after_help = "EXAMPLES:\n\
@@ -115,15 +115,15 @@ enum Commands {
     /// All settings are stored in the SQLite database. No config files.
     ///
     /// Key settings:
-    ///   nanogpt.api_key     NanoGPT API key (required)
-    ///   nanogpt.model       LLM model (default: claude-sonnet-4-20250514)
-    ///   nanogpt.base_url    API endpoint
+    ///   mimir.fingerprint   Mimir access credential — approved client-cert fingerprint (required)
+    ///   mimir.model         LLM model (default: auto — Mimir routes it)
+    ///   mimir.base_url      Mimir gateway OpenAI-compatible base URL
     ///   daemon.enabled      Run regind as persistent user service (true/false)
     #[command(after_help = "EXAMPLES:\n\
-        \x20 regin config set nanogpt.api_key sk-abc123\n\
-        \x20 regin config set nanogpt.model gpt-4o\n\
+        \x20 regin config set mimir.fingerprint a1b2c3...\n\
+        \x20 regin config set mimir.model gpt-4o\n\
         \x20 regin config set daemon.enabled true\n\
-        \x20 regin config get nanogpt.model\n\
+        \x20 regin config get mimir.model\n\
         \x20 regin config list")]
     Config {
         #[command(subcommand)]
@@ -411,7 +411,7 @@ enum TaskAction {
     /// Create a new task (skill) in the user skills dir.
     ///
     /// Scaffolds a template skill.md, or — with --from-prompt — has the agent
-    /// draft it (requires nanogpt.api_key). Refuses to overwrite an existing
+    /// draft it (requires mimir.fingerprint). Refuses to overwrite an existing
     /// user skill unless --force.
     Create {
         /// Task (skill) name
@@ -438,7 +438,7 @@ enum ConfigAction {
 
     /// Get the value of a setting.
     Get {
-        /// Setting key (e.g. nanogpt.api_key)
+        /// Setting key (e.g. mimir.fingerprint)
         key: String,
     },
 

@@ -10,8 +10,8 @@ interactive chat interface.
 
 ```
 ┌──────────┐     ┌────────────┐     ┌───────────────┐
-│  regin   │     │   regind   │     │   NanoGPT API │
-│  (CLI)   │────▶│  (daemon)  │────▶│  (LLM)        │
+│  regin   │     │   regind   │     │  Mimir gateway│
+│  (CLI)   │────▶│  (daemon)  │────▶│  (LLM /v1)    │
 └────┬─────┘     └─────┬──────┘     └───────────────┘
      │                 │
      └────────┬────────┘
@@ -20,6 +20,12 @@ interactive chat interface.
        │   SQLite DB  │
        └─────────────┘
 ```
+
+Regin reaches its LLM **only through [Mimir](https://github.com/nostra124/mimir)**,
+the on-premise gateway (which itself fronts NanoGPT and 24+ other
+providers). Regin talks to Mimir's OpenAI-compatible `/v1`, authenticating
+with an approved consumer credential (a client-cert fingerprint, sent as
+`X-Client-Cert-Sha256`) — provisioned by an operator or by Dvalin.
 
 - **regin-core** — shared library: config, database, LLM client, skills engine
 - **regind** — systemd daemon that runs skills on a schedule
@@ -31,8 +37,8 @@ interactive chat interface.
 # Build (or install a native package — see Daemon below)
 cargo build --release
 
-# Set your NanoGPT API key (settings live in SQLite, not a config file)
-./target/release/regin config set nanogpt.api_key "your-key-here"
+# Set your Mimir access credential (settings live in SQLite, not a config file)
+./target/release/regin config set mimir.fingerprint "your-approved-fingerprint"
 
 # List operational tasks (skills) and run one
 ./target/release/regin task list
@@ -94,11 +100,11 @@ managed with `regin config`:
 
 ```bash
 regin config list
-regin config get nanogpt.model
-regin config set nanogpt.api_key "your-nanogpt-api-key"
+regin config get mimir.model
+regin config set mimir.fingerprint "your-approved-fingerprint"
 ```
 
-Common keys: `nanogpt.api_key`, `nanogpt.model`, `nanogpt.base_url`,
+Common keys: `mimir.fingerprint`, `mimir.model`, `mimir.base_url`,
 `daemon.enabled`, `monitor.recurrence_threshold`, `kpi.reliability_floor`.
 
 ## CLI Commands
