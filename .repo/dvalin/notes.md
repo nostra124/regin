@@ -47,6 +47,21 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-29 — FEAT-027: Portability verbs memory export/import (0.6.0)
+- **FEAT-027 implemented and moved to done/.** Three new portability verbs:
+  - `regin memory export <path>` — `VACUUM INTO` creates a consistent compact
+    snapshot; stamps `exported_from` (hostname) and `exported_at` (timestamp)
+    in the snapshot's `identity_meta`.
+  - `regin memory import <path> [--merge]` — opens the snapshot, checks
+    `identity_id` collision: different identity → refuse; same identity without
+    `--merge` → refuse with hint; same identity with `--merge` → INSERT OR
+    IGNORE all memories from the snapshot (18-column copy with
+    `params_from_iter` since `params!` caps at 16).
+  - `regin memory info` — surfaces identity_id, name, host, schema_version,
+    memory_count, created_at.
+  - Daemon dispatch + protocol Request/Response variants wired.
+  - 250 total tests pass, clippy-clean.
+
 ### 2026-06-29 — FEAT-026: Vector/embedding recall (0.6.0)
 - **FEAT-026 implemented and moved to done/.** Hybrid FTS5 + embedding recall:
   - `MimirClient::embedding()` → calls `/v1/embeddings`, returns `Vec<f32>`.

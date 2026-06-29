@@ -96,6 +96,18 @@ pub enum Request {
     #[serde(rename = "memory_reflect")]
     MemoryReflect,
 
+    /// Export identity database to a portable snapshot (FEAT-027).
+    #[serde(rename = "memory_export")]
+    MemoryExport { path: String },
+
+    /// Import a portable identity snapshot (FEAT-027).
+    #[serde(rename = "memory_import")]
+    MemoryImport { path: String, merge: bool },
+
+    /// Show identity metadata (FEAT-027).
+    #[serde(rename = "memory_info")]
+    MemoryInfo,
+
     // --- Per-repo context (FEAT-008) ---
     #[serde(rename = "context_show")]
     ContextShow { cwd: Option<String> },
@@ -340,6 +352,19 @@ pub enum Response {
 
     #[serde(rename = "skill_created")]
     SkillCreated { path: String, shadows_system: bool },
+
+    #[serde(rename = "memory_export")]
+    MemoryExport { path: String },
+
+    #[serde(rename = "memory_info")]
+    MemoryInfo {
+        identity_id: String,
+        name: String,
+        host: String,
+        schema_version: String,
+        memory_count: i64,
+        created_at: String,
+    },
 
     #[serde(rename = "reflect_stats")]
     ReflectStats { episodes: u32, reinforced: u32, created: u32, decayed: u32 },

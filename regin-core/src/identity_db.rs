@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use rusqlite::{params, Connection};
 use std::collections::HashSet;
 use std::path::Path;
@@ -485,6 +485,154 @@ pub fn memory_save_reflection(conn: &Connection, category: &str, content: &str) 
         strength: 1,
         last_seen: Some(now),
         source: "reflection".into(),
+    })
+}
+
+/// Identity metadata returned by [`memory_info`].
+pub struct IdentityInfo {
+    pub identity_id: String,
+    pub name: String,
+    pub host: String,
+    pub schema_version: String,
+    pub memory_count: i64,
+    pub created_at: String,
+}
+
+/// Export the identity database to a portable snapshot file (FEAT-027).
+///
+/// Uses SQLite `VACUUM INTO` to create a consistent, compact copy, then
+/// stamps `exported_from` (hostname) and `exported_at` (timestamp) into
+/// the snapshot's `identity_meta`.
+pub fn memory_export(conn: &Connection, path: &str) -> Result<()> {
+    // Sanitise path for VACUUM INTO (single-quote escape).
+    let escaped = path.replace('\'', "''");
+    conn.execute_batch(&format!("VACUUM INTO '{}'", escaped))
+        .with_context(|| format!("VACUUM INTO failed for: {path}"))?;
+
+    // Stamp metadata in the exported snapshot.
+    let export_conn = Connection::open(path)
+        .with_context(|| format!("Failed to re-open snapshot: {path}"))?;
+    let host = hostname();
+    let now = chrono::Utc::now().to_rfc3339();
+    meta_set(&export_conn, "exported_from", &host)?;
+    meta_set(&export_conn, "exported_at", &now)?;
+    drop(export_conn);
+
+    Ok(())
+}
+
+/// Import a portable identity snapshot (FEAT-027).
+///
+/// When `merge` is true and the snapshot belongs to the same identity,
+/// memories from the snapshot are inserted (INSERT OR IGNORE) into the
+/// live database. When `merge` is false a different-identity snapshot is
+/// refused with an error. Different-identity snapshots are always refused.
+pub fn memory_import(conn: &Connection, path: &str, merge: bool) -> Result<usize> {
+    let import_conn = Connection::open(path)
+        .with_context(|| format!("Failed to open snapshot: {path}"))?;
+
+    let src_id = meta_get(&import_conn, "identity_id")?
+        .unwrap_or_default();
+    let dst_id = meta_get(conn, "identity_id")?
+        .unwrap_or_default();
+
+    if src_id != dst_id {
+        return Err(anyhow!(
+            "Snapshot belongs to a different identity ({src_id}). \
+             Refusing to merge distinct identities."
+        ));
+    }
+
+    if !merge {
+        return Err(anyhow!(
+            "Identity '{dst_id}' already exists and --merge was not specified. \
+             Use --merge to import without overwriting existing data."
+        ));
+    }
+
+    // Copy memories (INSERT OR IGNORE — skip duplicates by id).
+    let mut stmt = import_conn.prepare(
+        "SELECT id, topic_id, category, tier, host, repo_key, source, content,
+                strength, trust_score, retrieval_count, helpful_count, pinned,
+                last_seen, last_retrieved, embedding, created_at, updated_at
+         FROM memories"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+            row.get::<_, i64>(8)?,
+            row.get::<_, f64>(9)?,
+            row.get::<_, i64>(10)?,
+            row.get::<_, i64>(11)?,
+            row.get::<_, i64>(12)?,
+            row.get::<_, Option<String>>(13)?,
+            row.get::<_, Option<String>>(14)?,
+            row.get::<_, Option<Vec<u8>>>(15)?,
+            row.get::<_, String>(16)?,
+            row.get::<_, String>(17)?,
+        ))
+    })?
+    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let count = rows.len();
+    for row in &rows {
+        let p: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+            Box::new(row.0.clone()),
+            Box::new(row.1.clone()),
+            Box::new(row.2.clone()),
+            Box::new(row.3.clone()),
+            Box::new(row.4.clone()),
+            Box::new(row.5.clone()),
+            Box::new(row.6.clone()),
+            Box::new(row.7.clone()),
+            Box::new(row.8),
+            Box::new(row.9),
+            Box::new(row.10),
+            Box::new(row.11),
+            Box::new(row.12),
+            Box::new(row.13.clone()),
+            Box::new(row.14.clone()),
+            Box::new(row.15.clone()),
+            Box::new(row.16.clone()),
+            Box::new(row.17.clone()),
+        ];
+        conn.execute(
+            "INSERT OR IGNORE INTO memories
+             (id, topic_id, category, tier, host, repo_key, source, content,
+              strength, trust_score, retrieval_count, helpful_count, pinned,
+              last_seen, last_retrieved, embedding, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+            rusqlite::params_from_iter(p.iter()),
+        )?;
+    }
+
+    Ok(count)
+}
+
+/// Return identity metadata for the `regin memory info` verb.
+pub fn memory_info(conn: &Connection) -> Result<IdentityInfo> {
+    let identity_id = meta_get(conn, "identity_id")?.unwrap_or_default();
+    let name = meta_get(conn, "name")?.unwrap_or_default();
+    let schema_version = meta_get(conn, "schema_version")?.unwrap_or_default();
+    let created_at = meta_get(conn, "created_at")?.unwrap_or_default();
+    let memory_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap_or(0);
+    let host = hostname();
+    Ok(IdentityInfo {
+        identity_id,
+        name,
+        host,
+        schema_version,
+        memory_count,
+        created_at,
     })
 }
 

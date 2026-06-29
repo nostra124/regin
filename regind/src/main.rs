@@ -505,6 +505,29 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
             send(w, &Response::Ok { message: format!("Memory {id} deleted") }).await?;
         }
 
+        // --- Portability (FEAT-027) ---
+        Request::MemoryExport { path } => {
+            { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_export(&db, &path)?; }
+            send(w, &Response::MemoryExport { path }).await?;
+        }
+
+        Request::MemoryImport { path, merge } => {
+            let count = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_import(&db, &path, merge)? };
+            send(w, &Response::Ok { message: format!("Imported {count} memories from {path}") }).await?;
+        }
+
+        Request::MemoryInfo => {
+            let info = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_info(&db)? };
+            send(w, &Response::MemoryInfo {
+                identity_id: info.identity_id,
+                name: info.name,
+                host: info.host,
+                schema_version: info.schema_version,
+                memory_count: info.memory_count,
+                created_at: info.created_at,
+            }).await?;
+        }
+
         // --- Curator / reflection (FEAT-006 / FEAT-024) ---
         Request::MemoryReflect => {
             let stats = run_curation(state).await?;

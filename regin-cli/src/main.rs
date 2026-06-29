@@ -494,6 +494,24 @@ enum MemoryAction {
 
     /// Run a Hermes reflection pass now: distil recent episodes into memories.
     Reflect,
+
+    /// Export the identity database to a portable snapshot file.
+    Export {
+        /// Output path for the snapshot
+        path: String,
+    },
+
+    /// Import a portable identity snapshot.
+    Import {
+        /// Path to the snapshot file
+        path: String,
+        /// Merge without overwriting existing memories (default: refuse if identity exists)
+        #[arg(long)]
+        merge: bool,
+    },
+
+    /// Show identity metadata.
+    Info,
 }
 
 #[derive(Subcommand)]
@@ -675,6 +693,9 @@ async fn main() -> Result<()> {
             MemoryAction::Update { id, content } => cmd_memory_update(&id, &content).await,
             MemoryAction::Delete { id } => cmd_memory_delete(&id).await,
             MemoryAction::Reflect => cmd_memory_reflect().await,
+            MemoryAction::Export { path } => cmd_memory_export(&path).await,
+            MemoryAction::Import { path, merge } => cmd_memory_import(&path, merge).await,
+            MemoryAction::Info => cmd_memory_info().await,
         },
         Commands::Incident { action } => match action {
             IncidentAction::Open { title, severity, desc } => {
@@ -1586,6 +1607,42 @@ async fn cmd_memory_update(id: &str, content: &str) -> Result<()> {
 async fn cmd_memory_delete(id: &str) -> Result<()> {
     match rpc(&Request::MemoryDelete { id: id.into() }).await? {
         Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_memory_export(path: &str) -> Result<()> {
+    match rpc(&Request::MemoryExport { path: path.into() }).await? {
+        Response::MemoryExport { path: p } => {
+            println_color(&format!("✓ Exported identity to {p}"), Color::Green);
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_memory_import(path: &str, merge: bool) -> Result<()> {
+    match rpc(&Request::MemoryImport { path: path.into(), merge }).await? {
+        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+        Response::Error { message } => return Err(anyhow!("{message}")),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_memory_info() -> Result<()> {
+    match rpc(&Request::MemoryInfo).await? {
+        Response::MemoryInfo { identity_id, name, host, schema_version, memory_count, created_at } => {
+            println!("Identity:    {identity_id}");
+            println!("Name:        {name}");
+            println!("Host:        {host}");
+            println!("Schema:      {schema_version}");
+            println!("Memories:    {memory_count}");
+            println!("Created:     {created_at}");
+        }
+        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())

@@ -40,7 +40,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | FEAT-024 | Consolidation pipeline (Curator) | done |
 | FEAT-025 | Activation-ranked retrieval | done |
 | FEAT-026 | Vector/embedding recall | done |
-| FEAT-027 | Portability verbs (`memory export/import`) | open |
+| FEAT-027 | Portability verbs (`memory export/import`) | done |
 
 ### Decision plane (DISC-018)
 
