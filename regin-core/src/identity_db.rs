@@ -514,6 +514,107 @@ pub fn memory_search(conn: &Connection, query: &str) -> Result<Vec<Memory>> {
     Ok(rows)
 }
 
+/// Search memories using FTS5 BM25 + activation reranking (FEAT-025).
+///
+/// Activation = f(BM25 rank, recency, retrieval_count, trust_score, strength).
+/// Each returned hit is reinforced (retrieval_count++ and last_retrieved updated).
+///
+/// When `host` is Some, only host-scoped memories matching the host or identity-global
+/// memories (host IS NULL) are returned.
+pub fn memory_search_ranked(
+    conn: &Connection,
+    query: &str,
+    host: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    // FTS5 candidate selection with activation scoring.
+    //   bm25_score = bm25(memories_fts, 0, 1) — negative is better, so we negate.
+    //   recency = days since last_retrieved (capped at 365, normalized).
+    //   activation = -bm25 * 10 + recency_score + retrieval_count * 0.1 + trust_score * 5 + strength * 2
+    let now = chrono::Utc::now().to_rfc3339();
+    let sql = format!(
+        "SELECT m.id, m.category, m.content, m.created_at, m.updated_at,
+                m.strength, m.last_seen, m.source
+         FROM memories m
+         INNER JOIN memories_fts fts ON m.rowid = fts.rowid
+         WHERE memories_fts MATCH ?2
+           AND (m.host IS NULL OR ?3 IS NULL OR m.host = ?3)
+         ORDER BY
+           (-bm25(memories_fts, 0.0, 1.0) * 10.0
+            + COALESCE(
+                CASE WHEN m.last_retrieved IS NOT NULL
+                THEN 5.0 * (1.0 - MIN(CAST(julianday(?1) - julianday(m.last_retrieved) AS REAL), 365.0) / 365.0)
+                ELSE 5.0 END
+              , 5.0)
+            + CAST(m.retrieval_count AS REAL) * 0.1
+            + m.trust_score * 5.0
+            + CAST(m.strength AS REAL) * 2.0
+           ) DESC
+         LIMIT ?4"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![&now, query, host, limit as i64], row_to_memory)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Reinforce each returned hit.
+    let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    memory_reinforce_retrieved(conn, &ids, &now)?;
+
+    Ok(rows)
+}
+
+/// Bump retrieval_count and last_retrieved for a batch of memories.
+fn memory_reinforce_retrieved(conn: &Connection, ids: &[String], now: &str) -> Result<()> {
+    for id in ids {
+        conn.execute(
+            "UPDATE memories
+             SET retrieval_count = retrieval_count + 1, last_retrieved = ?1
+             WHERE id = ?2",
+            params![now, id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Build context memories for the system prompt: activation-ranked, within budget,
+/// pinned first, host-aware (FEAT-025).
+///
+/// `budget` caps the total number of memories returned. `host` scopes per-host.
+pub fn context_memories(
+    conn: &Connection,
+    budget: usize,
+    host: Option<&str>,
+) -> Result<Vec<Memory>> {
+    // Pinned + high-trust surface first, then activation-ranked.
+    let sql = format!(
+        "SELECT m.id, m.category, m.content, m.created_at, m.updated_at,
+                m.strength, m.last_seen, m.source,
+                (CASE WHEN m.pinned = 1 THEN 1000.0 ELSE 0.0 END
+                 + m.trust_score * 5.0
+                 + CAST(m.strength AS REAL) * 2.0
+                 + CAST(m.retrieval_count AS REAL) * 0.1
+                 + COALESCE(
+                     CASE WHEN m.last_retrieved IS NOT NULL
+                     THEN 3.0 * (1.0 - MIN(CAST(julianday(?1) - julianday(m.last_retrieved) AS REAL), 365.0) / 365.0)
+                     ELSE 3.0 END
+                   , 3.0)
+                ) AS activation
+         FROM memories m
+         WHERE m.host IS NULL OR ?2 IS NULL OR m.host = ?2
+         ORDER BY activation DESC
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = stmt
+        .query_map(params![&now, host, budget as i64], |row| {
+            row_to_memory(row)
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub fn memory_find_similar(conn: &Connection, category: &str, content: &str) -> Result<Option<String>> {
     let needle = content.trim().to_lowercase();
     let r: std::result::Result<String, _> = conn.query_row(
@@ -1772,5 +1873,94 @@ mod tests {
             tags: vec![],
         };
         assert!(!curator_apply_proposal(&conn, &p).unwrap());
+    }
+
+    // -----------------------------------------------------------------------
+    // Activation-ranked retrieval tests (FEAT-025)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_search_ranked_returns_fts_matches() {
+        let conn = test_conn();
+        memory_save(&conn, "fact", "postgres needs tuning").unwrap();
+        memory_save(&conn, "fact", "nginx serves static files").unwrap();
+        // FTS5 query finds the match
+        let results = memory_search_ranked(&conn, "postgres", Some("box"), 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "postgres needs tuning");
+    }
+
+    #[test]
+    fn memory_search_ranked_reinforces_on_retrieval() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "important fact").unwrap();
+        let before: i64 = conn
+            .query_row("SELECT retrieval_count FROM memories WHERE id = ?1", params![&m.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(before, 0);
+
+        memory_search_ranked(&conn, "important", None, 10).unwrap();
+        let after: i64 = conn
+            .query_row("SELECT retrieval_count FROM memories WHERE id = ?1", params![&m.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(after, 1);
+
+        let retrieved: Option<String> = conn
+            .query_row("SELECT last_retrieved FROM memories WHERE id = ?1", params![&m.id], |r| r.get(0))
+            .unwrap();
+        assert!(retrieved.is_some(), "last_retrieved should be set");
+    }
+
+    #[test]
+    fn memory_search_ranked_respects_host_scoping() {
+        let conn = test_conn();
+        // Identity-global (host IS NULL)
+        memory_save_scoped(&conn, "fact", "global fact", None).unwrap();
+        // Host-scoped to different host
+        conn.execute(
+            "UPDATE memories SET host = 'server-a' WHERE content = 'global fact'",
+            [],
+        ).unwrap();
+        let m2 = memory_save_scoped(&conn, "fact", "server-b specific", None).unwrap();
+        conn.execute(
+            "UPDATE memories SET host = 'server-b' WHERE id = ?1",
+            params![&m2.id],
+        ).unwrap();
+
+        // Searching from server-a should get only the global + server-a
+        let results = memory_search_ranked(&conn, "fact", Some("server-a"), 10).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].content, "global fact");
+    }
+
+    #[test]
+    fn context_memories_orders_by_activation_pinned_first() {
+        let conn = test_conn();
+        let m1 = memory_save(&conn, "fact", "low activation").unwrap();
+        let m2 = memory_save(&conn, "fact", "pinned high trust").unwrap();
+        // Pin m2 and give it high trust
+        conn.execute(
+            "UPDATE memories SET pinned = 1, trust_score = 1.0, strength = 10 WHERE id = ?1",
+            params![&m2.id],
+        ).unwrap();
+        // Give m1 low trust
+        conn.execute(
+            "UPDATE memories SET trust_score = 0.1, strength = 1 WHERE id = ?1",
+            params![&m1.id],
+        ).unwrap();
+
+        let results = context_memories(&conn, 10, None).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].content, "pinned high trust", "pinned should be first");
+    }
+
+    #[test]
+    fn context_memories_respects_budget() {
+        let conn = test_conn();
+        for i in 0..10 {
+            memory_save(&conn, "fact", &format!("fact {i}")).unwrap();
+        }
+        let results = context_memories(&conn, 3, None).unwrap();
+        assert_eq!(results.len(), 3);
     }
 }

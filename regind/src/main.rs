@@ -201,7 +201,8 @@ fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
         let rc = key.as_deref().and_then(|k| db::repo_context_get(&db, k).ok().flatten());
         drop(db); // release regin.db before locking identity.db
         let idb = state.identity_db.lock().expect("DB poisoned");
-        let mems = identity_db::memory_list_for_repo(&idb, key.as_deref()).unwrap_or_default();
+        let hostname = identity_db::hostname();
+        let mems = identity_db::context_memories(&idb, 50, Some(&hostname)).unwrap_or_default();
         (mems, rc)
     };
     let mut msgs = Vec::new();
@@ -431,7 +432,8 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
         }
 
         Request::MemorySearch { query } => {
-            let mems = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_search(&db, &query)? };
+            let hostname = identity_db::hostname();
+            let mems = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_search_ranked(&db, &query, Some(&hostname), 50)? };
             send(w, &Response::MemoryList { memories: mems }).await?;
         }
 

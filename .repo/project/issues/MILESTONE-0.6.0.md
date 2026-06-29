@@ -38,7 +38,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | FEAT-022 | Migrate `episodes`/`memories` out of `regin.db` | done |
 | FEAT-023 | Session archival + transcript capture | done |
 | FEAT-024 | Consolidation pipeline (Curator) | done |
-| FEAT-025 | Activation-ranked retrieval | open |
+| FEAT-025 | Activation-ranked retrieval | done |
 | FEAT-026 | Vector/embedding recall | open |
 | FEAT-027 | Portability verbs (`memory export/import`) | open |
 

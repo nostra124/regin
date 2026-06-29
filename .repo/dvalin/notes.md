@@ -47,6 +47,20 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-29 — FEAT-025: Activation-ranked retrieval (0.6.0)
+- **FEAT-025 implemented and moved to done/.** Replaced the old `LIKE`-based
+  `memory_search` with FTS5 BM25 + activation reranking:
+  - `memory_search_ranked()`: FTS5 MATCH candidate selection, activation score =
+    f(BM25 * 10 + recency_score + retrieval_count*0.1 + trust_score*5 + strength*2).
+  - Self-reinforcing: each returned hit bumps `retrieval_count` and `last_retrieved`.
+  - Host-scoped: `host IS NULL OR host = ?` filters per-machine memories.
+  - `context_memories()`: activation-ranked with pinned-first ordering and
+    configurable budget, used in `build_context` for the system prompt.
+  - Daemon: MemorySearch dispatch uses `memory_search_ranked`; `build_context` uses
+    `context_memories` with budget=50 + hostname scope.
+  - 5 new tests covering FTS matching, reinforcement, host scoping, pinned-first
+    ordering, and budget. 231 total workspace tests pass, clippy-clean.
+
 ### 2026-06-29 — FEAT-024: Consolidation pipeline (Curator) (0.6.0)
 - **FEAT-024 implemented and moved to done/.** Full Curator pipeline replacing the old
   simple reflection (FEAT-005/006) with DISC-017 tiered consolidation:
