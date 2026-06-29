@@ -23,6 +23,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("daemon.auto_register", "true", "On first use, auto-register the systemd user service (set false to only spawn transiently)"),
     ("memory.episodic_retention_days", "30", "Days to retain reflected episodic memories"),
     ("memory.reflect_interval", "daily", "How often the daemon reflects episodes into semantic memory"),
+    ("memory.embeddings.enabled", "true", "Enable semantic retrieval via embeddings (FEAT-026); when disabled, falls back to FTS-only"),
+    ("memory.embeddings.model", "auto", "Embedding model (auto routes via Mimir)"),
     ("memory.decay_days", "30", "Reflection memories unseen this long lose strength (then drop at 0)"),
     ("monitor.auto_incident", "false", "Auto-open incidents from failed scheduled runs"),
     ("monitor.severity", "medium", "Severity for auto-opened monitor incidents"),

@@ -47,6 +47,28 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-29 — FEAT-026: Vector/embedding recall (0.6.0)
+- **FEAT-026 implemented and moved to done/.** Hybrid FTS5 + embedding recall:
+  - `MimirClient::embedding()` → calls `/v1/embeddings`, returns `Vec<f32>`.
+  - `cosine_similarity()` — deterministic unit tests with fixed vectors.
+  - `hybrid_search_ranked()` — merges FTS5 BM25 candidates + cosine-similarity
+    vector candidates, reranks by unified activation, reinforces hits.
+  - `store_memory_embedding()` / `memories_pending_embedding()` — BLOB
+    persistence and backfill plumbing.
+  - Daemon: MemorySearch computes query embedding (best-effort) then calls
+    `hybrid_search_ranked`; MemorySave/MemoryUpdate fire-and-forget embedding
+    via `state_embed_memory`; `run_curation` backfills up to 10 per pass.
+  - Config: `memory.embeddings.enabled` (default true), `memory.embeddings.model`
+    (default "auto").
+  - Graceful fallback: embedding failure or disabled → FTS-only
+    `memory_search_ranked`, no crash.
+  - 7 new tests covering cosine similarity, embedding persistence, pending
+    detection, hybrid semantic match, FTS fallback, host scoping, reinforcement.
+  - Critical design decision: MutexGuard must NOT be held across `.await` in
+    `run_curation`; use block scoping (`{ let idb = ...; ... }`) to drop the
+    guard before any `.await`.
+  - 250 total tests pass, clippy-clean.
+
 ### 2026-06-29 — FEAT-025: Activation-ranked retrieval (0.6.0)
 - **FEAT-025 implemented and moved to done/.** Replaced the old `LIKE`-based
   `memory_search` with FTS5 BM25 + activation reranking:

@@ -433,17 +433,70 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
 
         Request::MemorySearch { query } => {
             let hostname = identity_db::hostname();
-            let mems = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_search_ranked(&db, &query, Some(&hostname), 50)? };
+
+            // Best-effort hybrid search with embeddings (FEAT-026).
+            let embeddings_enabled = {
+                let db = state.db.lock().expect("DB poisoned");
+                db::setting_get(&db, "memory.embeddings.enabled").unwrap_or_else(|_| "true".into())
+            };
+
+            let mems = if embeddings_enabled == "true" {
+                let embedding_model = {
+                    let db = state.db.lock().expect("DB poisoned");
+                    db::setting_get(&db, "memory.embeddings.model").unwrap_or_else(|_| "auto".into())
+                };
+                match state.llm_client() {
+                    Ok(client) => {
+                        match client.embedding(&query, &embedding_model).await {
+                            Ok(q_emb) => {
+                                let db = state.identity_db.lock().expect("DB poisoned");
+                                identity_db::hybrid_search_ranked(&db, &query, &q_emb, Some(&hostname), 50)?
+                            }
+                            Err(e) => {
+                                warn!("embedding failed, falling back to FTS: {e}");
+                                let db = state.identity_db.lock().expect("DB poisoned");
+                                identity_db::memory_search_ranked(&db, &query, Some(&hostname), 50)?
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        let db = state.identity_db.lock().expect("DB poisoned");
+                        identity_db::memory_search_ranked(&db, &query, Some(&hostname), 50)?
+                    }
+                }
+            } else {
+                let db = state.identity_db.lock().expect("DB poisoned");
+                identity_db::memory_search_ranked(&db, &query, Some(&hostname), 50)?
+            };
+
             send(w, &Response::MemoryList { memories: mems }).await?;
         }
 
         Request::MemorySave { category, content } => {
             let m = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_save(&db, &category, &content)? };
+            // Best-effort embedding (fire-and-forget, FEAT-026).
+            let s = state.clone();
+            let c = content.clone();
+            let mid = m.id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = state_embed_memory(&s, &mid, &c).await {
+                    tracing::debug!("embedding on save: {e}");
+                }
+            });
             send(w, &Response::Ok { message: format!("Memory saved: {} [{}]", m.id, m.category) }).await?;
         }
 
         Request::MemoryUpdate { id, content } => {
             { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_update(&db, &id, &content)?; }
+            // Best-effort re-embed (FEAT-026).
+            let s = state.clone();
+            let c = content.clone();
+            let mid = id.clone();
+            tokio::spawn(async move {
+                if let Err(e) = state_embed_memory(&s, &mid, &c).await {
+                    tracing::debug!("embedding on update: {e}");
+                }
+            });
             send(w, &Response::Ok { message: format!("Memory {id} updated") }).await?;
         }
 
@@ -894,6 +947,48 @@ async fn schedule_checker(state: Arc<AppState>) {
     }
 }
 
+/// Compute and store an embedding for a single memory (best-effort, FEAT-026).
+/// Fails gracefully — errors are logged by callers.
+async fn state_embed_memory(state: &Arc<AppState>, id: &str, content: &str) -> Result<()> {
+    let enabled = {
+        let db = state.db.lock().expect("DB poisoned");
+        db::setting_get(&db, "memory.embeddings.enabled").unwrap_or_else(|_| "true".into())
+    };
+    if enabled != "true" {
+        return Ok(());
+    }
+    let client = state.llm_client()?;
+    let model = {
+        let db = state.db.lock().expect("DB poisoned");
+        db::setting_get(&db, "memory.embeddings.model").unwrap_or_else(|_| "auto".into())
+    };
+    let embedding = client.embedding(content, &model).await?;
+    let idb = state.identity_db.lock().expect("DB poisoned");
+    identity_db::store_memory_embedding(&idb, id, &embedding)?;
+    Ok(())
+}
+
+/// Backfill embeddings for memories that don't have one yet (FEAT-026).
+/// Processes up to `batch_size` memories per call, returns count embedded.
+async fn backfill_embeddings(state: &Arc<AppState>, batch_size: usize) -> Result<usize> {
+    let pending = {
+        let idb = state.identity_db.lock().expect("DB poisoned");
+        identity_db::memories_pending_embedding(&idb, batch_size)?
+    };
+    if pending.is_empty() {
+        return Ok(0);
+    }
+    let mut count = 0usize;
+    for (id, content) in &pending {
+        if let Err(e) = state_embed_memory(state, id, content).await {
+            info!("embedding backfill skipped {id}: {e}");
+        } else {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 /// Run one curation pass (FEAT-024). The DB lock is released around the
 /// network call so the daemon stays responsive.
 async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::CuratorStats> {
@@ -920,9 +1015,17 @@ async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::Curato
     };
 
     if episodes.is_empty() && sessions.is_empty() {
-        // Nothing to curate — still run maintenance.
-        let idb = state.identity_db.lock().expect("DB poisoned");
-        return reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before);
+        // Nothing to curate — still run maintenance + embedding backfill.
+        let stats = {
+            let idb = state.identity_db.lock().expect("DB poisoned");
+            reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?
+        };
+        if let Ok(n) = backfill_embeddings(state, 10).await {
+            if n > 0 {
+                info!("backfilled {n} embeddings");
+            }
+        }
+        return Ok(stats);
     }
 
     let prompt = reflect::curation_prompt(&episodes, &existing, &sessions);
@@ -933,18 +1036,26 @@ async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::Curato
         .filter_map(|p| p.topic.as_ref().filter(|t| !t.is_empty()).cloned())
         .collect();
 
-    let idb = state.identity_db.lock().expect("DB poisoned");
-    let mut stats = reflect::apply_curation(&idb, &proposals)?;
+    let stats = {
+        let idb = state.identity_db.lock().expect("DB poisoned");
+        let mut s = reflect::apply_curation(&idb, &proposals)?;
+        let mark = reflect::mark_consolidated(&idb, &episodes, &sessions, &topics)?;
+        s.episodes = mark.episodes;
+        s.sessions = mark.sessions;
+        s.topics = mark.topics;
+        let maint = reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?;
+        s.promoted = maint.promoted;
+        s.decayed = maint.decayed;
+        s.pruned = maint.pruned;
+        s
+    };
 
-    let mark = reflect::mark_consolidated(&idb, &episodes, &sessions, &topics)?;
-    stats.episodes = mark.episodes;
-    stats.sessions = mark.sessions;
-    stats.topics = mark.topics;
-
-    let maint = reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?;
-    stats.promoted = maint.promoted;
-    stats.decayed = maint.decayed;
-    stats.pruned = maint.pruned;
+    // Embedding backfill for new/modified memories (FEAT-026).
+    if let Ok(n) = backfill_embeddings(state, 10).await {
+        if n > 0 {
+            info!("backfilled {n} embeddings after curation");
+        }
+    }
 
     Ok(stats)
 }

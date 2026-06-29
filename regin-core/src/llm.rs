@@ -70,6 +70,18 @@ struct RespDelta {
     content: Option<String>,
 }
 
+// -- Embedding response types --
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingResponse {
+    data: Vec<EmbeddingDatum>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbeddingDatum {
+    embedding: Vec<f32>,
+}
+
 /// The outcome of a single LLM call with tools.
 #[derive(Debug)]
 pub enum LlmTurn {
@@ -177,6 +189,43 @@ impl MimirClient {
             "tool_call_id": tool_call_id,
             "content": content
         })
+    }
+
+    /// Compute an embedding vector for `input` via `/v1/embeddings`.
+    /// Returns an error when the API is unavailable or the model doesn't
+    /// support embeddings (callers should log and degrade gracefully).
+    pub async fn embedding(&self, input: &str, model: &str) -> Result<Vec<f32>> {
+        let url = format!("{}/embeddings", self.base_url);
+        let body = serde_json::json!({
+            "model": model,
+            "input": input,
+        });
+
+        let response = self
+            .client
+            .post(&url)
+            .header(CERT_FINGERPRINT_HEADER, &self.fingerprint)
+            .json(&body)
+            .send()
+            .await
+            .context("Embedding request failed")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Embedding error {status}: {text}"));
+        }
+
+        let resp: EmbeddingResponse = response
+            .json()
+            .await
+            .context("Failed to parse embedding response")?;
+
+        resp.data
+            .into_iter()
+            .next()
+            .map(|d| d.embedding)
+            .ok_or_else(|| anyhow!("No embedding data in response"))
     }
 
     /// Streaming chat completion (no tools). Returns token stream.

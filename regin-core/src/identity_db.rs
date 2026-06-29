@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
+use std::collections::HashSet;
 use std::path::Path;
 use tracing::info;
 
@@ -487,6 +488,33 @@ pub fn memory_save_reflection(conn: &Connection, category: &str, content: &str) 
     })
 }
 
+/// Store a computed embedding vector for a memory.
+pub fn store_memory_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
+    let blob: Vec<u8> = embedding
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    conn.execute(
+        "UPDATE memories SET embedding = ?1 WHERE id = ?2",
+        params![blob, id],
+    )?;
+    Ok(())
+}
+
+/// Return (id, content) pairs for memories whose embedding is NULL, up to
+/// `batch_size`. Used by the daemon to backfill embeddings lazily.
+pub fn memories_pending_embedding(conn: &Connection, batch_size: usize) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, content FROM memories WHERE embedding IS NULL LIMIT ?1"
+    )?;
+    let rows = stmt
+        .query_map(params![batch_size as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub fn memory_update(conn: &Connection, id: &str, content: &str) -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -527,10 +555,6 @@ pub fn memory_search_ranked(
     host: Option<&str>,
     limit: usize,
 ) -> Result<Vec<Memory>> {
-    // FTS5 candidate selection with activation scoring.
-    //   bm25_score = bm25(memories_fts, 0, 1) — negative is better, so we negate.
-    //   recency = days since last_retrieved (capped at 365, normalized).
-    //   activation = -bm25 * 10 + recency_score + retrieval_count * 0.1 + trust_score * 5 + strength * 2
     let now = chrono::Utc::now().to_rfc3339();
     let sql = format!(
         "SELECT m.id, m.category, m.content, m.created_at, m.updated_at,
@@ -557,11 +581,231 @@ pub fn memory_search_ranked(
         .query_map(params![&now, query, host, limit as i64], row_to_memory)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    // Reinforce each returned hit.
     let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
     memory_reinforce_retrieved(conn, &ids, &now)?;
 
     Ok(rows)
+}
+
+/// Cosine similarity between two f32 vectors. Returns 0.0 for empty or mismatched
+/// inputs (callers should ensure same dimension).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum();
+    let denom = (norm_a as f64).sqrt() * (norm_b as f64).sqrt();
+    if denom < 1e-12 {
+        0.0
+    } else {
+        (dot as f64) / denom
+    }
+}
+
+/// Search memories using hybrid FTS5 + vector cosine similarity (FEAT-026).
+///
+/// 1. FTS5 BM25 produces a candidate set.
+/// 2. Cosine similarity over stored embeddings produces a second candidate set.
+/// 3. Candidates are merged (union by ID) and reranked by activation:
+///    activation = cosine*20 + recency + retrieval_count*0.1 + trust_score*5 + strength*2 + pinned*1000
+///    plus an FTS boost (-bm25*10) for FTS-matched candidates.
+///
+/// When `query_embedding` is provided, vector search is included; otherwise this
+/// is equivalent to `memory_search_ranked`. Each returned hit is reinforced.
+pub fn hybrid_search_ranked(
+    conn: &Connection,
+    query: &str,
+    query_embedding: &[f32],
+    host: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let limit_i64 = limit as i64;
+
+    // ── Phase 1: FTS5 candidates (id + negated-BM25) ──
+    let mut fts_map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    {
+        let sql = format!(
+            "SELECT m.id, -bm25(memories_fts, 0.0, 1.0) AS score
+             FROM memories m
+             INNER JOIN memories_fts fts ON m.rowid = fts.rowid
+             WHERE memories_fts MATCH ?1
+               AND (m.host IS NULL OR ?2 IS NULL OR m.host = ?2)
+             LIMIT ?3"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![query, host, limit_i64], |row| {
+                let id: String = row.get(0)?;
+                let score: f64 = row.get(1)?;
+                Ok((id, score))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (id, score) in rows {
+            fts_map.insert(id, score);
+        }
+    }
+
+    // ── Phase 2: Vector candidates (id + cosine similarity) ──
+    let mut vec_map: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM memories WHERE embedding IS NOT NULL \
+             AND (host IS NULL OR ?1 IS NULL OR host = ?1)"
+        )?;
+        let rows = stmt
+            .query_map(params![host], |row| {
+                let id: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((id, blob))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut scored: Vec<(String, f64)> = Vec::with_capacity(rows.len());
+        for (id, blob) in &rows {
+            if blob.len() < 4 || blob.len() % 4 != 0 {
+                continue;
+            }
+            let emb: Vec<f32> = blob
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let sim = cosine_similarity(query_embedding, &emb);
+            scored.push((id.clone(), sim));
+        }
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        for (id, score) in scored {
+            vec_map.insert(id, score);
+        }
+    }
+
+    // ── Phase 3: Union of candidate IDs ──
+    let all_ids: Vec<String> = fts_map
+        .keys()
+        .chain(vec_map.keys())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .cloned()
+        .collect();
+
+    if all_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // ── Phase 4: Load full memory records ──
+    let placeholders: Vec<String> = (0..all_ids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect();
+
+    let load_sql = format!(
+        "SELECT m.id, m.category, m.content, m.created_at, m.updated_at,
+                m.strength, m.last_seen, m.source,
+                m.trust_score, m.retrieval_count, m.pinned, m.last_retrieved
+         FROM memories m
+         WHERE m.id IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    for id in &all_ids {
+        params_vec.push(Box::new(id.to_string()));
+    }
+
+    #[allow(clippy::type_complexity)]
+    let mut rows: Vec<(String, String, String, String, String, i64, Option<String>, String, f64, i64, i64, Option<String>)> = {
+        let mut stmt = conn.prepare(&load_sql)?;
+        stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, f64>(8)?,
+                row.get::<_, i64>(9)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, Option<String>>(11)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    // ── Phase 5: Rerank by activation in Rust ──
+    // activation = pinned*1000 + trust_score*5 + strength*2 + retrieval_count*0.1
+    //            + recency + fts_boost + cosine_boost
+    //   fts_boost    = max(-bm25*10, 0) for FTS-matched, 0 otherwise
+    //   cosine_boost = cosine*20 for vector-matched, 0 otherwise
+    //   recency      = 5*(1 - min(days_since_retrieved, 365)/365) if retrieved, else 5
+    //   pinned       = 1000 if pinned else 0
+    rows.sort_by(|a, b| {
+        let activation_a = compute_activation(a, &now, &fts_map, &vec_map);
+        let activation_b = compute_activation(b, &now, &fts_map, &vec_map);
+        activation_b
+            .partial_cmp(&activation_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    rows.truncate(limit);
+
+    let memories: Vec<Memory> = rows
+        .into_iter()
+        .map(|(id, category, content, created_at, updated_at, strength, last_seen, source, _trust, _retr, _pin, _last_ret)| {
+            Memory {
+                id,
+                category,
+                content,
+                created_at,
+                updated_at,
+                strength,
+                last_seen,
+                source,
+            }
+        })
+        .collect();
+
+    let ids: Vec<String> = memories.iter().map(|r| r.id.clone()).collect();
+    memory_reinforce_retrieved(conn, &ids, &now)?;
+
+    Ok(memories)
+}
+
+/// Compute the hybrid activation score for a single candidate row.
+fn compute_activation(
+    row: &(String, String, String, String, String, i64, Option<String>, String, f64, i64, i64, Option<String>),
+    now: &str,
+    fts_map: &std::collections::HashMap<String, f64>,
+    vec_map: &std::collections::HashMap<String, f64>,
+) -> f64 {
+    let (_id, _cat, _content, _created, _updated, strength, _last_seen, _source, trust_score, retrieval_count, pinned, last_retrieved) = row;
+
+    let fts_boost = fts_map.get(row.0.as_str()).copied().unwrap_or(0.0).max(0.0) * 10.0;
+    let cosine_boost = vec_map.get(row.0.as_str()).copied().unwrap_or(0.0) * 20.0;
+
+    let recency = match last_retrieved {
+        Some(lr) if !lr.is_empty() => {
+            let days = match (chrono::DateTime::parse_from_rfc3339(now), chrono::DateTime::parse_from_rfc3339(lr)) {
+                (Ok(now_dt), Ok(lr_dt)) => {
+                    let dur = now_dt.signed_duration_since(lr_dt);
+                    dur.num_hours() as f64 / 24.0
+                }
+                _ => 365.0,
+            };
+            5.0 * (1.0 - days.min(365.0) / 365.0)
+        }
+        _ => 5.0,
+    };
+
+    let pinned_bonus = if *pinned != 0 { 1000.0 } else { 0.0 };
+
+    pinned_bonus
+        + trust_score * 5.0
+        + *strength as f64 * 2.0
+        + *retrieval_count as f64 * 0.1
+        + recency
+        + fts_boost
+        + cosine_boost
 }
 
 /// Bump retrieval_count and last_retrieved for a batch of memories.
@@ -1962,5 +2206,141 @@ mod tests {
         }
         let results = context_memories(&conn, 3, None).unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    // ── FEAT-026: Vector embedding & hybrid search ──
+
+    #[test]
+    fn cosine_similarity_deterministic() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        let c = vec![0.5, 0.5, 0.0];
+        // orthogonal → 0
+        assert!((cosine_similarity(&a, &b) - 0.0).abs() < 1e-6);
+        // identical → 1
+        assert!((cosine_similarity(&a, &a) - 1.0).abs() < 1e-6);
+        // 45° → ~0.707
+        assert!((cosine_similarity(&a, &c) - 0.7071067811865475).abs() < 1e-6);
+        // zero vector → 0
+        let zero = vec![0.0, 0.0, 0.0];
+        assert!((cosine_similarity(&a, &zero) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn store_memory_embedding_persists() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "concept", "vector test").unwrap();
+        let emb = vec![0.1, 0.2, 0.3, 0.4];
+        store_memory_embedding(&conn, &m.id, &emb).unwrap();
+
+        let blob: Vec<u8> = conn
+            .query_row(
+                "SELECT embedding FROM memories WHERE id = ?1",
+                params![&m.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!blob.is_empty());
+        assert_eq!(blob.len(), 16); // 4 f32 × 4 bytes
+        let restored: Vec<f32> = blob
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        assert_eq!(restored, vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn memories_pending_embedding_finds_unembedded() {
+        let conn = test_conn();
+        let m1 = memory_save(&conn, "fact", "needs embedding").unwrap();
+        let m2 = memory_save(&conn, "fact", "has embedding").unwrap();
+        store_memory_embedding(&conn, &m2.id, &[1.0, 0.0]).unwrap();
+
+        let pending = memories_pending_embedding(&conn, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, m1.id);
+    }
+
+    #[test]
+    fn hybrid_search_ranked_finds_semantic_match() {
+        let conn = test_conn();
+        // Memory about "database performance" — keyword "postgres" won't match via FTS.
+        let m = memory_save(&conn, "fact", "database performance tuning").unwrap();
+        // Store a fixed embedding that is similar to the query embedding.
+        let mem_emb = vec![0.9, 0.1, 0.0, 0.0];
+        store_memory_embedding(&conn, &m.id, &mem_emb).unwrap();
+
+        // Query embedding that is close to mem_emb (cosine ~0.97)
+        let query_emb = vec![1.0, 0.0, 0.0, 0.0];
+
+        // FTS-only search for "postgres" finds nothing.
+        let fts_only = memory_search_ranked(&conn, "postgres", None, 10).unwrap();
+        assert!(fts_only.is_empty(), "FTS-only should find nothing on keyword mismatch");
+
+        // Hybrid search with embedding finds the semantic match.
+        let hybrid = hybrid_search_ranked(&conn, "postgres", &query_emb, None, 10).unwrap();
+        assert_eq!(hybrid.len(), 1, "hybrid should find semantic match");
+        assert_eq!(hybrid[0].content, "database performance tuning");
+    }
+
+    #[test]
+    fn hybrid_search_ranked_falls_back_to_fts_when_no_embeddings() {
+        let conn = test_conn();
+        memory_save(&conn, "fact", "nginx serves static files").unwrap();
+        // No embedding stored.
+
+        // FTS-only finds it.
+        let fts = memory_search_ranked(&conn, "nginx", None, 10).unwrap();
+        assert_eq!(fts.len(), 1);
+
+        // Hybrid with a non-matching embedding still gets it via FTS.
+        let query_emb = vec![0.0, 1.0, 0.0, 0.0];
+        let hybrid = hybrid_search_ranked(&conn, "nginx", &query_emb, None, 10).unwrap();
+        assert_eq!(hybrid.len(), 1, "hybrid falls back to FTS when embeddings absent");
+        assert_eq!(hybrid[0].content, "nginx serves static files");
+    }
+
+    #[test]
+    fn hybrid_search_ranked_respects_host_scoping() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "server-a memory").unwrap();
+        conn.execute(
+            "UPDATE memories SET host = 'server-a' WHERE id = ?1",
+            params![&m.id],
+        ).unwrap();
+        store_memory_embedding(&conn, &m.id, &[0.9, 0.1]).unwrap();
+
+        let query_emb = vec![0.9, 0.1];
+
+        // Search from server-b should exclude server-a's memory.
+        let results = hybrid_search_ranked(&conn, "memory", &query_emb, Some("server-b"), 10).unwrap();
+        assert!(results.is_empty(), "host-scoped hybrid should exclude other hosts");
+    }
+
+    #[test]
+    fn hybrid_search_ranked_reinforces_retrieved() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "hit me").unwrap();
+        store_memory_embedding(&conn, &m.id, &[1.0, 0.0]).unwrap();
+
+        let before: i64 = conn
+            .query_row(
+                "SELECT retrieval_count FROM memories WHERE id = ?1",
+                params![&m.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(before, 0);
+
+        hybrid_search_ranked(&conn, "hit", &[1.0, 0.0], None, 10).unwrap();
+
+        let after: i64 = conn
+            .query_row(
+                "SELECT retrieval_count FROM memories WHERE id = ?1",
+                params![&m.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 1, "hybrid search should reinforce retrieved hits");
     }
 }
