@@ -53,6 +53,11 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("regin.db"))
 }
 
+/// Returns the identity DB path: ~/.local/share/regin/identity.db
+pub fn identity_db_path() -> Result<PathBuf> {
+    Ok(data_dir()?.join("identity.db"))
+}
+
 /// Returns the socket path: $XDG_RUNTIME_DIR/regin/regind.sock
 /// Falls back to ~/.local/state/regin/regind.sock
 pub fn socket_path() -> Result<PathBuf> {

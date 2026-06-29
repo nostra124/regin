@@ -1621,8 +1621,9 @@ mod tests {
 
     #[test]
     fn apply_reflection_reinforces_or_creates() {
-        let conn = test_conn();
-        memory_save_reflection(&conn, "pattern", "disk pressure on db01").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::identity_db::init_identity_schema(&conn).unwrap();
+        crate::identity_db::memory_save_reflection(&conn, "pattern", "disk pressure on db01").unwrap();
         let proposals = vec![
             crate::reflect::ReflectionProposal { category: "pattern".into(), content: "disk pressure on db01".into() }, // matches -> reinforce
             crate::reflect::ReflectionProposal { category: "fact".into(), content: "db01 runs postgres 16".into() },    // new -> create
@@ -1631,7 +1632,7 @@ mod tests {
         assert_eq!(stats.reinforced, 1);
         assert_eq!(stats.created, 1);
         // the matched one now has strength 2, and a new fact exists
-        let mems = memory_list(&conn, None).unwrap();
+        let mems = crate::identity_db::memory_list(&conn, None).unwrap();
         assert_eq!(mems.iter().find(|m| m.content == "disk pressure on db01").unwrap().strength, 2);
         assert!(mems.iter().any(|m| m.category == "fact" && m.content == "db01 runs postgres 16"));
     }

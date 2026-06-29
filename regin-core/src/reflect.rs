@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::db;
+use crate::identity_db;
 use crate::llm::MimirClient;
 use crate::types::{ChatMessage, Episode, Memory};
 
@@ -38,13 +38,13 @@ pub fn apply_reflection(conn: &Connection, proposals: &[ReflectionProposal]) -> 
         if category.is_empty() || content.is_empty() {
             continue;
         }
-        match db::memory_find_similar(conn, category, content)? {
+        match identity_db::memory_find_similar(conn, category, content)? {
             Some(id) => {
-                db::memory_reinforce(conn, &id)?;
+                identity_db::memory_reinforce(conn, &id)?;
                 stats.reinforced += 1;
             }
             None => {
-                db::memory_save_reflection(conn, category, content)?;
+                identity_db::memory_save_reflection(conn, category, content)?;
                 stats.created += 1;
             }
         }
@@ -73,8 +73,8 @@ const REFLECT_CATEGORIES: &str = "fact, preference, pattern, project, skill, per
 /// memories). Separated so the daemon can release its DB lock before the
 /// network call.
 pub fn gather(conn: &Connection, window: usize) -> Result<(Vec<Episode>, Vec<Memory>)> {
-    let episodes = db::episode_recent(conn, window)?;
-    let existing = db::memory_list(conn, None)?;
+    let episodes = identity_db::episode_recent(conn, window)?;
+    let existing = identity_db::memory_list(conn, None)?;
     Ok((episodes, existing))
 }
 
@@ -88,9 +88,9 @@ pub fn apply(
 ) -> Result<ReflectionStats> {
     let mut stats = apply_reflection(conn, proposals)?;
     let ids: Vec<String> = episodes.iter().map(|e| e.id.clone()).collect();
-    db::episode_mark_reflected(conn, &ids)?;
+    identity_db::episode_mark_reflected(conn, &ids)?;
     stats.episodes = episodes.len();
-    stats.decayed = db::memory_decay(conn, decay_before)?;
+    stats.decayed = identity_db::memory_decay(conn, decay_before)?;
     Ok(stats)
 }
 
@@ -134,7 +134,7 @@ pub async fn reflect_once(
 ) -> Result<ReflectionStats> {
     let (episodes, existing) = gather(conn, window)?;
     if episodes.is_empty() {
-        let decayed = db::memory_decay(conn, decay_before)?;
+        let decayed = identity_db::memory_decay(conn, decay_before)?;
         return Ok(ReflectionStats { decayed, ..Default::default() });
     }
     let prompt = reflection_prompt(&episodes, &existing);

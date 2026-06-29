@@ -34,7 +34,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 
 | ID | Title | Status |
 |----|-------|--------|
-| FEAT-021 | Portable `identity.db` + full schema | open |
+| FEAT-021 | Portable `identity.db` + full schema | done |
 | FEAT-022 | Migrate `episodes`/`memories` out of `regin.db` | open |
 | FEAT-023 | Session archival + transcript capture | open |
 | FEAT-024 | Consolidation pipeline (Curator) | open |

@@ -47,6 +47,40 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-28 — FEAT-022: migrate episodes + memories to identity.db (0.6.0)
+- **FEAT-023 implemented and moved to done/.** Session archival + transcript capture.
+  Extended `sessions` schema with `host`, `kind`, `title`, `message_count`,
+  `token_count`, `state`, `transcript_text` (dropped `episode_id` — episode FK now
+  goes `episodes.ref_id → sessions.id`). Added `session_open()`,
+  `session_open_with_id()`, `transcript_append()`, `session_close()`, `session_list()`,
+  `session_get()`, `hostname()` to identity_db.rs. Added `SessionRow`,
+  `SessionWithTranscript`, `TranscriptMessage` types. Wired into daemon: `ChatNew`
+  opens a session, `ChatSend` appends user/assistant messages and closes on completion
+  with a title-based summary. 9 new tests (30 total identity_db tests). 206 workspace
+  tests pass, clippy-clean.
+
+- **FEAT-022 implemented and moved to done/.** All memory/episode CRUD functions
+  mirrored in `identity_db.rs` (memory_list/search/save/update/delete, memory_list_for_repo,
+  etc.) — 27 tests. Added `ref_id` column to identity.db episodes table. Wired identity_db
+  into daemon: `AppState.identity_db`, startup init + migration, dispatch handlers,
+  `build_context`, `run_reflection` all redirect to identity_db for memory/episode ops.
+  reflect.rs uses `identity_db::*` instead of `db::*`. 21 identity_db tests + 5 regind
+  dispatch tests + full workspace tests pass. Clippy-clean (pre-existing warnings only).
+
+### 2026-06-28 — FEAT-021: identity.db store + schema bootstrap (0.6.0 foundation)
+- **FEAT-021 implemented and moved to done/.** New `regin-core/src/identity_db.rs`
+  module with `init_identity_db(path)`, `init_identity_schema(conn)`, and `meta_get()`.
+  Full DISC-017 schema: `identity_meta` (key/value seeded on first bootstrap),
+  episodic tier (`episodes` with `kind`/`host`/`importance`/`state`, `sessions`,
+  `transcripts`), long-term tier (`topics` with hierarchy, `memories` with
+  `topic_id`/`tier`/`host`/`embedding`/`trust_score`), FTS5 virtual tables
+  (`memories_fts`, `transcripts_fts`) with `ai`/`ad`/`au` sync triggers, and 9
+  indexes. Added `identity_db_path()` to config.rs; exposed `pub mod identity_db`
+  in lib.rs. No Cargo.toml changes needed (FTS5 ships in bundled SQLite by default).
+  11 unit tests covering idempotency, table/trigger/index creation, FTS sync, and
+  file-backed open/reopen. 187 total workspace tests pass, clippy-clean (pre-existing
+  clippy errors in llm.rs/db.rs/tools.rs are unchanged).
+
 ### 2026-06-19 — DISC-017 opened (portable identity vs machine apparatus)
 - **New orthogonal axis (corrected with user):** *identity* (portable, travels with
   the agent) vs *machine apparatus* (local, rebuilt per box). Distinct from the

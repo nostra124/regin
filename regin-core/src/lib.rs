@@ -13,6 +13,7 @@ pub mod foreman;
 pub mod greeting;
 pub mod guardrail;
 pub mod db;
+pub mod identity_db;
 pub mod kpi;
 pub mod llm;
 pub mod mode;

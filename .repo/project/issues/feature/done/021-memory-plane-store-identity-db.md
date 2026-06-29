@@ -5,8 +5,8 @@ priority: high
 complexity: L
 estimate_tokens: 70k-120k
 estimate_time: 120-180min
-phase: open
-status: open
+phase: done
+status: done
 milestone: 0.6.0
 spawned_from: DISC-017
 depends_on: FEAT-006
@@ -23,6 +23,29 @@ into another while the machine-local ITIL/audit/KPI state stays behind.
 
 This is the foundation of the memory plane (DISC-017): a single copyable file is the
 physical portability seam, separate from the machine-local `regin.db`.
+
+## Design
+
+### Approach
+New `regin-core/src/identity_db.rs` module following the same pattern as `db.rs`:
+`init_identity_db(path)` → `init_identity_schema(conn)`. The schema covers all
+DISC-017 tables: `identity_meta` (key/value metadata seeded on first bootstrap),
+episodic tier (`episodes`, `sessions`, `transcripts`), long-term tier (`topics`,
+`memories`), FTS5 virtual tables (`memories_fts`, `transcripts_fts`) with sync
+triggers, and indexes. Schema version tracked in `identity_meta`.
+
+### Files touched
+- `regin-core/src/identity_db.rs` — new module (store + schema + bootstrap)
+- `regin-core/src/config.rs` — add `identity_db_path()` (alongside `db_path()`)
+- `regin-core/src/lib.rs` — add `pub mod identity_db;`
+- `Cargo.toml` — add `"fts5"` to `rusqlite` features
+
+### Dependencies
+- `rusqlite` with `fts5` feature (for `CREATE VIRTUAL TABLE ... USING fts5`)
+- `uuid` (already a workspace dependency) for seeding `identity_id`
+
+### Open questions
+None; the schema per DISC-017 is fully specified and the AC are concrete.
 
 ## Implementation
 - New `identity.db` opened alongside `regin.db`, in-stack via `rusqlite`; path under
@@ -56,3 +79,21 @@ physical portability seam, separate from the machine-local `regin.db`.
    delete (unit-tested).
 5. Schema migrations are additive and idempotent; unit-tested against a fresh and a
    re-opened DB.
+
+## Resolution
+
+Implemented in `regin-core/src/identity_db.rs` — new module with `init_identity_db(path)`,
+`init_identity_schema(conn)`, `meta_get()`, and full DISC-017 schema (identity_meta,
+episodic tier: episodes/sessions/transcripts, long-term tier: topics/memories, FTS5
+virtual tables with sync triggers, 9 indexes). Added `identity_db_path()` to config.rs
+and exposed the module in lib.rs. No rusqlite feature change needed — FTS5 ships in
+the bundled SQLite build by default.
+
+All 11 unit tests pass (187 total in workspace), clippy-clean for new code.
+
+Acceptance check:
+1. ✅ `init_identity_db` creates all tables, FTS indexes, triggers, and indexes; re-running is idempotent.
+2. ✅ `identity_meta` holds `identity_id` (uuid), `name`, and `schema_version`.
+3. ✅ Store is physically separate from `regin.db` (distinct file at `identity_db_path()`).
+4. ✅ FTS triggers keep `memories_fts` / `transcripts_fts` in sync on insert/update/delete.
+5. ✅ Schema is additive and idempotent; tested against both in-memory and file-backed DB.

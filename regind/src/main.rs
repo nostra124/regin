@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    audit, bus, config, context, db, desired, filters, kpi,
+    audit, bus, config, context, db, desired, filters, identity_db, kpi,
     llm::{LlmTurn, MimirClient},
     opskill,
     greeting,
@@ -23,6 +23,7 @@ use tracing::{error, info, warn};
 
 struct AppState {
     db: Mutex<rusqlite::Connection>,
+    identity_db: Mutex<rusqlite::Connection>,
 }
 
 unsafe impl Send for AppState {}
@@ -60,6 +61,17 @@ async fn main() -> Result<()> {
     let conn = db::init_db(&db_path)?;
     info!("Database: {}", db_path.display());
 
+    let identity_path = config::identity_db_path()?;
+    let identity_conn = identity_db::init_identity_db(&identity_path)?;
+    info!("Identity database: {}", identity_path.display());
+
+    // FEAT-022: one-shot migration of episodes + memories from regin.db → identity.db.
+    match identity_db::migrate_legacy(&conn, &identity_conn) {
+        Ok(r) if r.did_run => info!("Legacy migration: {} episodes, {} memories", r.episodes, r.memories),
+        Ok(_) => info!("Legacy migration already complete"),
+        Err(e) => warn!("Legacy migration failed (non-fatal): {e:#}"),
+    }
+
     // FEAT-033: load the desired (to-be) state and surface contradictory targets
     // as problems for a human (fail-safe: malformed files are skipped, logged).
     {
@@ -89,7 +101,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
     info!("Listening on {}", socket_path.display());
 
-    let state = Arc::new(AppState { db: Mutex::new(conn) });
+    let state = Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn) });
 
     let sched_state = Arc::clone(&state);
     tokio::spawn(async move { schedule_checker(sched_state).await });
@@ -186,8 +198,10 @@ fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
                 }
             }
         }
-        let mems = db::memory_list_for_repo(&db, key.as_deref()).unwrap_or_default();
         let rc = key.as_deref().and_then(|k| db::repo_context_get(&db, k).ok().flatten());
+        drop(db); // release regin.db before locking identity.db
+        let idb = state.identity_db.lock().expect("DB poisoned");
+        let mems = identity_db::memory_list_for_repo(&idb, key.as_deref()).unwrap_or_default();
         (mems, rc)
     };
     let mut msgs = Vec::new();
@@ -347,22 +361,47 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
                 .map(|m| m.content.chars().take(80).collect::<String>())
                 .unwrap_or_else(|| "Untitled".into());
 
+            // Record user messages in identity.db transcript (FEAT-023).
             if let Some(user_msg) = messages.iter().rev().find(|m| m.role == "user") {
-                let db = state.db.lock().expect("DB poisoned");
-                db::save_message(&db, &conversation_id, &title, "user", &user_msg.content)?;
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                identity_db::transcript_append(&idb, &conversation_id, "user", &user_msg.content)?;
+                // Update session title from first user message.
+                let _ = idb.execute(
+                    "UPDATE sessions SET title = ?1 WHERE id = ?2 AND title = ''",
+                    rusqlite::params![&title, &conversation_id],
+                );
             }
 
             let full = agentic_chat(state, &conversation_id, &messages, cwd.as_deref(), w).await?;
 
             {
-                let db = state.db.lock().expect("DB poisoned");
-                db::save_message(&db, &conversation_id, &title, "assistant", &full)?;
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                identity_db::transcript_append(&idb, &conversation_id, "assistant", &full)?;
+                // Generate a compact summary from the title + first user message.
+                let summary = if title != "Untitled" {
+                    format!("Chat: {title}")
+                } else {
+                    format!("Chat reply ({} chars)", full.len())
+                };
+                identity_db::session_close(
+                    &idb,
+                    &conversation_id,
+                    "chat",
+                    None,
+                    Some(&summary),
+                    full.len() as u64,
+                )?;
             }
             send(w, &Response::StreamDone { conversation_id }).await?;
         }
 
         Request::ChatNew => {
             let id = uuid::Uuid::new_v4().to_string();
+            let hostname = identity_db::hostname();
+            {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                identity_db::session_open_with_id(&idb, &id, "chat", Some(&hostname), "")?;
+            }
             send(w, &Response::ChatNew { conversation_id: id }).await?;
         }
 
@@ -387,27 +426,27 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
         }
 
         Request::MemoryList { category } => {
-            let mems = { let db = state.db.lock().expect("DB poisoned"); db::memory_list(&db, category.as_deref())? };
+            let mems = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_list(&db, category.as_deref())? };
             send(w, &Response::MemoryList { memories: mems }).await?;
         }
 
         Request::MemorySearch { query } => {
-            let mems = { let db = state.db.lock().expect("DB poisoned"); db::memory_search(&db, &query)? };
+            let mems = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_search(&db, &query)? };
             send(w, &Response::MemoryList { memories: mems }).await?;
         }
 
         Request::MemorySave { category, content } => {
-            let m = { let db = state.db.lock().expect("DB poisoned"); db::memory_save(&db, &category, &content)? };
+            let m = { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_save(&db, &category, &content)? };
             send(w, &Response::Ok { message: format!("Memory saved: {} [{}]", m.id, m.category) }).await?;
         }
 
         Request::MemoryUpdate { id, content } => {
-            { let db = state.db.lock().expect("DB poisoned"); db::memory_update(&db, &id, &content)?; }
+            { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_update(&db, &id, &content)?; }
             send(w, &Response::Ok { message: format!("Memory {id} updated") }).await?;
         }
 
         Request::MemoryDelete { id } => {
-            { let db = state.db.lock().expect("DB poisoned"); db::memory_delete(&db, &id)?; }
+            { let db = state.identity_db.lock().expect("DB poisoned"); identity_db::memory_delete(&db, &id)?; }
             send(w, &Response::Ok { message: format!("Memory {id} deleted") }).await?;
         }
 
@@ -858,26 +897,28 @@ async fn schedule_checker(state: Arc<AppState>) {
 async fn run_reflection(state: &Arc<AppState>) -> Result<reflect::ReflectionStats> {
     let client = state.llm_client()?;
     let window = 100usize;
-    let (episodes, existing, decay_before) = {
+    let (decay_before, episodes, existing) = {
         let db = state.db.lock().expect("DB poisoned");
         let decay_days = db::setting_get(&db, "memory.decay_days")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(30);
         let decay_before = (chrono::Utc::now() - chrono::Duration::days(decay_days)).to_rfc3339();
-        let (e, ex) = reflect::gather(&db, window)?;
-        (e, ex, decay_before)
+        drop(db); // release regin.db before locking identity.db
+        let idb = state.identity_db.lock().expect("DB poisoned");
+        let (e, ex) = reflect::gather(&idb, window)?;
+        (decay_before, e, ex)
     };
     if episodes.is_empty() {
-        let db = state.db.lock().expect("DB poisoned");
-        let decayed = db::memory_decay(&db, &decay_before)?;
+        let idb = state.identity_db.lock().expect("DB poisoned");
+        let decayed = identity_db::memory_decay(&idb, &decay_before)?;
         return Ok(reflect::ReflectionStats { decayed, ..Default::default() });
     }
     let prompt = reflect::reflection_prompt(&episodes, &existing);
     let text = client.chat_completion(&[ChatMessage::user(prompt)]).await?;
     let proposals = reflect::parse_proposals(&text)?;
-    let db = state.db.lock().expect("DB poisoned");
-    reflect::apply(&db, &episodes, &proposals, &decay_before)
+    let idb = state.identity_db.lock().expect("DB poisoned");
+    reflect::apply(&idb, &episodes, &proposals, &decay_before)
 }
 
 /// Periodically reflect episodes into semantic memory, on memory.reflect_interval.
@@ -930,7 +971,9 @@ mod dispatch_tests {
     fn state() -> Arc<AppState> {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();
-        Arc::new(AppState { db: Mutex::new(conn) })
+        let identity_conn = rusqlite::Connection::open_in_memory().unwrap();
+        identity_db::init_identity_schema(&identity_conn).unwrap();
+        Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn) })
     }
 
     /// Drive the real dispatch over an in-memory duplex and collect responses.

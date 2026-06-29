@@ -5,8 +5,8 @@ priority: high
 complexity: M
 estimate_tokens: 50k-90k
 estimate_time: 90-150min
-phase: open
-status: open
+phase: done
+status: done
 milestone: 0.6.0
 spawned_from: DISC-017
 depends_on: FEAT-021

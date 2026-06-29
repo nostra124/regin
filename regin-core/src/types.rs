@@ -188,6 +188,39 @@ pub struct ProblemHypothesis {
     pub updated_at: String,
 }
 
+/// A session row from `identity.db` (FEAT-023).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRow {
+    pub id: String,
+    pub host: Option<String>,
+    pub kind: String,
+    pub title: String,
+    pub message_count: i64,
+    pub token_count: i64,
+    pub state: String,
+    /// First 200 characters of the transcript text.
+    pub transcript_preview: Option<String>,
+    pub summary: Option<String>,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
+/// A single transcript message (FEAT-023).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptMessage {
+    pub id: String,
+    pub role: String,
+    pub content: String,
+    pub created_at: String,
+}
+
+/// A session with its full transcript (FEAT-023).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionWithTranscript {
+    pub session: SessionRow,
+    pub messages: Vec<TranscriptMessage>,
+}
+
 /// An episodic-memory entry — the short-term record of *what happened*,
 /// distilled into long-term (semantic) memories by reflection (FEAT-005/006).
 /// kind: task_run | incident | chat | change
