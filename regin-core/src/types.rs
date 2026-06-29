@@ -236,3 +236,42 @@ pub struct Episode {
     /// Whether a reflection pass has already consumed this episode.
     pub reflected: bool,
 }
+
+/// Action the LLM proposes during curation (FEAT-024).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum CuratorAction {
+    Add,
+    Update,
+    Delete,
+    Noop,
+}
+
+/// A single curator proposal from the LLM (FEAT-024).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CuratorProposal {
+    pub action: CuratorAction,
+    pub category: String,
+    pub content: String,
+    /// Memory id to UPDATE/DELETE (ignored for Add/Noop).
+    pub target_id: Option<String>,
+    /// Topic slug to assign (empty = no topic).
+    pub topic: Option<String>,
+    /// Optional tags for classification.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Outcome of a curation pass (FEAT-024).
+#[derive(Debug, Clone, Default)]
+pub struct CuratorStats {
+    pub episodes: usize,
+    pub sessions: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    pub noop: usize,
+    pub promoted: usize,
+    pub decayed: usize,
+    pub pruned: usize,
+    pub topics: usize,
+}

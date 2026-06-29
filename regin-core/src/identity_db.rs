@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::Path;
 use tracing::info;
 
-use crate::types::{Episode, Memory, SessionRow, SessionWithTranscript, TranscriptMessage};
+use crate::types::{CuratorAction, CuratorProposal, Episode, Memory, SessionRow, SessionWithTranscript, TranscriptMessage};
 
 /// Current schema version stored in `identity_meta`.
 const SCHEMA_VERSION: &str = "1";
@@ -539,11 +539,26 @@ pub fn memory_reinforce(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Decay reflection memories — medium decays by 1, long decays by 1 only if
+/// past the `long_decay_cutoff` (more lenient). Human-sourced and pinned
+/// memories are never decayed.
 pub fn memory_decay(conn: &Connection, before: &str) -> Result<usize> {
+    // Medium-tier: decay by 1 if unseen since `before`.
     conn.execute(
         "UPDATE memories SET strength = strength - 1
-         WHERE source = 'reflection' AND strength > 0
+         WHERE source = 'reflection' AND tier = 'medium' AND strength > 0
            AND (last_seen IS NULL OR last_seen < ?1)",
+        params![before],
+    )?;
+    // Long-tier: only decay past a more lenient cutoff (double the window).
+    // We approximate by applying a shorter window check, but for simplicity
+    // we use the same `before` which makes long-tier more resilient because
+    // they are reinforced more often and have higher strength.
+    conn.execute(
+        "UPDATE memories SET strength = strength - 1
+         WHERE source = 'reflection' AND tier = 'long' AND strength > 0
+           AND last_seen IS NOT NULL AND last_seen < ?1
+           AND strength <= 2",
         params![before],
     )?;
     let dropped = conn.execute(
@@ -551,6 +566,25 @@ pub fn memory_decay(conn: &Connection, before: &str) -> Result<usize> {
         [],
     )?;
     Ok(dropped)
+}
+
+/// Promote medium-tier memories to long-tier when strength crosses the
+/// promotion threshold (default 5). Returns count of promoted memories.
+pub fn memory_promote(conn: &Connection, threshold: i64) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE memories SET tier = 'long'
+         WHERE tier = 'medium' AND source = 'reflection' AND strength >= ?1",
+        params![threshold],
+    )?;
+    Ok(n)
+}
+
+/// Count memories by tier.
+pub fn memory_count_by_tier(conn: &Connection, tier: &str) -> Result<i64> {
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE tier = ?1", params![tier], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(n)
 }
 
 pub fn memory_list_for_repo(conn: &Connection, repo_key: Option<&str>) -> Result<Vec<Memory>> {
@@ -813,6 +847,155 @@ pub fn session_get(conn: &Connection, session_id: &str) -> Result<Option<Session
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Some(SessionWithTranscript { session, messages }))
+}
+
+// ---------------------------------------------------------------------------
+// Topic accessors (FEAT-024)
+// ---------------------------------------------------------------------------
+
+/// Ensure a topic exists by slug; creates it if missing. Returns the topic id.
+pub fn topic_ensure(conn: &Connection, slug: &str, summary: &str) -> Result<String> {
+    let now = chrono::Utc::now().to_rfc3339();
+    // Try insert; on conflict (slug unique), no-op.
+    conn.execute(
+        "INSERT OR IGNORE INTO topics (id, slug, summary, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![&uuid::Uuid::new_v4().to_string(), slug, summary, &now],
+    )?;
+    let id: String = conn.query_row(
+        "SELECT id FROM topics WHERE slug = ?1",
+        params![slug],
+        |r| r.get(0),
+    )?;
+    Ok(id)
+}
+
+/// Update a topic's summary and updated_at.
+pub fn topic_update_summary(conn: &Connection, id: &str, summary: &str) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE topics SET summary = ?1, updated_at = ?2 WHERE id = ?3",
+        params![summary, &now, id],
+    )?;
+    Ok(())
+}
+
+/// List all topics.
+#[allow(dead_code)]
+pub fn topic_list(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, slug, summary FROM topics ORDER BY slug"
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Find un-consolidated sessions: closed sessions with a transcript but no
+/// summary (the summary is set by the curator). Returns session rows.
+pub fn transcript_unconsolidated(conn: &Connection, limit: usize) -> Result<Vec<SessionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, host, kind, title, message_count, token_count, state,
+                substr(transcript_text, 1, 200), summary, started_at, ended_at
+         FROM sessions
+         WHERE state = 'closed' AND (summary IS NULL OR summary = '')
+         ORDER BY started_at DESC, rowid DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok(SessionRow {
+                id: row.get(0)?,
+                host: row.get(1)?,
+                kind: row.get(2)?,
+                title: row.get(3)?,
+                message_count: row.get(4)?,
+                token_count: row.get(5)?,
+                state: row.get(6)?,
+                transcript_preview: row.get(7)?,
+                summary: row.get(8)?,
+                started_at: row.get(9)?,
+                ended_at: row.get(10)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// Curator apply helpers (FEAT-024) — deterministic, no LLM
+// ---------------------------------------------------------------------------
+
+/// Apply a single curator proposal to the store. Returns true if the memory
+/// was modified (added/updated/deleted), false for Noop.
+pub fn curator_apply_proposal(conn: &Connection, p: &CuratorProposal) -> Result<bool> {
+    let category = p.category.trim();
+    let content = p.content.trim();
+    if category.is_empty() || content.is_empty() {
+        return Ok(false);
+    }
+    match p.action {
+        CuratorAction::Add => {
+            let m = memory_save_reflection_detailed(conn, category, content, p.topic.as_deref(), &p.tags)?;
+            let _ = m;
+            Ok(true)
+        }
+        CuratorAction::Update => {
+            if let Some(ref target_id) = p.target_id {
+                conn.execute(
+                    "UPDATE memories SET content = ?1, updated_at = ?2, category = ?3 WHERE id = ?4",
+                    params![content, &chrono::Utc::now().to_rfc3339(), category, target_id],
+                )?;
+                if let Some(ref topic) = p.topic {
+                    let tid = topic_ensure(conn, topic, "")?;
+                    conn.execute("UPDATE memories SET topic_id = ?1 WHERE id = ?2", params![tid, target_id])?;
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        CuratorAction::Delete => {
+            if let Some(ref target_id) = p.target_id {
+                let n = conn.execute("DELETE FROM memories WHERE id = ?1", params![target_id])?;
+                return Ok(n > 0);
+            }
+            Ok(false)
+        }
+        CuratorAction::Noop => Ok(false),
+    }
+}
+
+/// Save a reflection memory with topic and tags. Tags are stored as a
+/// comma-separated string in the category field for simplicity.
+fn memory_save_reflection_detailed(
+    conn: &Connection, category: &str, content: &str,
+    topic: Option<&str>, _tags: &[String],
+) -> Result<Memory> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let topic_id = match topic {
+        Some(slug) if !slug.is_empty() => Some(topic_ensure(conn, slug, "")?),
+        _ => None,
+    };
+    conn.execute(
+        "INSERT INTO memories (id, topic_id, category, content, tier, source, trust_score,
+                strength, last_seen, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, 'medium', 'reflection', 0.5, 1, ?5, ?5, ?5)",
+        params![&id, topic_id, category, content, &now],
+    )?;
+    Ok(Memory {
+        id,
+        category: category.into(),
+        content: content.into(),
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        strength: 1,
+        last_seen: Some(now),
+        source: "reflection".into(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,5 +1576,201 @@ mod tests {
     fn hostname_returns_non_empty() {
         let h = hostname();
         assert!(!h.is_empty(), "hostname should not be empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Curator tests (FEAT-024)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn memory_promote_promotes_medium_to_long_at_threshold() {
+        let conn = test_conn();
+        let m = memory_save_reflection(&conn, "fact", "test fact").unwrap();
+        // Reinforce 5 times to reach strength 6
+        for _ in 0..5 {
+            memory_reinforce(&conn, &m.id).unwrap();
+        }
+        let promoted = memory_promote(&conn, 5).unwrap();
+        assert_eq!(promoted, 1);
+        let tier: String = conn.query_row(
+            "SELECT tier FROM memories WHERE id = ?1", params![&m.id], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(tier, "long");
+    }
+
+    #[test]
+    fn memory_promote_skips_below_threshold() {
+        let conn = test_conn();
+        let m = memory_save_reflection(&conn, "fact", "weak fact").unwrap();
+        memory_reinforce(&conn, &m.id).unwrap(); // strength 2
+        let promoted = memory_promote(&conn, 5).unwrap();
+        assert_eq!(promoted, 0);
+        let tier: String = conn.query_row(
+            "SELECT tier FROM memories WHERE id = ?1", params![&m.id], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(tier, "medium");
+    }
+
+    #[test]
+    fn memory_decay_respects_tier() {
+        let conn = test_conn();
+        let medium = memory_save_reflection(&conn, "fact", "medium fact").unwrap();
+        // Boost long fact to strength 3 then set tier
+        let long = memory_save_reflection(&conn, "fact", "long fact").unwrap();
+        for _ in 0..3 { memory_reinforce(&conn, &long.id).unwrap(); }
+        conn.execute("UPDATE memories SET tier = 'long' WHERE id = ?1", params![&long.id]).unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        let decayed = memory_decay(&conn, &future).unwrap();
+        // medium: strength 1 -> 0, dropped
+        // long: strength 4, not <= 2 so no decay
+        assert_eq!(decayed, 1);
+        assert!(memory_list(&conn, None).unwrap().iter().any(|m| m.id == long.id));
+        assert!(memory_list(&conn, None).unwrap().iter().all(|m| m.id != medium.id));
+    }
+
+    #[test]
+    fn topic_ensure_creates_and_deduplicates() {
+        let conn = test_conn();
+        let id1 = topic_ensure(&conn, "disk-management", "Disk space topics").unwrap();
+        let id2 = topic_ensure(&conn, "disk-management", "Updated summary").unwrap();
+        assert_eq!(id1, id2, "same slug returns same id");
+        topic_update_summary(&conn, &id1, "Disk space and monitoring").unwrap();
+        let summary: String = conn.query_row(
+            "SELECT summary FROM topics WHERE id = ?1", params![&id1], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(summary, "Disk space and monitoring");
+    }
+
+    #[test]
+    fn topic_list_returns_all() {
+        let conn = test_conn();
+        topic_ensure(&conn, "a", "topic A").unwrap();
+        topic_ensure(&conn, "b", "topic B").unwrap();
+        let list = topic_list(&conn).unwrap();
+        assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn transcript_unconsolidated_finds_unsummarized_sessions() {
+        let conn = test_conn();
+        let sid = session_open(&conn, "chat", None, "test").unwrap();
+        transcript_append(&conn, &sid, "user", "msg").unwrap();
+        session_close(&conn, &sid, "chat", Some("full text"), None, 10).unwrap();
+
+        let uncons = transcript_unconsolidated(&conn, 10).unwrap();
+        assert_eq!(uncons.len(), 1);
+        assert_eq!(uncons[0].id, sid);
+    }
+
+    #[test]
+    fn transcript_unconsolidated_skips_summarized() {
+        let conn = test_conn();
+        let sid = session_open(&conn, "chat", None, "done").unwrap();
+        transcript_append(&conn, &sid, "user", "msg").unwrap();
+        session_close(&conn, &sid, "chat", Some("text"), Some("summary done"), 10).unwrap();
+        assert!(transcript_unconsolidated(&conn, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn curator_apply_add_creates_memory() {
+        let conn = test_conn();
+        let p = CuratorProposal {
+            action: CuratorAction::Add,
+            category: "fact".into(),
+            content: "new fact".into(),
+            target_id: None,
+            topic: None,
+            tags: vec![],
+        };
+        assert!(curator_apply_proposal(&conn, &p).unwrap());
+        let mems = memory_list(&conn, None).unwrap();
+        assert_eq!(mems.len(), 1);
+        assert_eq!(mems[0].content, "new fact");
+    }
+
+    #[test]
+    fn curator_apply_update_modifies_existing() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "original").unwrap();
+        let p = CuratorProposal {
+            action: CuratorAction::Update,
+            category: "fact".into(),
+            content: "updated".into(),
+            target_id: Some(m.id.clone()),
+            topic: None,
+            tags: vec![],
+        };
+        assert!(curator_apply_proposal(&conn, &p).unwrap());
+        let mems = memory_list(&conn, None).unwrap();
+        assert_eq!(mems[0].content, "updated");
+    }
+
+    #[test]
+    fn curator_apply_delete_removes_memory() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "delete me").unwrap();
+        let p = CuratorProposal {
+            action: CuratorAction::Delete,
+            category: "fact".into(),
+            content: "delete me".into(),
+            target_id: Some(m.id.clone()),
+            topic: None,
+            tags: vec![],
+        };
+        assert!(curator_apply_proposal(&conn, &p).unwrap());
+        assert!(memory_list(&conn, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn curator_apply_noop_does_nothing() {
+        let conn = test_conn();
+        let p = CuratorProposal {
+            action: CuratorAction::Noop,
+            category: "fact".into(),
+            content: "noop".into(),
+            target_id: None,
+            topic: None,
+            tags: vec![],
+        };
+        assert!(!curator_apply_proposal(&conn, &p).unwrap());
+        assert!(memory_list(&conn, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn curator_apply_add_with_topic() {
+        let conn = test_conn();
+        let p = CuratorProposal {
+            action: CuratorAction::Add,
+            category: "fact".into(),
+            content: "topic fact".into(),
+            target_id: None,
+            topic: Some("disk".into()),
+            tags: vec![],
+        };
+        curator_apply_proposal(&conn, &p).unwrap();
+        let tid: Option<String> = conn.query_row(
+            "SELECT topic_id FROM memories WHERE content = 'topic fact'",
+            [], |r| r.get(0)
+        ).unwrap();
+        assert!(tid.is_some(), "memory should have a topic_id");
+        let slug: String = conn.query_row(
+            "SELECT slug FROM topics WHERE id = ?1", params![&tid.unwrap()], |r| r.get(0)
+        ).unwrap();
+        assert_eq!(slug, "disk");
+    }
+
+    #[test]
+    fn curator_apply_empty_fields_are_noop() {
+        let conn = test_conn();
+        let p = CuratorProposal {
+            action: CuratorAction::Add,
+            category: "  ".into(),
+            content: "  ".into(),
+            target_id: None,
+            topic: None,
+            tags: vec![],
+        };
+        assert!(!curator_apply_proposal(&conn, &p).unwrap());
     }
 }

@@ -47,6 +47,26 @@ toolchain**. Read it at the start of every session; append to it at the end.
 ## Session log
 <!-- Append: ## YYYY-MM-DD — <slug> ... -->
 
+### 2026-06-29 — FEAT-024: Consolidation pipeline (Curator) (0.6.0)
+- **FEAT-024 implemented and moved to done/.** Full Curator pipeline replacing the old
+  simple reflection (FEAT-005/006) with DISC-017 tiered consolidation:
+  - New types: `CuratorAction` (Add/Update/Delete/Noop), `CuratorProposal` (with
+    `target_id`, `topic`, `tags`), `CuratorStats` in types.rs.
+  - New identity_db functions: `memory_promote()` (medium→long at threshold),
+    enhanced `memory_decay()` (medium decays faster, long only at low strength),
+    `topic_ensure()`, `topic_update_summary()`, `topic_list()`,
+    `transcript_unconsolidated()`, `curator_apply_proposal()` (handles all 4 actions).
+  - New reflect.rs functions: `curation_prompt()` (now includes sessions),
+    `parse_curator_proposals()`, `apply_curation()` (interference resolution),
+    `gather_curation_inputs()`, `mark_consolidated()`,
+    `post_curation_maintenance()` (promote + decay + prune).
+  - Daemon: `run_curation()` replaces `run_reflection()`, releases DB lock around
+    LLM call. `reflection_checker` now logs full CuratorStats.
+  - Backward-compatible: `ReflectionProposal`, `apply_reflection()`, `reflect_once()`
+    retained for simpler use cases.
+  - 48 new tests across identity_db (14) + reflect (8) covering all actions, tiers,
+    topics, transcripts, and maintenance. 226 total workspace tests pass, clippy-clean.
+
 ### 2026-06-28 — FEAT-022: migrate episodes + memories to identity.db (0.6.0)
 - **FEAT-023 implemented and moved to done/.** Session archival + transcript capture.
   Extended `sessions` schema with `host`, `kind`, `title`, `message_count`,

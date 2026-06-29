@@ -450,13 +450,13 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
             send(w, &Response::Ok { message: format!("Memory {id} deleted") }).await?;
         }
 
-        // --- Hermes reflection (FEAT-006) ---
+        // --- Curator / reflection (FEAT-006 / FEAT-024) ---
         Request::MemoryReflect => {
-            let stats = run_reflection(state).await?;
+            let stats = run_curation(state).await?;
             send(w, &Response::ReflectStats {
                 episodes: stats.episodes as u32,
-                reinforced: stats.reinforced as u32,
-                created: stats.created as u32,
+                reinforced: stats.added as u32,
+                created: stats.added as u32,
                 decayed: stats.decayed as u32,
             }).await?;
         }
@@ -892,36 +892,62 @@ async fn schedule_checker(state: Arc<AppState>) {
     }
 }
 
-/// Run one Hermes reflection pass (FEAT-006). The DB lock is released around the
+/// Run one curation pass (FEAT-024). The DB lock is released around the
 /// network call so the daemon stays responsive.
-async fn run_reflection(state: &Arc<AppState>) -> Result<reflect::ReflectionStats> {
+async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::CuratorStats> {
     let client = state.llm_client()?;
-    let window = 100usize;
-    let (decay_before, episodes, existing) = {
+    let episode_window = 100usize;
+    let transcript_window = 20usize;
+    let (episodes, existing, sessions, decay_before, prune_before) = {
         let db = state.db.lock().expect("DB poisoned");
         let decay_days = db::setting_get(&db, "memory.decay_days")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(30);
         let decay_before = (chrono::Utc::now() - chrono::Duration::days(decay_days)).to_rfc3339();
-        drop(db); // release regin.db before locking identity.db
+        let prune_days = db::setting_get(&db, "memory.prune_days")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(90);
+        let prune_before = (chrono::Utc::now() - chrono::Duration::days(prune_days)).to_rfc3339();
         let idb = state.identity_db.lock().expect("DB poisoned");
-        let (e, ex) = reflect::gather(&idb, window)?;
-        (decay_before, e, ex)
+        let (e, ex, sess) = reflect::gather_curation_inputs(&idb, episode_window, transcript_window)?;
+        drop(idb);
+        drop(db);
+        (e, ex, sess, decay_before, prune_before)
     };
-    if episodes.is_empty() {
+
+    if episodes.is_empty() && sessions.is_empty() {
+        // Nothing to curate — still run maintenance.
         let idb = state.identity_db.lock().expect("DB poisoned");
-        let decayed = identity_db::memory_decay(&idb, &decay_before)?;
-        return Ok(reflect::ReflectionStats { decayed, ..Default::default() });
+        return reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before);
     }
-    let prompt = reflect::reflection_prompt(&episodes, &existing);
+
+    let prompt = reflect::curation_prompt(&episodes, &existing, &sessions);
     let text = client.chat_completion(&[ChatMessage::user(prompt)]).await?;
-    let proposals = reflect::parse_proposals(&text)?;
+    let proposals = reflect::parse_curator_proposals(&text).unwrap_or_default();
+
+    let topics: Vec<String> = proposals.iter()
+        .filter_map(|p| p.topic.as_ref().filter(|t| !t.is_empty()).cloned())
+        .collect();
+
     let idb = state.identity_db.lock().expect("DB poisoned");
-    reflect::apply(&idb, &episodes, &proposals, &decay_before)
+    let mut stats = reflect::apply_curation(&idb, &proposals)?;
+
+    let mark = reflect::mark_consolidated(&idb, &episodes, &sessions, &topics)?;
+    stats.episodes = mark.episodes;
+    stats.sessions = mark.sessions;
+    stats.topics = mark.topics;
+
+    let maint = reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?;
+    stats.promoted = maint.promoted;
+    stats.decayed = maint.decayed;
+    stats.pruned = maint.pruned;
+
+    Ok(stats)
 }
 
-/// Periodically reflect episodes into semantic memory, on memory.reflect_interval.
+/// Periodically curate episodes and transcripts (FEAT-024).
 /// Fails safe — errors are logged and never stop the loop.
 async fn reflection_checker(state: Arc<AppState>) {
     loop {
@@ -935,16 +961,21 @@ async fn reflection_checker(state: Arc<AppState>) {
             .unwrap_or_else(|| std::time::Duration::from_secs(86_400));
         tokio::time::sleep(dur).await;
 
-        match run_reflection(&state).await {
-            Ok(s) if s.episodes > 0 || s.decayed > 0 => info!(
+        match run_curation(&state).await {
+            Ok(s) if s.episodes > 0 || s.sessions > 0 || s.decayed > 0 || s.promoted > 0 => info!(
                 episodes = s.episodes,
-                reinforced = s.reinforced,
-                created = s.created,
+                sessions = s.sessions,
+                added = s.added,
+                updated = s.updated,
+                deleted = s.deleted,
+                promoted = s.promoted,
                 decayed = s.decayed,
-                "reflection pass"
+                pruned = s.pruned,
+                topics = s.topics,
+                "curation pass"
             ),
             Ok(_) => {}
-            Err(e) => warn!("reflection: {e}"),
+            Err(e) => warn!("curation: {e}"),
         }
     }
 }
