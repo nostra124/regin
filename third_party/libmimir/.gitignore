@@ -1,0 +1,5 @@
+# build artifacts
+*.o
+*.a
+run_tests
+run_tests_asan
