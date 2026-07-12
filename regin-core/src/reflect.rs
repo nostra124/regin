@@ -170,12 +170,17 @@ pub fn mark_consolidated(
     Ok(stats)
 }
 
-/// Run decay, promotion, and pruning after a curation pass.
+/// Run decay, promotion, pruning, and principle-candidate proposal (FEAT-031)
+/// after a curation pass. `principle_decay_before` is a more lenient cutoff
+/// than `decay_before` — active principles decay slower than ordinary
+/// reflection memories (FEAT-031 acceptance criterion 4).
 pub fn post_curation_maintenance(
     conn: &Connection,
     decay_before: &str,
     promote_threshold: i64,
     prune_before: &str,
+    principle_decay_before: &str,
+    principle_recurrence_threshold: usize,
 ) -> Result<CuratorStats> {
     let mut stats = CuratorStats::default();
 
@@ -185,14 +190,22 @@ pub fn post_curation_maintenance(
     // Decay (medium faster, long more lenient).
     stats.decayed = identity_db::memory_decay(conn, decay_before)?;
 
+    // Active principles decay separately, and more slowly (never deleted).
+    identity_db::principle_decay_active(conn, principle_decay_before)?;
+
     // Prune old consolidated episodes.
     stats.pruned = identity_db::episode_prune(conn, prune_before)?;
+
+    // Propose candidate principles from recurring deliberation outcomes.
+    stats.principles_proposed =
+        crate::decision::propose_principle_candidates(conn, principle_recurrence_threshold)?.len();
 
     Ok(stats)
 }
 
 /// Run one full curation pass: gather inputs, call LLM, apply proposals,
-/// mark consolidated, then maintain (decay/promote/prune).
+/// mark consolidated, then maintain (decay/promote/prune/propose).
+#[allow(clippy::too_many_arguments)]
 pub async fn curate_once(
     conn: &Connection,
     client: &dyn LlmClient,
@@ -201,12 +214,21 @@ pub async fn curate_once(
     decay_before: &str,
     promote_threshold: i64,
     prune_before: &str,
+    principle_decay_before: &str,
+    principle_recurrence_threshold: usize,
 ) -> Result<CuratorStats> {
     let (episodes, existing, sessions) = gather_curation_inputs(conn, episode_window, transcript_window)?;
 
     if episodes.is_empty() && sessions.is_empty() {
         // Nothing to curate — still run maintenance.
-        return post_curation_maintenance(conn, decay_before, promote_threshold, prune_before);
+        return post_curation_maintenance(
+            conn,
+            decay_before,
+            promote_threshold,
+            prune_before,
+            principle_decay_before,
+            principle_recurrence_threshold,
+        );
     }
 
     let prompt = curation_prompt(&episodes, &existing, &sessions);
@@ -230,10 +252,18 @@ pub async fn curate_once(
     stats.topics = mark.topics;
 
     // Maintenance.
-    let maint = post_curation_maintenance(conn, decay_before, promote_threshold, prune_before)?;
+    let maint = post_curation_maintenance(
+        conn,
+        decay_before,
+        promote_threshold,
+        prune_before,
+        principle_decay_before,
+        principle_recurrence_threshold,
+    )?;
     stats.promoted = maint.promoted;
     stats.decayed = maint.decayed;
     stats.pruned = maint.pruned;
+    stats.principles_proposed = maint.principles_proposed;
 
     Ok(stats)
 }
@@ -524,10 +554,39 @@ mod tests {
         identity_db::episode_mark_reflected(&conn, &[ep.id]).unwrap();
 
         let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
-        let stats = post_curation_maintenance(&conn, &future, 5, &future).unwrap();
+        let stats = post_curation_maintenance(&conn, &future, 5, &future, &future, 3).unwrap();
 
         assert_eq!(stats.promoted, 1);
         assert_eq!(stats.decayed, 1);
         assert_eq!(stats.pruned, 1);
+        assert_eq!(stats.principles_proposed, 0, "no deliberation episodes exist yet");
+    }
+
+    #[test]
+    fn post_curation_maintenance_proposes_principles_from_recurring_deliberation_outcomes() {
+        // FEAT-031: consolidation reads `deliberation` episodes and proposes
+        // candidates from recurring bad outcomes.
+        let conn = test_conn();
+        for i in 0..3 {
+            let record = crate::decision::DeliberationRecord {
+                plan_id: format!("plan-{i}"),
+                intent_summary: "do a risky thing".into(),
+                steps: vec!["do it".into()],
+                confidence: 0.9,
+                verdict: crate::decision::RawSoulVerdict::Approve,
+                gut_reaction: "seemed fine".into(),
+                disposition: crate::decision::Disposition::Executed,
+                outcome: Some(crate::decision::Outcome::Failure),
+                outcome_ref_id: None,
+            };
+            let detail = serde_json::to_string(&record).unwrap();
+            identity_db::episode_record(&conn, "deliberation", Some(&record.plan_id), &record.intent_summary, Some(&detail)).unwrap();
+        }
+
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let stats = post_curation_maintenance(&conn, &future, 5, &future, &future, 3).unwrap();
+
+        assert_eq!(stats.principles_proposed, 1);
+        assert_eq!(identity_db::principle_list(&conn, Some("candidate")).unwrap().len(), 1);
     }
 }

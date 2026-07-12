@@ -7,7 +7,7 @@ use crate::greeting::Greeting;
 use crate::promotion::DerivedCheck;
 use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
-    Change, ChatMessage, Conversation, Incident, Memory, Problem, ProblemHypothesis, Schedule,
+    Change, ChatMessage, Conversation, Incident, Memory, Principle, Problem, ProblemHypothesis, Schedule,
     SkillInfo, TaskRun,
 };
 
@@ -255,6 +255,17 @@ pub enum Request {
     /// Remove a value from the identity-core charter.
     #[serde(rename = "soul_charter_remove")]
     SoulCharterRemove { value_id: String },
+
+    // --- Principle derivation & ratification (FEAT-031) ---
+    /// List principles: every one, or only `candidate`-status ones.
+    #[serde(rename = "soul_principles_list")]
+    SoulPrinciplesList { candidates_only: bool },
+    /// Promote a candidate principle to `active` (human ratification).
+    #[serde(rename = "soul_principles_ratify")]
+    SoulPrinciplesRatify { id: String },
+    /// Retire a principle — a candidate rejection or an active retirement.
+    #[serde(rename = "soul_principles_reject")]
+    SoulPrinciplesReject { id: String },
 }
 
 /// Response from daemon to CLI.
@@ -402,6 +413,14 @@ pub enum Response {
     SoulCharterProposal { role: String, proposed: Vec<String> },
     #[serde(rename = "soul_charter_written")]
     SoulCharterWritten { added: Vec<String> },
+
+    // --- Principle derivation & ratification (FEAT-031) ---
+    #[serde(rename = "soul_principles")]
+    SoulPrinciples { principles: Vec<Principle> },
+    #[serde(rename = "soul_principle_ratified")]
+    SoulPrincipleRatified { principle: Principle },
+    #[serde(rename = "soul_principle_rejected")]
+    SoulPrincipleRejected { principle: Principle },
 }
 
 #[cfg(test)]

@@ -865,6 +865,35 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
             }
         }
 
+        // --- Principle derivation & ratification (FEAT-031) ---
+        Request::SoulPrinciplesList { candidates_only } => {
+            let principles = {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                if candidates_only { soul::principles_candidates(&idb)? } else { soul::principles_all(&idb)? }
+            };
+            send(w, &Response::SoulPrinciples { principles }).await?;
+        }
+        Request::SoulPrinciplesRatify { id } => {
+            let result = {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                soul::principles_ratify(&idb, &id)
+            };
+            match result {
+                Ok(principle) => send(w, &Response::SoulPrincipleRatified { principle }).await?,
+                Err(e) => send(w, &Response::Error { message: e.to_string() }).await?,
+            }
+        }
+        Request::SoulPrinciplesReject { id } => {
+            let result = {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                soul::principles_reject(&idb, &id)
+            };
+            match result {
+                Ok(principle) => send(w, &Response::SoulPrincipleRejected { principle }).await?,
+                Err(e) => send(w, &Response::Error { message: e.to_string() }).await?,
+            }
+        }
+
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
         Request::TaskCreate { name, from_prompt, force, repo, cwd } => {
             let content = match &from_prompt {
@@ -1078,30 +1107,37 @@ async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::Curato
     let client = state.llm_client()?;
     let episode_window = 100usize;
     let transcript_window = 20usize;
-    let (episodes, existing, sessions, decay_before, prune_before) = {
+    let (episodes, existing, sessions, decay_before, prune_before, principle_decay_before, recurrence_threshold) = {
         let db = state.db.lock().expect("DB poisoned");
         let decay_days = db::setting_get(&db, "memory.decay_days")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(30);
         let decay_before = (chrono::Utc::now() - chrono::Duration::days(decay_days)).to_rfc3339();
+        // Active principles decay slower than ordinary reflection memories
+        // (FEAT-031 acceptance criterion 4) — a longer, more lenient window.
+        let principle_decay_before = (chrono::Utc::now() - chrono::Duration::days(decay_days * 3)).to_rfc3339();
         let prune_days = db::setting_get(&db, "memory.prune_days")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(90);
         let prune_before = (chrono::Utc::now() - chrono::Duration::days(prune_days)).to_rfc3339();
+        let recurrence_threshold = db::setting_get(&db, "decision.principles.recurrence_threshold")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(3);
         let idb = state.identity_db.lock().expect("DB poisoned");
         let (e, ex, sess) = reflect::gather_curation_inputs(&idb, episode_window, transcript_window)?;
         drop(idb);
         drop(db);
-        (e, ex, sess, decay_before, prune_before)
+        (e, ex, sess, decay_before, prune_before, principle_decay_before, recurrence_threshold)
     };
 
     if episodes.is_empty() && sessions.is_empty() {
         // Nothing to curate — still run maintenance + embedding backfill.
         let stats = {
             let idb = state.identity_db.lock().expect("DB poisoned");
-            reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?
+            reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before, &principle_decay_before, recurrence_threshold)?
         };
         if let Ok(n) = backfill_embeddings(state, 10).await {
             if n > 0 {
@@ -1126,10 +1162,11 @@ async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::Curato
         s.episodes = mark.episodes;
         s.sessions = mark.sessions;
         s.topics = mark.topics;
-        let maint = reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before)?;
+        let maint = reflect::post_curation_maintenance(&idb, &decay_before, 5, &prune_before, &principle_decay_before, recurrence_threshold)?;
         s.promoted = maint.promoted;
         s.decayed = maint.decayed;
         s.pruned = maint.pruned;
+        s.principles_proposed = maint.principles_proposed;
         s
     };
 

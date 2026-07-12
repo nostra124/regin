@@ -278,7 +278,8 @@ enum Commands {
     /// Check if the daemon (regind) is running.
     Ping,
 
-    /// Soul configurator: browse the value catalog · manage the core charter (FEAT-030).
+    /// Soul configurator: browse the value catalog · manage the core charter ·
+    /// ratify reflection-proposed principles (FEAT-030 / FEAT-031).
     Soul {
         #[command(subcommand)]
         action: SoulAction,
@@ -296,6 +297,11 @@ enum SoulAction {
     Charter {
         #[command(subcommand)]
         action: SoulCharterAction,
+    },
+    /// Review and ratify reflection-proposed candidate principles (FEAT-031).
+    Principles {
+        #[command(subcommand)]
+        action: SoulPrinciplesAction,
     },
 }
 
@@ -320,6 +326,20 @@ enum SoulCharterAction {
     },
     /// Remove a value from the identity-core charter.
     Remove { id: String },
+}
+
+#[derive(Subcommand)]
+enum SoulPrinciplesAction {
+    /// List principles.
+    List {
+        /// Only show candidates awaiting ratification.
+        #[arg(long)]
+        candidates: bool,
+    },
+    /// Promote a candidate principle to active (human ratification).
+    Ratify { id: String },
+    /// Retire a principle — reject a candidate, or retire an active one.
+    Reject { id: String },
 }
 
 #[derive(Subcommand)]
@@ -830,6 +850,11 @@ async fn main() -> Result<()> {
                 SoulCharterAction::Derive => cmd_soul_charter_derive(&t).await,
                 SoulCharterAction::Set { ids } => cmd_soul_charter_set(&t, ids).await,
                 SoulCharterAction::Remove { id } => cmd_soul_charter_remove(&t, &id).await,
+            },
+            SoulAction::Principles { action } => match action {
+                SoulPrinciplesAction::List { candidates } => cmd_soul_principles_list(&t, candidates).await,
+                SoulPrinciplesAction::Ratify { id } => cmd_soul_principles_ratify(&t, &id).await,
+                SoulPrinciplesAction::Reject { id } => cmd_soul_principles_reject(&t, &id).await,
             },
         },
     }
@@ -1655,9 +1680,36 @@ async fn cmd_soul_charter_remove(t: &impl Transport, id: &str) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_soul_principles_list(t: &impl Transport, candidates_only: bool) -> Result<()> {
+    match t.request(&Request::SoulPrinciplesList { candidates_only }).await? {
+        Response::SoulPrinciples { principles } => print!("{}", render_soul_principles(&principles)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_principles_ratify(t: &impl Transport, id: &str) -> Result<()> {
+    match t.request(&Request::SoulPrinciplesRatify { id: id.into() }).await? {
+        Response::SoulPrincipleRatified { principle } => print!("{}", render_soul_principle_ratified(&principle)),
+        Response::Error { message } => return Err(anyhow!(message)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_principles_reject(t: &impl Transport, id: &str) -> Result<()> {
+    match t.request(&Request::SoulPrinciplesReject { id: id.into() }).await? {
+        Response::SoulPrincipleRejected { principle } => print!("{}", render_soul_principle_rejected(&principle)),
+        Response::Error { message } => return Err(anyhow!(message)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use regin_core::types::Principle;
 
     #[test]
     fn cli_command_tree_is_valid() {
@@ -2170,5 +2222,48 @@ mod tests {
         let t = FakeTransport::new();
         t.push(Response::Error { message: "not in the core charter".into() });
         assert!(cmd_soul_charter_remove(&t, "nope").await.is_err());
+    }
+
+    fn sample_principle(status: &str) -> Principle {
+        Principle {
+            id: "p1".into(),
+            content: "recurring failures — be more careful".into(),
+            status: status.into(),
+            source: "reflection".into(),
+            evidence: vec!["ep1".into()],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_soul_principles_list_ratify_reject() {
+        let t = FakeTransport::new();
+        t.push(Response::SoulPrinciples { principles: vec![sample_principle("candidate")] });
+        assert!(cmd_soul_principles_list(&t, true).await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::SoulPrinciplesList { candidates_only: true }));
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulPrinciples { principles: vec![] });
+        assert!(cmd_soul_principles_list(&t, false).await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::SoulPrinciplesList { candidates_only: false }));
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulPrincipleRatified { principle: sample_principle("active") });
+        assert!(cmd_soul_principles_ratify(&t, "p1").await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::SoulPrinciplesRatify { id } if id == "p1"));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "p1 is active — only a candidate can be ratified".into() });
+        assert!(cmd_soul_principles_ratify(&t, "p1").await.is_err());
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulPrincipleRejected { principle: sample_principle("retired") });
+        assert!(cmd_soul_principles_reject(&t, "p1").await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::SoulPrinciplesReject { id } if id == "p1"));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "no principle p1".into() });
+        assert!(cmd_soul_principles_reject(&t, "p1").await.is_err());
     }
 }

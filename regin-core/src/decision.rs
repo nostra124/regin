@@ -243,12 +243,18 @@ const SOUL_SYSTEM_PROMPT: &str = "You are the conscience. Given the plan's inten
 
 /// The user turn sent to the Soul: **only** the plan's intent and the values
 /// grounding. Never the Mind's steps, its intended tool calls, or any
-/// environment detail (acceptance criterion 1).
+/// environment detail (acceptance criterion 1). Each `grounding` entry is
+/// either a catalog value id (FEAT-030 — rendered via [`crate::soul::find`])
+/// or a ratified, free-text principle statement (FEAT-031 —
+/// `crate::identity_db::principle_content_active_reflection`'s output has no
+/// catalog id, so it renders as-is).
 fn soul_user_prompt(intent_summary: &str, grounding: &[String]) -> String {
     let values = grounding
         .iter()
-        .filter_map(|id| crate::soul::find(id))
-        .map(|v| format!("- {} ({}): {}", v.name, v.id, v.description))
+        .map(|id| match crate::soul::find(id) {
+            Some(v) => format!("- {} ({}): {}", v.name, v.id, v.description),
+            None => format!("- {id}"),
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!("Plan intent:\n{intent_summary}\n\nValues grounding:\n{values}\n\nReturn your verdict as JSON.")
@@ -472,6 +478,107 @@ fn capture_best_effort(sink: &dyn DeliberationSink, plan: &Plan, eval: &SoulEval
     if let Err(e) = sink.capture(&record) {
         tracing::warn!("deliberation capture failed (non-fatal): {e:#}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Principle derivation — the propose stage (FEAT-031)
+// ---------------------------------------------------------------------------
+
+/// A principle candidate reflection proposes from a recurring pattern across
+/// `deliberation` episodes, with the episode ids that produced it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrincipleCandidate {
+    pub content: String,
+    pub evidence: Vec<String>,
+}
+
+/// Pure derivation (no DB, no LLM — fully deterministic, unit-testable with
+/// scripted records): groups `Executed` deliberations by their eventual
+/// `Outcome`, and proposes one candidate per (outcome) group that has
+/// recurred at least `recurrence_threshold` times. Only bad outcomes
+/// (`Failure`, `RolledBack`) generate a candidate — a recurring `Success`
+/// isn't something the conscience needs to learn caution from. Never fires
+/// from a single instance: acceptance criterion 1's recurrence threshold.
+///
+/// Executed-only is deliberate, not an oversight: `resolve_verdict` already
+/// refuses to execute a below-threshold-confidence approval, so "the Mind
+/// overrode a shaky vote" isn't a reachable data shape here — the real
+/// learnable signal in this data model is "the Soul approved and it still
+/// went wrong," which is exactly what recurring `Executed` + bad `Outcome`
+/// captures.
+pub fn derive_principle_candidates(
+    episodes: &[(String, DeliberationRecord)],
+    recurrence_threshold: usize,
+) -> Vec<PrincipleCandidate> {
+    let mut failures: Vec<&str> = Vec::new();
+    let mut rollbacks: Vec<&str> = Vec::new();
+    for (episode_id, record) in episodes {
+        if record.disposition != Disposition::Executed {
+            continue;
+        }
+        match record.outcome {
+            Some(Outcome::Failure) => failures.push(episode_id),
+            Some(Outcome::RolledBack) => rollbacks.push(episode_id),
+            _ => {}
+        }
+    }
+    let mut candidates = Vec::new();
+    if failures.len() >= recurrence_threshold {
+        candidates.push(PrincipleCandidate {
+            content: format!(
+                "{} executed deliberations have ended in failure — require stronger evidence \
+                 or a narrower blast radius before approving plans like these.",
+                failures.len()
+            ),
+            evidence: failures.into_iter().map(str::to_string).collect(),
+        });
+    }
+    if rollbacks.len() >= recurrence_threshold {
+        candidates.push(PrincipleCandidate {
+            content: format!(
+                "{} executed deliberations have needed a rollback — prefer plans with a \
+                 verified backout, or hold them for deliberate mode even when they look reversible.",
+                rollbacks.len()
+            ),
+            evidence: rollbacks.into_iter().map(str::to_string).collect(),
+        });
+    }
+    candidates
+}
+
+/// Parse a captured episode's `detail` back into a [`DeliberationRecord`].
+/// Malformed/foreign details (any `kind = "deliberation"` episode not
+/// written by [`IdentityDbSink`]) are skipped, not fatal — the propose pass
+/// is best-effort over whatever is actually parseable.
+fn parse_deliberation_episode(episode: &crate::types::Episode) -> Option<(String, DeliberationRecord)> {
+    let detail = episode.detail.as_deref()?;
+    let record: DeliberationRecord = serde_json::from_str(detail).ok()?;
+    Some((episode.id.clone(), record))
+}
+
+/// Read `deliberation` episodes, derive candidates, and write any that
+/// aren't already-proposed (idempotent — re-running a consolidation pass
+/// doesn't duplicate candidates). Returns the newly-inserted candidates
+/// only (mirrors [`crate::soul::charter_seed`]'s "return only new" shape).
+/// Candidates are always `status = "candidate"`, `source = "reflection"` —
+/// never auto-activated, never read by the Soul until a human ratifies them
+/// (acceptance criteria 1 and 3).
+pub fn propose_principle_candidates(
+    conn: &rusqlite::Connection,
+    recurrence_threshold: usize,
+) -> Result<Vec<crate::types::Principle>> {
+    let episodes = deliberation_episodes(conn, 500)?;
+    let records: Vec<(String, DeliberationRecord)> =
+        episodes.iter().filter_map(parse_deliberation_episode).collect();
+    let candidates = derive_principle_candidates(&records, recurrence_threshold);
+    let mut created = Vec::new();
+    for candidate in candidates {
+        if crate::identity_db::principle_candidate_exists(conn, &candidate.content)? {
+            continue;
+        }
+        created.push(crate::identity_db::principle_insert_candidate(conn, &candidate.content, &candidate.evidence)?);
+    }
+    Ok(created)
 }
 
 /// Run the deliberate pipeline: the Mind plans read-only, the Soul gates the
@@ -1070,6 +1177,169 @@ mod tests {
         let mut executor = SpyExecutor::default();
         let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert_eq!(outcome, DeliberateOutcome::Executed);
+    }
+
+    // --- Principle derivation & ratification (FEAT-031) ---
+
+    fn scripted_record(plan_id: &str, disposition: Disposition, outcome: Option<Outcome>) -> DeliberationRecord {
+        DeliberationRecord {
+            plan_id: plan_id.to_string(),
+            intent_summary: format!("scripted plan {plan_id}"),
+            steps: vec!["step".to_string()],
+            confidence: 0.9,
+            verdict: RawSoulVerdict::Approve,
+            gut_reaction: "fine".to_string(),
+            disposition,
+            outcome,
+            outcome_ref_id: None,
+        }
+    }
+
+    #[test]
+    fn derive_principle_candidates_never_fires_from_a_single_instance() {
+        // acceptance criterion 1 — recurrence threshold enforced
+        let records = vec![("e1".to_string(), scripted_record("p1", Disposition::Executed, Some(Outcome::Failure)))];
+        assert!(derive_principle_candidates(&records, 3).is_empty());
+    }
+
+    #[test]
+    fn derive_principle_candidates_fires_once_recurrence_threshold_is_met() {
+        let records: Vec<_> = (0..3)
+            .map(|i| (format!("e{i}"), scripted_record(&format!("p{i}"), Disposition::Executed, Some(Outcome::Failure))))
+            .collect();
+        let candidates = derive_principle_candidates(&records, 3);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].evidence.len(), 3);
+        assert!(candidates[0].evidence.contains(&"e0".to_string()));
+    }
+
+    #[test]
+    fn derive_principle_candidates_ignores_denied_escalated_and_success() {
+        let mut records = Vec::new();
+        for i in 0..5 {
+            records.push((format!("veto{i}"), scripted_record(&format!("p{i}"), Disposition::Denied, None)));
+            records.push((format!("esc{i}"), scripted_record(&format!("q{i}"), Disposition::Escalated, None)));
+            records.push((format!("ok{i}"), scripted_record(&format!("r{i}"), Disposition::Executed, Some(Outcome::Success))));
+        }
+        assert!(derive_principle_candidates(&records, 3).is_empty(), "only recurring bad outcomes of executed plans propose a candidate");
+    }
+
+    #[test]
+    fn derive_principle_candidates_groups_failure_and_rollback_separately() {
+        let mut records = Vec::new();
+        for i in 0..3 {
+            records.push((format!("f{i}"), scripted_record(&format!("p{i}"), Disposition::Executed, Some(Outcome::Failure))));
+        }
+        for i in 0..2 {
+            records.push((format!("r{i}"), scripted_record(&format!("q{i}"), Disposition::Executed, Some(Outcome::RolledBack))));
+        }
+        // threshold 3: only the 3-failure group clears it, not the 2-rollback group
+        let candidates = derive_principle_candidates(&records, 3);
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].content.to_lowercase().contains("failure"));
+    }
+
+    /// Runs `n` independent approved-and-executed deliberations through the
+    /// real `run_deliberate` pipeline (not hand-built records), then
+    /// back-fills every one to `outcome`. The closest thing to a "scripted
+    /// deliberations" fixture that still exercises the real capture path.
+    async fn captured_deliberations_with_outcome(
+        sink: &IdentityDbSink,
+        conn: &std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+        n: usize,
+        outcome: Outcome,
+    ) -> Vec<String> {
+        for _ in 0..n {
+            let planner = FixedPlanner::new();
+            let soul = FixedVerdictSoul(SoulVerdict::Approve);
+            let mut executor = SpyExecutor::default();
+            run_deliberate(&planner, &soul, &mut executor, 3, sink).await.unwrap();
+        }
+        let episode_ids: Vec<String> = {
+            let c = conn.lock().unwrap();
+            deliberation_episodes(&c, 50).unwrap().into_iter().map(|e| e.id).collect()
+        };
+        for id in &episode_ids {
+            let c = conn.lock().unwrap();
+            deliberation_backfill_outcome(&c, id, outcome, None).unwrap();
+        }
+        episode_ids
+    }
+
+    #[tokio::test]
+    async fn propose_principle_candidates_writes_a_candidate_from_recurring_deliberations() {
+        // acceptance criteria 1 and 5
+        let (sink, conn) = identity_sink();
+        captured_deliberations_with_outcome(&sink, &conn, 3, Outcome::Failure).await;
+
+        let c = conn.lock().unwrap();
+        let created = propose_principle_candidates(&c, 3).unwrap();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].status, "candidate", "never active on proposal");
+        assert_eq!(created[0].source, "reflection");
+        assert_eq!(created[0].evidence.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn propose_principle_candidates_is_never_surfaced_to_the_soul_until_ratified() {
+        // acceptance criterion 3
+        let (sink, conn) = identity_sink();
+        captured_deliberations_with_outcome(&sink, &conn, 3, Outcome::RolledBack).await;
+
+        let c = conn.lock().unwrap();
+        propose_principle_candidates(&c, 3).unwrap();
+        assert!(crate::identity_db::principle_content_active_reflection(&c).unwrap().is_empty());
+        assert!(crate::soul::charter_core_ids(&c).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn propose_principle_candidates_is_idempotent_across_passes() {
+        let (sink, conn) = identity_sink();
+        captured_deliberations_with_outcome(&sink, &conn, 3, Outcome::Failure).await;
+
+        let c = conn.lock().unwrap();
+        let first = propose_principle_candidates(&c, 3).unwrap();
+        assert_eq!(first.len(), 1);
+        let second = propose_principle_candidates(&c, 3).unwrap();
+        assert!(second.is_empty(), "already proposed, not duplicated");
+        assert_eq!(crate::identity_db::principle_list(&c, Some("candidate")).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ratified_reflection_principle_feeds_grounding_as_free_text_not_a_catalog_id() {
+        // acceptance criterion 2 (ratify) + criterion 3 (only active feeds grounding)
+        let (sink, conn) = identity_sink();
+        captured_deliberations_with_outcome(&sink, &conn, 3, Outcome::Failure).await;
+
+        let candidate_id = {
+            let c = conn.lock().unwrap();
+            propose_principle_candidates(&c, 3).unwrap()[0].id.clone()
+        };
+
+        let ratified = {
+            let c = conn.lock().unwrap();
+            crate::soul::principles_ratify(&c, &candidate_id).unwrap()
+        };
+        assert_eq!(ratified.status, "active");
+
+        let c = conn.lock().unwrap();
+        let active_content = crate::identity_db::principle_content_active_reflection(&c).unwrap();
+        assert_eq!(active_content.len(), 1);
+
+        // never leaks into the catalog-id grounding path (FEAT-030)
+        assert!(crate::soul::charter_core_ids(&c).unwrap().is_empty());
+
+        // the Soul's prompt renders it as free text (no catalog lookup needed)
+        let prompt = soul_user_prompt("intent", &active_content);
+        assert!(prompt.contains(&active_content[0]));
+    }
+
+    #[test]
+    fn soul_prompt_renders_a_free_text_grounding_entry_alongside_a_catalog_id() {
+        let grounding = vec!["integrity".to_string(), "a ratified free-text principle".to_string()];
+        let prompt = soul_user_prompt("intent", &grounding);
+        assert!(prompt.contains("integrity"), "catalog id still resolves via the value catalog");
+        assert!(prompt.contains("a ratified free-text principle"), "free text renders as-is");
     }
 
     // --- Act mode unchanged (acceptance criterion 5) ---
