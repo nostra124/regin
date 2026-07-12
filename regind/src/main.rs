@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
     audit, bus, config, context, db, desired, filters, identity_db, kpi,
-    llm::{LlmTurn, MimirClient},
+    llm::{LlmClient, LlmTurn, MimirClient},
     opskill,
     greeting,
     mode,
@@ -24,13 +24,25 @@ use tracing::{error, info, warn};
 struct AppState {
     db: Mutex<rusqlite::Connection>,
     identity_db: Mutex<rusqlite::Connection>,
+    /// Test-only injection seam (FEAT-071): when set, `llm_client()` returns
+    /// this instead of constructing a `MimirClient` from live config. `None`
+    /// in production.
+    llm_override: Option<Arc<dyn LlmClient>>,
 }
 
 unsafe impl Send for AppState {}
 unsafe impl Sync for AppState {}
 
 impl AppState {
-    fn llm_client(&self) -> Result<MimirClient> {
+    /// The single seam through which the daemon obtains LLM completions.
+    /// Reads `mimir.*` settings fresh on every call (not cached on
+    /// `AppState`) so `regin config set mimir.*` takes effect without a
+    /// daemon restart — the injected override (tests) bypasses that read
+    /// entirely.
+    fn llm_client(&self) -> Result<Arc<dyn LlmClient>> {
+        if let Some(over) = &self.llm_override {
+            return Ok(over.clone());
+        }
         let db = self.db.lock().expect("DB poisoned");
         let base_url = db::setting_get(&db, "mimir.base_url")?;
         let fingerprint = db::setting_get(&db, "mimir.fingerprint")?;
@@ -41,7 +53,7 @@ impl AppState {
                  approved access credential: regin config set mimir.fingerprint <fingerprint>"
             ));
         }
-        Ok(MimirClient::new(base_url, fingerprint, model))
+        Ok(Arc::new(MimirClient::new(base_url, fingerprint, model)))
     }
 
 }
@@ -101,7 +113,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
     info!("Listening on {}", socket_path.display());
 
-    let state = Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn) });
+    let state = Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: None });
 
     let sched_state = Arc::clone(&state);
     tokio::spawn(async move { schedule_checker(sched_state).await });
@@ -1136,11 +1148,18 @@ mod dispatch_tests {
     use tokio::io::AsyncReadExt;
 
     fn state() -> Arc<AppState> {
+        state_with_llm(None)
+    }
+
+    /// FEAT-071: construct `AppState` with an injected `LlmClient` (typically
+    /// a `FakeLlm`) so chat/task-exec dispatch arms can be driven end-to-end
+    /// without a network call.
+    fn state_with_llm(llm: Option<Arc<dyn LlmClient>>) -> Arc<AppState> {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();
         let identity_conn = rusqlite::Connection::open_in_memory().unwrap();
         identity_db::init_identity_schema(&identity_conn).unwrap();
-        Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn) })
+        Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: llm })
     }
 
     /// Drive the real dispatch over an in-memory duplex and collect responses.
@@ -1207,5 +1226,67 @@ mod dispatch_tests {
         send(&mut buf, &Response::Ok { message: "hi".into() }).await.unwrap();
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s.lines().count(), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-071: chat dispatch end-to-end with an injected FakeLlm — no
+    // network. `Request::TaskExec` shares the same `agentic_chat` LLM loop
+    // (via `exec_skill_agentic`), so this exercises the LLM-dependent code
+    // path both commands rely on.
+    // -----------------------------------------------------------------
+
+    use regin_core::llm::FakeLlm;
+
+    #[tokio::test]
+    async fn chat_send_uses_the_injected_llm_client() {
+        let fake = Arc::new(FakeLlm::new());
+        fake.push_turn(LlmTurn::Text("hello from fake".into()));
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+
+        let conv_id = match run(Request::ChatNew, &st).await.as_slice() {
+            [Response::ChatNew { conversation_id }] => conversation_id.clone(),
+            other => panic!("expected ChatNew, got {other:?}"),
+        };
+
+        let resp = run(
+            Request::ChatSend { conversation_id: conv_id, messages: vec![ChatMessage::user("hi")], cwd: None },
+            &st,
+        ).await;
+
+        assert!(
+            resp.iter().any(|r| matches!(r, Response::StreamChunk { token } if token == "hello from fake")),
+            "expected a StreamChunk carrying the fake's reply, got {resp:?}"
+        );
+        assert!(matches!(resp.last(), Some(Response::StreamDone { .. })));
+    }
+
+    #[tokio::test]
+    async fn chat_send_without_a_queued_llm_reply_errors_without_touching_the_network() {
+        // dispatch() propagates agentic_chat's error via `?` rather than
+        // sending a Response::Error on the wire (that's the connection
+        // handler's job upstream), so assert on dispatch()'s own Result
+        // instead of going through the `run()` helper (which unwraps it).
+        let fake = Arc::new(FakeLlm::new()); // no queued turn
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+
+        let conv_id = match run(Request::ChatNew, &st).await.as_slice() {
+            [Response::ChatNew { conversation_id }] => conversation_id.clone(),
+            other => panic!("expected ChatNew, got {other:?}"),
+        };
+        let mut sink: Vec<u8> = Vec::new();
+        let result = dispatch(
+            Request::ChatSend { conversation_id: conv_id, messages: vec![ChatMessage::user("hi")], cwd: None },
+            &st,
+            &mut sink,
+        ).await;
+        assert!(result.is_err(), "expected dispatch to surface the FakeLlm's empty-queue error");
+    }
+
+    #[tokio::test]
+    async fn llm_client_without_override_requires_a_configured_fingerprint() {
+        // Production path (no override): still reads config fresh, still
+        // refuses to build a client with no fingerprint set.
+        let st = state();
+        assert!(st.llm_client().is_err());
     }
 }

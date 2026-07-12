@@ -17,3 +17,4 @@ toml = { workspace = true }
 tracing = { workspace = true }
 futures-util = { workspace = true }
 tokio-stream = { workspace = true }
+async-trait = { workspace = true }

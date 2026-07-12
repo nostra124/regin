@@ -443,3 +443,51 @@ toolchain**. Read it at the start of every session; append to it at the end.
   072–074 land too.
 - Sets up FEAT-071 (injectable `LlmClient`) next, then the decision-plane
   FEATs (028→030→029→032→031), per the milestone's suggested delivery order.
+
+### 2026-07-12 — FEAT-071: Injectable LLM client (0.6.0 coverage)
+- **FEAT-071 implemented and moved to done/.** New `LlmClient` trait in
+  `regin-core/src/llm.rs` (`#[async_trait]`, object-safe — `dyn LlmClient`)
+  covering the surface actually used across the codebase: `chat_turn`,
+  `embedding`, and `chat_completion` (default-impl'd in terms of
+  `chat_turn`). `chat_completion_stream`/`stream_messages` stayed inherent
+  `MimirClient`-only methods — grepped the whole workspace and found zero
+  call sites for them anywhere (SSE streaming isn't actually wired up; the
+  daemon "streams" by sending the final text as one `StreamChunk` — see
+  `agentic_chat`), so they weren't worth trait-ifying.
+- `impl LlmClient for MimirClient` delegates to the existing inherent
+  methods (`self.chat_turn(...)` inside the impl still resolves to the
+  inherent method — Rust always prefers inherent over trait methods for a
+  concrete receiver — confirmed not recursive). Zero behaviour change for
+  the concrete type.
+- **`FakeLlm`** (also in `llm.rs`, *not* `#[cfg(test)]`-gated since `regind`
+  — a different crate — needs it in its own tests): independent FIFO queues
+  for `chat_turn`/`chat_completion`/`embedding` replies.
+- **`AppState.llm_client()`** (regind) changed from constructing a fresh
+  `MimirClient` from live config on every call to returning
+  `Arc<dyn LlmClient>` — but **kept the fresh-config-read behavior** for the
+  production path (a new `llm_override: Option<Arc<dyn LlmClient>>` field on
+  `AppState`, `None` in production, short-circuits straight to the injected
+  client in tests). Deliberate: a naive "construct once at startup" design
+  would have silently broken live `regin config set mimir.*` reconfiguration
+  (no daemon restart needed today) — documented in a doc-comment so nobody
+  "simplifies" this into `AppState` holding a bare `Arc<dyn LlmClient>` field
+  set once at construction.
+- `reflect::curate_once`/`reflect::reflect_once`/`skills::run_skill` signatures
+  changed `client: &MimirClient` → `&dyn LlmClient` (mechanical; not currently
+  called from `regind` — it reimplements curation/reflection inline in
+  `run_curation` — so this is forward hygiene, not a behavior change).
+- New `regind::dispatch_tests`: `chat_send_uses_the_injected_llm_client` drives
+  `Request::ChatNew` → `Request::ChatSend` through the *real* `dispatch()` with
+  a `FakeLlm` queued reply and asserts the `StreamChunk`/`StreamDone` carries
+  it — no network. `TaskExec` shares the same `agentic_chat` LLM loop (via
+  `exec_skill_agentic`), so this one test covers the LLM-dependent code path
+  both commands rely on; didn't additionally stand up a temp skills dir to
+  drive `TaskExec` literally, since it'd exercise the identical `chat_turn`
+  seam for marginal extra coverage.
+- Added `async-trait = "0.1"` as a new workspace dependency — required for
+  `dyn LlmClient` (native async-fn-in-trait isn't object-safe without it, and
+  `AppState` holding a boxed/`Arc` trait object was explicit in the ticket).
+- 8 new tests (regin-core: +5 llm_client_trait_tests; regind: +3 dispatch
+  tests). Full workspace build/test/clippy stays green.
+- Next: the decision-plane FEATs, starting with FEAT-028 (dual-mode agent
+  loop), per the milestone's suggested order.

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow};
+use async_trait::async_trait;
 use futures_util::stream::Stream;
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -9,6 +10,32 @@ use tracing::{debug, trace};
 
 use crate::tools::{ToolCall, ToolDef};
 use crate::types::ChatMessage;
+
+/// The seam through which the daemon obtains LLM completions (FEAT-071 /
+/// DISC-020). `MimirClient` is the production implementation (network);
+/// [`FakeLlm`] is a canned-response test double. Object-safe (`dyn
+/// LlmClient`) so `AppState` can hold one behind an `Arc` and callers in
+/// other crates (`reflect`, `skills`, `regind`) can take `&dyn LlmClient`
+/// without needing to know the concrete type.
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    /// Single non-streaming completion with tool support.
+    async fn chat_turn(&self, messages: &[Value], tools: Option<&[ToolDef]>) -> Result<LlmTurn>;
+
+    /// Compute an embedding vector for `input`.
+    async fn embedding(&self, input: &str, model: &str) -> Result<Vec<f32>>;
+
+    /// Simple non-streaming completion (no tools). Default impl in terms of
+    /// [`Self::chat_turn`]; `MimirClient` overrides it to reuse its inherent
+    /// method directly (same behaviour, no double implementation).
+    async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+        let msgs: Vec<Value> = messages.iter().map(MimirClient::msg_to_value).collect();
+        match self.chat_turn(&msgs, None).await? {
+            LlmTurn::Text(t) => Ok(t),
+            LlmTurn::ToolCalls { .. } => Err(anyhow!("Unexpected tool calls in simple completion")),
+        }
+    }
+}
 
 /// Client for the **Mimir** gateway's OpenAI-compatible `/v1` surface.
 ///
@@ -340,5 +367,118 @@ impl MimirClient {
         );
 
         Ok(Box::pin(stream))
+    }
+}
+
+#[async_trait]
+impl LlmClient for MimirClient {
+    async fn chat_turn(&self, messages: &[Value], tools: Option<&[ToolDef]>) -> Result<LlmTurn> {
+        // Calls the inherent method above — inherent methods always take
+        // priority over trait methods for a concrete receiver, so this is
+        // not recursive.
+        self.chat_turn(messages, tools).await
+    }
+
+    async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+        self.chat_completion(messages).await
+    }
+
+    async fn embedding(&self, input: &str, model: &str) -> Result<Vec<f32>> {
+        self.embedding(input, model).await
+    }
+}
+
+/// A canned-response [`LlmClient`] for tests — no network (FEAT-071 /
+/// DISC-020). Not `#[cfg(test)]`-gated: `regind`'s own test suite (a
+/// different crate) needs it too.
+#[derive(Default)]
+pub struct FakeLlm {
+    turns: std::sync::Mutex<std::collections::VecDeque<LlmTurn>>,
+    completions: std::sync::Mutex<std::collections::VecDeque<String>>,
+    embeddings: std::sync::Mutex<std::collections::VecDeque<Vec<f32>>>,
+}
+
+impl FakeLlm {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue a reply for the next `chat_turn` call.
+    pub fn push_turn(&self, turn: LlmTurn) -> &Self {
+        self.turns.lock().unwrap().push_back(turn);
+        self
+    }
+
+    /// Queue a reply for the next `chat_completion` call.
+    pub fn push_completion(&self, text: impl Into<String>) -> &Self {
+        self.completions.lock().unwrap().push_back(text.into());
+        self
+    }
+
+    /// Queue a reply for the next `embedding` call.
+    pub fn push_embedding(&self, v: Vec<f32>) -> &Self {
+        self.embeddings.lock().unwrap().push_back(v);
+        self
+    }
+}
+
+#[async_trait]
+impl LlmClient for FakeLlm {
+    async fn chat_turn(&self, _messages: &[Value], _tools: Option<&[ToolDef]>) -> Result<LlmTurn> {
+        self.turns.lock().unwrap().pop_front().ok_or_else(|| anyhow!("FakeLlm: no queued chat_turn reply"))
+    }
+
+    // Overridden (rather than relying on the default chat_turn-based impl) so
+    // callers can queue plain text without also queuing a matching LlmTurn.
+    async fn chat_completion(&self, _messages: &[ChatMessage]) -> Result<String> {
+        self.completions.lock().unwrap().pop_front().ok_or_else(|| anyhow!("FakeLlm: no queued completion reply"))
+    }
+
+    async fn embedding(&self, _input: &str, _model: &str) -> Result<Vec<f32>> {
+        self.embeddings.lock().unwrap().pop_front().ok_or_else(|| anyhow!("FakeLlm: no queued embedding reply"))
+    }
+}
+
+#[cfg(test)]
+mod llm_client_trait_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fake_llm_chat_turn_replays_queued_turns_in_order() {
+        let fake = FakeLlm::new();
+        fake.push_turn(LlmTurn::Text("first".into()));
+        fake.push_turn(LlmTurn::Text("second".into()));
+        let a = fake.chat_turn(&[], None).await.unwrap();
+        let b = fake.chat_turn(&[], None).await.unwrap();
+        assert!(matches!(a, LlmTurn::Text(t) if t == "first"));
+        assert!(matches!(b, LlmTurn::Text(t) if t == "second"));
+    }
+
+    #[tokio::test]
+    async fn fake_llm_chat_turn_errors_when_queue_exhausted() {
+        let fake = FakeLlm::new();
+        assert!(fake.chat_turn(&[], None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fake_llm_chat_completion_replays_plain_text() {
+        let fake = FakeLlm::new();
+        fake.push_completion("hello");
+        assert_eq!(fake.chat_completion(&[]).await.unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn fake_llm_embedding_replays_vector() {
+        let fake = FakeLlm::new();
+        fake.push_embedding(vec![0.1, 0.2, 0.3]);
+        assert_eq!(fake.embedding("text", "model").await.unwrap(), vec![0.1, 0.2, 0.3]);
+    }
+
+    #[tokio::test]
+    async fn dyn_llm_client_dispatches_through_the_trait_object() {
+        let fake = FakeLlm::new();
+        fake.push_completion("via trait object");
+        let boxed: Box<dyn LlmClient> = Box::new(fake);
+        assert_eq!(boxed.chat_completion(&[]).await.unwrap(), "via trait object");
     }
 }

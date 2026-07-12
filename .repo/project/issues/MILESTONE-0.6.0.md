@@ -57,7 +57,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | ID | Title | Status |
 |----|-------|--------|
 | FEAT-070 | CLI transport seam + render/logic split | done |
-| FEAT-071 | Injectable LLM client (`LlmClient` trait) | open |
+| FEAT-071 | Injectable LLM client (`LlmClient` trait) | done |
 | FEAT-072 | llm.rs pure extraction + mock-HTTP test | open |
 | FEAT-073 | Daemon loop extraction + full dispatch coverage | open |
 | FEAT-074 | Integration tests over the real binaries | open |
