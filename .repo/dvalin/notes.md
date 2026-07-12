@@ -580,3 +580,57 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-029 (the Soul gate itself) — now has both FEAT-028's pipeline
   (`SoulGate` trait, `PassthroughSoulGate` stub to replace) and FEAT-030's value
   catalog + grounding union to vote from.
+
+### 2026-07-12 — FEAT-029: The Soul gate (values-grounded vote + veto) (0.6.0 decision plane)
+- **FEAT-029 implemented and moved to done/.** Landed in `decision.rs` (not a
+  new module) — it's the real implementation of the `SoulGate` trait FEAT-028
+  already defined, so it belongs where that trait and `run_deliberate` live.
+- **`SoulGate::evaluate` became `async fn ... -> Result<...>`** (was sync,
+  infallible) — a real LLM call is inherently async/fallible. Updated
+  `PassthroughSoulGate` and `run_deliberate`'s call site (`.await?`)
+  accordingly; this is expected ticket-to-ticket evolution of FEAT-028's
+  trait, not a mistake — the trait was always going to need this once a real
+  gate showed up.
+- **`LlmSoulGate`**: builds exactly two messages — a fixed system prompt
+  ("you are the conscience... respond with ONLY a JSON object") and a user
+  turn containing **only** `Plan.intent_summary` + the resolved values
+  grounding (names/descriptions looked up from FEAT-030's catalog). Verified
+  by a `SpyLlm` test double that records every message sent and asserts a
+  plan's `steps`, `intended_tool_calls`, and tool names never appear in it —
+  acceptance criterion 1, actually enforced by a test rather than just by
+  code review.
+- **Verdict resolution**: `veto` always wins; `approve` passes only at
+  `confidence >= decision.deliberate.confidence_threshold` (new setting,
+  default 0.7) — below-threshold `approve` *and* `revise` both resolve to
+  `SoulVerdict::Revise`. Response parsing tolerates prose wrapped around the
+  JSON object (LLMs don't reliably honour "ONLY JSON" — same lenient
+  `{...}`-extraction pattern `reflect.rs`'s curator parsing already uses) and
+  a genuinely malformed response is a hard `Err`, not a silent approve.
+- **`SoulVote` + `VoteRecorder` trait + `NullVoteRecorder` stub** — same
+  "define the seam, stub the sink" pattern as FEAT-028's `PassthroughSoulGate`.
+  FEAT-032 ("deliberation capture") owns turning this into durable storage;
+  FEAT-029's job was making sure every vote (`plan_id`, `confidence`,
+  `verdict`, `gut_reaction`) is *produced* and handed to *something* —
+  verified with a `SpyRecorder` capturing all 3 votes across a 3-round
+  `max_rounds` exhaustion.
+- `run_deliberate` itself needed **no changes** for criteria 3/4 (veto /
+  max-rounds → `DeniedAndEscalated`) — that logic was already correct from
+  FEAT-028; this ticket's tests just exercise it end-to-end through the real
+  gate instead of a canned `FixedVerdictSoul`.
+- Added `decision.deliberate.confidence_threshold` (default `0.7`) to
+  `config::SETTINGS`.
+- 9 new tests (regin-core 274→283), all in `decision.rs`'s existing test
+  module: the prompt-starvation spy (criterion 1), threshold resolution both
+  sides (criterion 2), veto both directly and through the full pipeline
+  (criterion 3), max-rounds exhaustion with a scripted `LlmClient` plus vote
+  capture (criteria 4–5), prose-tolerant parsing, and malformed-response
+  error handling. Full workspace build/test/clippy stays green.
+- Like FEAT-028, **`LlmSoulGate` is not wired into `regind`'s live chat
+  loop** — no caller in `agentic_chat` constructs a `Planner`/`Executor`/
+  `LlmSoulGate` yet. That live-loop integration is still a future ticket;
+  this milestone's remaining decision-plane FEATs (031 principle
+  derivation, 032 deliberation capture) are about deepening the engine
+  further, not that integration.
+- Next: FEAT-032 (deliberation capture — the real `VoteRecorder`), then
+  FEAT-031 (principle derivation & ratification), per the milestone's
+  suggested order.

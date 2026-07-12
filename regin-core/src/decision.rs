@@ -17,20 +17,28 @@
 //! Like [`crate::remediation`] and [`crate::safelane`], this is a **pure-ish
 //! engine**: mode selection and the deliberate pipeline are fully
 //! unit-testable with fakes/spies here. Wiring it into `regind`'s live chat
-//! loop (`agentic_chat`) is deliberately out of scope for this ticket — the
-//! [`SoulGate`] here is [`PassthroughSoulGate`], a stub that always approves
-//! until FEAT-029 lands the real values-grounded gate; wiring a
-//! stub-that-always-approves into production would add risk (a new code path
-//! in the live loop) for zero behavioural benefit. `act` mode — today's
-//! `chat_turn` path — is untouched by this module, so it is unchanged by
-//! construction.
+//! loop (`agentic_chat`) is deliberately out of scope for FEAT-028/029 — the
+//! [`SoulGate`] trait has both a stub ([`PassthroughSoulGate`], always
+//! approves) and the real values-grounded gate ([`LlmSoulGate`], FEAT-029);
+//! wiring either into production would add a new code path in the live loop
+//! with no caller yet exercising it, so that integration is left to a future
+//! ticket. `act` mode — today's `chat_turn` path — is untouched by this
+//! module, so it is unchanged by construction.
+//!
+//! **The Soul is deliberately starved (FEAT-029).** [`LlmSoulGate`] sends the
+//! LLM only [`Plan::intent_summary`] and the active values grounding — never
+//! the Mind's step-by-step reasoning, its intended tool calls, or any
+//! environment detail. That starvation is what makes the vote a *feeling*,
+//! not a second round of logic the Mind could out-argue.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::llm::LlmClient;
 use crate::persona::Persona;
 use crate::tools::ToolCall;
+use crate::types::ChatMessage;
 
 /// regin's two decision modes (DISC-018).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +117,9 @@ pub fn select_mode(
 /// A read-only plan produced by the Mind before any side effect runs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Plan {
+    /// Identifies this plan for deliberation capture (FEAT-032); production
+    /// Planners should stamp a fresh id per plan (e.g. a uuid).
+    pub id: String,
     pub intent_summary: String,
     pub steps: Vec<String>,
     pub intended_tool_calls: Vec<ToolCall>,
@@ -130,23 +141,151 @@ pub enum SoulVerdict {
     Veto,
 }
 
-/// Votes on a [`Plan`]'s acceptability. FEAT-029 supplies the real
-/// values-grounded gate; see [`PassthroughSoulGate`] for the stub used until
-/// then.
+/// Votes on a [`Plan`]'s acceptability. An LLM call (the real [`LlmSoulGate`],
+/// FEAT-029) or a network hiccup can fail, so this is fallible; a fallible
+/// vote propagates as an error out of [`run_deliberate`] rather than being
+/// silently treated as a verdict.
+#[async_trait]
 pub trait SoulGate: Send + Sync {
     /// The verdict plus a one-line reaction — fed back to the Mind on
     /// `Revise`, recorded as the escalation reason on `Veto`.
-    fn evaluate(&self, plan: &Plan) -> (SoulVerdict, String);
+    async fn evaluate(&self, plan: &Plan) -> Result<(SoulVerdict, String)>;
 }
 
-/// Stub gate used until FEAT-029 lands the real values-grounded Soul: always
-/// approves. Exists so FEAT-028's pipeline can be built and fully tested
-/// without a forward dependency on FEAT-029.
+/// Stub gate: always approves. Useful for wiring/testing the pipeline itself
+/// without depending on an LLM (e.g. FEAT-028's own tests).
 pub struct PassthroughSoulGate;
 
+#[async_trait]
 impl SoulGate for PassthroughSoulGate {
-    fn evaluate(&self, _plan: &Plan) -> (SoulVerdict, String) {
-        (SoulVerdict::Approve, "stub Soul gate (FEAT-029 not yet landed): auto-approved".to_string())
+    async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
+        Ok((SoulVerdict::Approve, "stub Soul gate: auto-approved".to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The real Soul gate (FEAT-029)
+// ---------------------------------------------------------------------------
+
+/// The Soul's raw verdict, as returned by the LLM — distinct from
+/// [`SoulVerdict`]: an `approve` below the confidence threshold is *recorded*
+/// as `Approve` here but *resolved* to [`SoulVerdict::Revise`] by
+/// [`resolve_verdict`] (acceptance criterion 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RawSoulVerdict {
+    Approve,
+    Revise,
+    Veto,
+}
+
+/// One cast vote — captured for deliberation calibration (FEAT-032).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SoulVote {
+    pub plan_id: String,
+    pub confidence: f64,
+    pub verdict: RawSoulVerdict,
+    pub gut_reaction: String,
+}
+
+/// Where cast votes go (FEAT-032 supplies the real durable sink — an
+/// `identity.db`-backed recorder — this trait is the seam). [`NullVoteRecorder`]
+/// is a stub, same pattern as [`PassthroughSoulGate`].
+pub trait VoteRecorder: Send + Sync {
+    fn record(&self, vote: &SoulVote);
+}
+
+/// Stub recorder: discards every vote. Used where deliberation capture isn't
+/// wired up yet.
+pub struct NullVoteRecorder;
+
+impl VoteRecorder for NullVoteRecorder {
+    fn record(&self, _vote: &SoulVote) {}
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSoulResponse {
+    confidence: f64,
+    gut_reaction: String,
+    verdict: RawSoulVerdict,
+}
+
+const SOUL_SYSTEM_PROMPT: &str = "You are the conscience. Given the plan's intent and these values, \
+     return a gut reaction — not a second round of reasoning. \
+     Respond with ONLY a JSON object of the shape \
+     {\"confidence\": <0.0-1.0>, \"gut_reaction\": \"<one line>\", \"verdict\": \"approve\"|\"revise\"|\"veto\"}.";
+
+/// The user turn sent to the Soul: **only** the plan's intent and the values
+/// grounding. Never the Mind's steps, its intended tool calls, or any
+/// environment detail (acceptance criterion 1).
+fn soul_user_prompt(intent_summary: &str, grounding: &[String]) -> String {
+    let values = grounding
+        .iter()
+        .filter_map(|id| crate::soul::find(id))
+        .map(|v| format!("- {} ({}): {}", v.name, v.id, v.description))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("Plan intent:\n{intent_summary}\n\nValues grounding:\n{values}\n\nReturn your verdict as JSON.")
+}
+
+/// Extract a `{...}` JSON object from `text`, tolerating surrounding prose
+/// (LLMs don't always honour "ONLY JSON").
+fn extract_json_object(text: &str) -> Option<&str> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    (end >= start).then(|| &text[start..=end])
+}
+
+fn parse_soul_response(text: &str) -> Result<RawSoulResponse> {
+    let json = extract_json_object(text).ok_or_else(|| anyhow!("Soul response has no JSON object: {text:?}"))?;
+    serde_json::from_str(json).map_err(|e| anyhow!("malformed Soul response: {e}: {json}"))
+}
+
+/// `approve` and `confidence >= threshold` passes; a below-threshold
+/// `approve` is treated as `revise`; `revise` stays `revise`; `veto` stays
+/// `veto` regardless of confidence (acceptance criterion 2).
+fn resolve_verdict(raw: RawSoulVerdict, confidence: f64, threshold: f64) -> SoulVerdict {
+    match raw {
+        RawSoulVerdict::Veto => SoulVerdict::Veto,
+        RawSoulVerdict::Approve if confidence >= threshold => SoulVerdict::Approve,
+        RawSoulVerdict::Approve | RawSoulVerdict::Revise => SoulVerdict::Revise,
+    }
+}
+
+/// The real values-grounded Soul gate (FEAT-029): a tool-less, starved LLM
+/// call voting on a [`Plan`]'s intent against the active values grounding
+/// (identity-core charter ∪ Persona overlay, FEAT-030 —
+/// `soul::grounding_union`).
+pub struct LlmSoulGate<'a> {
+    pub llm: &'a dyn LlmClient,
+    /// Value ids — the caller resolves the grounding union (FEAT-030) once
+    /// per session/turn and passes it in.
+    pub grounding: Vec<String>,
+    /// `decision.deliberate.confidence_threshold` (default 0.7).
+    pub confidence_threshold: f64,
+    pub recorder: &'a dyn VoteRecorder,
+}
+
+#[async_trait]
+impl<'a> SoulGate for LlmSoulGate<'a> {
+    async fn evaluate(&self, plan: &Plan) -> Result<(SoulVerdict, String)> {
+        let messages = vec![
+            ChatMessage::system(SOUL_SYSTEM_PROMPT),
+            ChatMessage::user(soul_user_prompt(&plan.intent_summary, &self.grounding)),
+        ];
+        let raw_text = self.llm.chat_completion(&messages).await?;
+        let raw = parse_soul_response(&raw_text)?;
+
+        let vote = SoulVote {
+            plan_id: plan.id.clone(),
+            confidence: raw.confidence,
+            verdict: raw.verdict,
+            gut_reaction: raw.gut_reaction.clone(),
+        };
+        self.recorder.record(&vote);
+
+        let verdict = resolve_verdict(raw.verdict, raw.confidence, self.confidence_threshold);
+        Ok((verdict, raw.gut_reaction))
     }
 }
 
@@ -181,7 +320,7 @@ pub async fn run_deliberate(
     let mut feedback: Option<String> = None;
     for _round in 0..max_rounds.max(1) {
         let plan = planner.plan(feedback.as_deref()).await?;
-        match soul.evaluate(&plan) {
+        match soul.evaluate(&plan).await? {
             (SoulVerdict::Approve, _) => {
                 executor.execute(&plan);
                 return Ok(DeliberateOutcome::Executed);
@@ -280,6 +419,7 @@ mod tests {
         async fn plan(&self, revision_feedback: Option<&str>) -> Result<Plan> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Plan {
+                id: format!("plan-{n}"),
                 intent_summary: format!("round {n}, feedback={revision_feedback:?}"),
                 steps: vec!["do the thing".into()],
                 intended_tool_calls: vec![],
@@ -288,9 +428,10 @@ mod tests {
     }
 
     struct FixedVerdictSoul(SoulVerdict);
+    #[async_trait]
     impl SoulGate for FixedVerdictSoul {
-        fn evaluate(&self, _plan: &Plan) -> (SoulVerdict, String) {
-            (self.0, "canned verdict".to_string())
+        async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
+            Ok((self.0, "canned verdict".to_string()))
         }
     }
 
@@ -370,13 +511,14 @@ mod tests {
         }
         // Revise once, then approve.
         struct RevisesOnceSoul(AtomicU32);
+        #[async_trait]
         impl SoulGate for RevisesOnceSoul {
-            fn evaluate(&self, _plan: &Plan) -> (SoulVerdict, String) {
-                if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
+                Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                     (SoulVerdict::Revise, "narrow the blast radius".to_string())
                 } else {
                     (SoulVerdict::Approve, "ok now".to_string())
-                }
+                })
             }
         }
 
@@ -390,10 +532,195 @@ mod tests {
         assert_eq!(seen.as_slice(), [None, Some("narrow the blast radius".to_string())]);
     }
 
-    #[test]
-    fn passthrough_soul_gate_always_approves() {
-        let (verdict, _) = PassthroughSoulGate.evaluate(&Plan::default());
+    #[tokio::test]
+    async fn passthrough_soul_gate_always_approves() {
+        let (verdict, _) = PassthroughSoulGate.evaluate(&Plan::default()).await.unwrap();
         assert_eq!(verdict, SoulVerdict::Approve);
+    }
+
+    // --- The real Soul gate (FEAT-029) ---
+
+    use crate::llm::LlmTurn;
+    use crate::tools::{FunctionCall, ToolCall as TC};
+
+    /// A spy `LlmClient` that records every message it was sent (for
+    /// acceptance criterion 1) and replays a single canned `chat_completion`
+    /// reply.
+    struct SpyLlm {
+        reply: String,
+        seen_messages: Mutex<Vec<ChatMessage>>,
+    }
+    impl SpyLlm {
+        fn new(reply: impl Into<String>) -> Self {
+            Self { reply: reply.into(), seen_messages: Mutex::new(Vec::new()) }
+        }
+    }
+    #[async_trait]
+    impl LlmClient for SpyLlm {
+        async fn chat_turn(&self, _messages: &[serde_json::Value], _tools: Option<&[crate::tools::ToolDef]>) -> Result<LlmTurn> {
+            unreachable!("the Soul gate uses chat_completion, not chat_turn")
+        }
+        async fn embedding(&self, _input: &str, _model: &str) -> Result<Vec<f32>> {
+            unreachable!("the Soul gate never computes embeddings")
+        }
+        async fn chat_completion(&self, messages: &[ChatMessage]) -> Result<String> {
+            self.seen_messages.lock().unwrap().extend_from_slice(messages);
+            Ok(self.reply.clone())
+        }
+    }
+
+    fn plan_with_reasoning() -> Plan {
+        Plan {
+            id: "plan-1".into(),
+            intent_summary: "restart the web service to clear a memory leak".into(),
+            steps: vec!["SECRET_STEP: sudo systemctl restart webapp".into()],
+            intended_tool_calls: vec![TC {
+                id: "call-1".into(),
+                call_type: "function".into(),
+                function: FunctionCall { name: "bash".into(), arguments: "{\"command\":\"systemctl restart webapp\"}".into() },
+            }],
+        }
+    }
+
+    #[derive(Default)]
+    struct SpyRecorder {
+        votes: Mutex<Vec<SoulVote>>,
+    }
+    impl VoteRecorder for SpyRecorder {
+        fn record(&self, vote: &SoulVote) {
+            self.votes.lock().unwrap().push(vote.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn soul_prompt_carries_only_intent_and_values_not_reasoning_tools_or_env() {
+        // acceptance criterion 1
+        let llm = SpyLlm::new(r#"{"confidence": 0.9, "gut_reaction": "fine", "verdict": "approve"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate {
+            llm: &llm,
+            grounding: vec!["integrity".to_string(), "caution".to_string()],
+            confidence_threshold: 0.7,
+            recorder: &recorder,
+        };
+        gate.evaluate(&plan_with_reasoning()).await.unwrap();
+
+        let seen = llm.seen_messages.lock().unwrap();
+        let joined: String = seen.iter().map(|m| m.content.clone()).collect::<Vec<_>>().join("\n");
+        assert!(joined.contains("restart the web service to clear a memory leak"), "intent must be present");
+        assert!(joined.contains("integrity") && joined.contains("caution"), "values grounding must be present");
+        assert!(!joined.contains("SECRET_STEP"), "the Mind's step-by-step reasoning must be withheld");
+        assert!(!joined.contains("systemctl restart webapp"), "the intended tool call must be withheld");
+        assert!(!joined.contains("bash"), "the tool list must be withheld");
+    }
+
+    #[tokio::test]
+    async fn approve_at_or_above_threshold_resolves_to_approve() {
+        // acceptance criterion 2
+        let llm = SpyLlm::new(r#"{"confidence": 0.85, "gut_reaction": "solid", "verdict": "approve"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        assert_eq!(verdict, SoulVerdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn approve_below_threshold_resolves_to_revise() {
+        // acceptance criterion 2
+        let llm = SpyLlm::new(r#"{"confidence": 0.4, "gut_reaction": "not sure", "verdict": "approve"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        assert_eq!(verdict, SoulVerdict::Revise);
+    }
+
+    #[tokio::test]
+    async fn veto_fails_the_gate_regardless_of_confidence() {
+        // acceptance criterion 3
+        let llm = SpyLlm::new(r#"{"confidence": 0.99, "gut_reaction": "no", "verdict": "veto"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        let (verdict, reason) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        assert_eq!(verdict, SoulVerdict::Veto);
+        assert_eq!(reason, "no");
+    }
+
+    #[tokio::test]
+    async fn veto_through_run_deliberate_denies_and_escalates_without_executing() {
+        // acceptance criterion 3, end to end through the pipeline
+        let llm = SpyLlm::new(r#"{"confidence": 0.99, "gut_reaction": "against stewardship", "verdict": "veto"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec!["stewardship".to_string()], confidence_threshold: 0.7, recorder: &recorder };
+        let planner = FixedPlanner::new();
+        let mut executor = SpyExecutor::default();
+
+        let outcome = run_deliberate(&planner, &gate, &mut executor, 3).await.unwrap();
+        match outcome {
+            DeliberateOutcome::DeniedAndEscalated { reason } => assert_eq!(reason, "against stewardship"),
+            other => panic!("expected DeniedAndEscalated, got {other:?}"),
+        }
+        assert!(executor.executed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_rounds_without_approval_denies_and_escalates_with_a_scripted_llm() {
+        // acceptance criterion 4, with a fake LLM that never approves
+        struct AlwaysRevise;
+        #[async_trait]
+        impl LlmClient for AlwaysRevise {
+            async fn chat_turn(&self, _m: &[serde_json::Value], _t: Option<&[crate::tools::ToolDef]>) -> Result<LlmTurn> {
+                unreachable!()
+            }
+            async fn embedding(&self, _i: &str, _m: &str) -> Result<Vec<f32>> {
+                unreachable!()
+            }
+            async fn chat_completion(&self, _messages: &[ChatMessage]) -> Result<String> {
+                Ok(r#"{"confidence": 0.9, "gut_reaction": "reconsider", "verdict": "revise"}"#.to_string())
+            }
+        }
+        let llm = AlwaysRevise;
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        let planner = FixedPlanner::new();
+        let mut executor = SpyExecutor::default();
+
+        let outcome = run_deliberate(&planner, &gate, &mut executor, 3).await.unwrap();
+        assert!(matches!(outcome, DeliberateOutcome::DeniedAndEscalated { .. }));
+        assert_eq!(planner.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(recorder.votes.lock().unwrap().len(), 3, "every round's vote was captured");
+    }
+
+    #[tokio::test]
+    async fn every_vote_is_captured_with_plan_id_confidence_verdict_and_reaction() {
+        // acceptance criterion 5
+        let llm = SpyLlm::new(r#"{"confidence": 0.55, "gut_reaction": "borderline", "verdict": "approve"}"#);
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        gate.evaluate(&plan_with_reasoning()).await.unwrap();
+
+        let votes = recorder.votes.lock().unwrap();
+        assert_eq!(votes.len(), 1);
+        assert_eq!(votes[0].plan_id, "plan-1");
+        assert_eq!(votes[0].confidence, 0.55);
+        assert_eq!(votes[0].verdict, RawSoulVerdict::Approve);
+        assert_eq!(votes[0].gut_reaction, "borderline");
+    }
+
+    #[tokio::test]
+    async fn tolerates_prose_wrapped_around_the_json_object() {
+        let llm = SpyLlm::new("Sure, here you go:\n{\"confidence\": 0.8, \"gut_reaction\": \"ok\", \"verdict\": \"approve\"}\nHope that helps!");
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        assert_eq!(verdict, SoulVerdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn malformed_response_is_an_error_not_a_silent_approve() {
+        let llm = SpyLlm::new("not json at all");
+        let recorder = SpyRecorder::default();
+        let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
+        assert!(gate.evaluate(&plan_with_reasoning()).await.is_err());
     }
 
     // --- Act mode unchanged (acceptance criterion 5) ---

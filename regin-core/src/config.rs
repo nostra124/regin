@@ -44,6 +44,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("regind.heartbeat", "", "Last scheduler tick (RFC3339); a stale value signals a stalled loop (FEAT-048)"),
     ("decision.default_mode", "act", "Default decision mode when no Persona override applies: act|deliberate (FEAT-028)"),
     ("decision.deliberate.max_rounds", "3", "Plan/re-plan rounds before deliberate mode default-denies + escalates (FEAT-028)"),
+    ("decision.deliberate.confidence_threshold", "0.7", "Minimum Soul-vote confidence for an approve to pass the gate; below this an approve is treated as revise (FEAT-029)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
