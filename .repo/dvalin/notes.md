@@ -828,3 +828,70 @@ toolchain**. Read it at the start of every session; append to it at the end.
   (`format!`-in-`format!` in a test, fixed before commit).
 - Next: FEAT-073 (daemon loop extraction + full dispatch coverage), per the
   milestone's suggested order.
+
+### 2026-07-12 — FEAT-073: Daemon loop extraction + full dispatch coverage (0.6.0 coverage)
+- **FEAT-073 implemented and moved to done/.** Second of the four coverage-ramp
+  tickets. No behavior change to `regind` — extraction + coverage only.
+- **Extracted both background-loop bodies into testable tick functions:**
+  - `run_due_schedules(state, now: &str)` — the scheduler's per-tick body
+    (stamp heartbeat, find due schedules, run each, best-effort). `now` is
+    now an injected parameter rather than read internally, so due-vs-not-due
+    is directly controllable from a test. `schedule_checker`'s `loop {}` is
+    now a thin `interval.tick().await; run_due_schedules(&state,
+    &chrono::Utc::now().to_rfc3339()).await;`.
+  - `reflection_tick(state) -> Result<CuratorStats>` — the reflection
+    checker's "run curation, log the result" body, now returning the
+    outcome (previously it only logged, discarding the `Result`) so a test
+    can assert success/failure directly instead of scraping log lines.
+    `reflection_checker`'s loop keeps the interval-sleep, then calls
+    `let _ = reflection_tick(&state).await;`.
+- **`run_due_schedules` has no DI seam for `config::user_skills_dir()`** (it
+  calls it directly, same as production always has) — a known, accepted gap
+  rather than a new one. To exercise the real success path (skill loads,
+  `FakeLlm` replies, `task_runs` row written, `next_run` advances), the test
+  writes a real skill under the real user skills dir via a `TempSkillGuard`
+  RAII helper (unique per-test name, removed on drop even on panic) — the
+  only way to reach that branch without a larger config-injection refactor,
+  which is out of this ticket's scope. Not-due, unloadable-skill (fail-safe),
+  and LLM-failure paths are all fully hermetic (no real dirs touched) since
+  they exit before or without ever needing the skill content.
+- **5 new tick tests** (`run_due_schedules` x4: heartbeat-stamped-regardless,
+  skips-not-due, fail-safe-on-missing-skill, records-failure-on-LLM-error,
+  runs-a-due-skill-end-to-end; `reflection_tick` x2: empty-DB success,
+  errors-without-a-configured-LLM) — acceptance criterion 1.
+- **Full dispatch-arm coverage (acceptance criterion 2).** `dispatch_tests`
+  grew from 8 to 49 tests, covering all 68 `Request` variants (confirmed by
+  grepping every variant name appears at least twice in `main.rs` — once in
+  the dispatch arm, once in a test). Grouped by domain: config, memory
+  (save/list/search/update/delete/export/import/info/reflect), the full ITIL
+  incident/change/problem/hypothesis lifecycles (previously only
+  open+list were tested), desired-state, filters, posture, greeting, push,
+  checks, audit, the **entire Soul surface including FEAT-031's
+  principles** (list/ratify/reject — had **zero** `regind`-level coverage
+  before this ticket, only reachable indirectly via `regin-cli`'s
+  `FakeTransport` tests), skills/tasks, and per-repo context.
+  - Distinguished two error-reporting shapes while writing these — arms that
+    `send()` an explicit `Response::Error` (tested via the existing `run()`
+    helper + `matches!`) vs. arms that propagate via `?` straight out of
+    `dispatch()` (tested via `dispatch(...).await.is_err()` directly,
+    matching the pattern the FEAT-071 `chat_send_without_a_queued_llm_reply`
+    test already established). Got this wrong once during the work —
+    `MemoryImport` propagates via `?` but was first written expecting a wire
+    `Response::Error`, which panicked inside the `run()` helper's `.unwrap()`
+    (a real bug in the *test*, not the daemon) — fixed by switching that one
+    test to the `dispatch()`-Result pattern.
+  - Deliberately scoped OUT of hermetic happy-path testing: `TaskCreate`'s
+    non-repo branch (writes to the real user skills dir with no cleanup
+    path) and any assertion on `SkillList`'s *content* (real ambient skill
+    state is untrusted) — both are exercised only for their
+    response-shape/error paths, which are what's reachable without either
+    touching real state destructively or adding a new DI seam.
+- 54 new tests total (5 tick + 49 dispatch, net; dispatch_tests grew by 41
+  after accounting for the one test-bug fix). Full workspace build/test/
+  clippy stays green (346 regin-core + 79 regin-cli + 49 regind + 5
+  operator-skills-package tests; clippy warnings unchanged from the
+  FEAT-072 baseline — confirmed by diffing warning text, not just counts,
+  since two pre-existing warnings shifted line numbers from this ticket's
+  doc-comment additions).
+- Next: FEAT-074 (integration tests over the real binaries), per the
+  milestone's suggested order.
