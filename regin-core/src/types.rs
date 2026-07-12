@@ -298,3 +298,27 @@ pub struct CuratorStats {
     /// deliberation outcomes this pass (FEAT-031).
     pub principles_proposed: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_message_constructors_set_the_expected_role() {
+        assert_eq!(ChatMessage::system("s").role, "system");
+        assert_eq!(ChatMessage::user("u").role, "user");
+        let a = ChatMessage::assistant("a");
+        assert_eq!(a.role, "assistant");
+        assert_eq!(a.content, "a");
+    }
+
+    #[test]
+    fn memory_deserialization_applies_field_defaults_when_omitted() {
+        let m: Memory = serde_json::from_str(
+            r#"{"id":"m1","category":"fact","content":"c","created_at":"t","updated_at":"t"}"#,
+        ).unwrap();
+        assert_eq!(m.strength, 1);
+        assert_eq!(m.source, "human");
+        assert!(m.last_seen.is_none());
+    }
+}

@@ -154,3 +154,70 @@ WantedBy=default.target
 "#
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_dir_and_derived_paths_are_scoped_under_regin() {
+        assert!(data_dir().unwrap().ends_with("regin"));
+        assert!(db_path().unwrap().ends_with("regin/regin.db"));
+        assert!(identity_db_path().unwrap().ends_with("regin/identity.db"));
+    }
+
+    #[test]
+    fn socket_path_prefers_xdg_runtime_dir_and_falls_back_without_it() {
+        // Contained to a single test function, holding a whole-process env
+        // lock, so this never races another concurrently-running test that
+        // reads XDG_RUNTIME_DIR or XDG_CONFIG_HOME (see `xdg_env_lock`'s doc
+        // comment in lib.rs).
+        let _guard = crate::xdg_env_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("XDG_RUNTIME_DIR").ok();
+
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", "/tmp/feat075-runtime") };
+        let with_runtime_dir = socket_path().unwrap();
+        assert_eq!(with_runtime_dir, PathBuf::from("/tmp/feat075-runtime/regin/regind.sock"));
+
+        unsafe { std::env::remove_var("XDG_RUNTIME_DIR") };
+        let fallback = socket_path().unwrap();
+        assert!(fallback.ends_with("regin/regind.sock"));
+        assert_ne!(fallback, with_runtime_dir, "fallback differs from the XDG_RUNTIME_DIR path");
+
+        match saved {
+            Some(v) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", v) },
+            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
+        }
+    }
+
+    #[test]
+    fn user_and_system_dirs_are_scoped_under_regin() {
+        let _guard = crate::xdg_env_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(user_skills_dir().unwrap().ends_with("regin/skills"));
+        assert_eq!(system_skills_dir(), PathBuf::from(SYSTEM_SKILLS_DIR));
+        assert!(user_desired_dir().unwrap().ends_with("regin/desired"));
+        assert_eq!(system_desired_dir(), PathBuf::from(SYSTEM_DESIRED_DIR));
+        assert!(user_filters_dir().unwrap().ends_with("regin/filters"));
+        assert_eq!(system_filters_dir(), PathBuf::from(SYSTEM_FILTERS_DIR));
+        assert!(user_operator_skills_dir().unwrap().ends_with("regin/operator-skills"));
+        assert_eq!(system_operator_skills_dir(), PathBuf::from(SYSTEM_OPERATOR_SKILLS_DIR));
+    }
+
+    #[test]
+    fn systemd_paths_are_scoped_under_systemd_user() {
+        let _guard = crate::xdg_env_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(user_systemd_dir().unwrap().ends_with("systemd/user"));
+        assert!(regind_service_path().unwrap().ends_with("systemd/user/regind.service"));
+    }
+
+    #[test]
+    fn regind_service_unit_embeds_the_binary_path_and_key_directives() {
+        let unit = regind_service_unit("/usr/bin/regind");
+        assert!(unit.contains("ExecStart=/usr/bin/regind"));
+        assert!(unit.contains("[Unit]"));
+        assert!(unit.contains("[Service]"));
+        assert!(unit.contains("[Install]"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("WantedBy=default.target"));
+    }
+}
