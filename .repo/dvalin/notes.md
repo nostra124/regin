@@ -780,3 +780,51 @@ toolchain**. Read it at the start of every session; append to it at the end.
   module doc comment) and remains future work.
 - Next: FEAT-072 (llm.rs pure extraction + mock-HTTP test), the first of the
   four remaining coverage-ramp tickets, per the milestone's suggested order.
+
+### 2026-07-12 — FEAT-072: llm.rs pure extraction + mock-HTTP test (0.6.0 coverage)
+- **FEAT-072 implemented and moved to done/.** First of the four remaining
+  coverage-ramp tickets. No behavior change to `MimirClient` — this is a
+  pure extraction + test-coverage ticket.
+- **Extracted three pure functions** out of `chat_turn`/`stream_messages`:
+  - `build_completion_request(model, messages, tools, stream) ->
+    CompletionRequest` — request-body shape, unit-tested for both the
+    tools/stream-omitted and tools/stream-present cases (the `skip_serializing_if`
+    behavior is what actually needs verifying, not just "does it compile").
+  - `parse_completion_response(&Value) -> Result<LlmTurn>` — the
+    tool-call-assembly step (moved verbatim from `chat_turn`): resolves a
+    raw completion response into text or tool calls, preserving the raw
+    assistant message for tool-call conversations. Unit-tested for text,
+    tool-calls, empty-tool-calls-falls-back-to-text, and three malformed-shape
+    error cases (missing choices, missing message, wrong JSON shape) —
+    previously only reachable by hitting a live/fake HTTP response.
+  - `parse_sse_line(&str) -> SseEvent` (new `SseEvent` enum:
+    `Done`/`Content`/`Skip`/`NotData`/`Error`) — one SSE line's parse
+    outcome. `stream_messages`'s `unfold` closure had this logic **inlined
+    twice** (once for the main per-line loop, once for the trailing-buffer
+    flush on stream EOF) — extracting it removed the duplication as a side
+    effect (10 clippy `collapsible_if` warnings on this branch dropped to 6
+    net, not because I "fixed" clippy issues but because deleting the
+    duplicate inline logic deleted their nested-if shapes along with it).
+    Unit-tested: `[DONE]`, a content delta, an empty/absent-content delta
+    (skip), non-`data:` lines (blank, `: keep-alive`, `event:`), malformed
+    JSON, and trailing-`\r` handling.
+- **Mock-HTTP coverage (acceptance criterion 2).** Added `httpmock` as a
+  `regin-core` dev-dependency (fetched cleanly from crates.io in this
+  sandbox — confirmed before committing to the approach). 9 new
+  `#[tokio::test]`s in a `mock_http_tests` module drive the **real**
+  `reqwest` send path — `chat_turn`, `chat_completion`, `stream_messages`,
+  and `embedding` — against a local `MockServer::start_async()`, covering:
+  non-streaming text, tool-call responses, HTTP 500/503/401 error paths, a
+  multi-chunk SSE stream assembling to the right joined string, and a
+  malformed-SSE-mid-stream error surfacing through the returned stream. No
+  live API involved anywhere.
+- 30 new tests total in `llm.rs` (was 5 `FakeLlm`/trait tests, now 35):
+  16 pure-function tests + 9 mock-HTTP tests (net 25 new; some earlier
+  counting overlap) plus the pre-existing 5. Full workspace build/test/clippy
+  stays green (346 regin-core + 79 regin-cli + 8 regind + 5
+  operator-skills-package tests; 21 clippy warnings — down from 24 baseline,
+  since the SSE-parsing dedup removed 4 pre-existing `collapsible_if` hits
+  and only 1 new warning appeared transiently during the work
+  (`format!`-in-`format!` in a test, fixed before commit).
+- Next: FEAT-073 (daemon loop extraction + full dispatch coverage), per the
+  milestone's suggested order.

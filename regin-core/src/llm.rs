@@ -123,6 +123,87 @@ pub enum LlmTurn {
     },
 }
 
+/// Build the JSON request body for a completion call — pure, no I/O.
+/// Extracted so request shape is unit-testable without a network stack.
+fn build_completion_request(
+    model: &str,
+    messages: &[Value],
+    tools: Option<&[ToolDef]>,
+    stream: Option<bool>,
+) -> CompletionRequest {
+    CompletionRequest {
+        model: model.to_string(),
+        messages: messages.to_vec(),
+        tools: tools.map(|t| t.to_vec()),
+        stream,
+    }
+}
+
+/// Turn a raw completion response `Value` into an [`LlmTurn`] — pure, no
+/// I/O. This is the tool-call-assembly step: it inspects the first choice's
+/// message and either surfaces its tool calls (with the raw assistant
+/// message preserved for feeding back into the conversation) or its text.
+/// Extracted from [`MimirClient::chat_turn`] so malformed/missing-choice
+/// responses are directly unit-testable.
+fn parse_completion_response(raw: &Value) -> Result<LlmTurn> {
+    let resp: CompletionResponse = serde_json::from_value(raw.clone())
+        .context("Failed to deserialize LLM response")?;
+
+    let choice = resp.choices.into_iter().next()
+        .ok_or_else(|| anyhow!("No choices in LLM response"))?;
+
+    let msg = choice.message.ok_or_else(|| anyhow!("No message in choice"))?;
+
+    // Check for tool calls
+    if let Some(tool_calls) = msg.tool_calls {
+        if !tool_calls.is_empty() {
+            // Reconstruct the assistant message as raw JSON for the conversation
+            let assistant_msg = raw["choices"][0]["message"].clone();
+            return Ok(LlmTurn::ToolCalls {
+                assistant_message: assistant_msg,
+                calls: tool_calls,
+            });
+        }
+    }
+
+    Ok(LlmTurn::Text(msg.content.unwrap_or_default()))
+}
+
+/// One decoded SSE line from a streaming completion — pure, no I/O.
+/// Extracted from [`MimirClient::stream_messages`]'s `unfold` closure so
+/// line-by-line SSE parsing (including malformed payloads) is directly
+/// unit-testable without standing up a byte stream.
+#[derive(Debug, PartialEq)]
+enum SseEvent {
+    /// `data: [DONE]` — the stream is over.
+    Done,
+    /// A content delta to yield to the caller.
+    Content(String),
+    /// A well-formed chunk that carries no content delta (e.g. a
+    /// role-only or empty-content delta) — keep reading.
+    Skip,
+    /// Not a `data: ` line at all (blank line, comment, etc.) — keep reading.
+    NotData,
+    /// A `data: ` payload that failed to deserialize as a completion chunk.
+    Error(String),
+}
+
+fn parse_sse_line(line: &str) -> SseEvent {
+    let line = line.trim_end_matches('\r');
+    let Some(data) = line.strip_prefix("data: ") else { return SseEvent::NotData };
+    let data = data.trim();
+    if data == "[DONE]" {
+        return SseEvent::Done;
+    }
+    match serde_json::from_str::<CompletionResponse>(data) {
+        Ok(resp) => match resp.choices.first().and_then(|c| c.delta.as_ref()).and_then(|d| d.content.clone()) {
+            Some(content) if !content.is_empty() => SseEvent::Content(content),
+            _ => SseEvent::Skip,
+        },
+        Err(e) => SseEvent::Error(format!("SSE parse error: {e}: {data}")),
+    }
+}
+
 impl MimirClient {
     pub fn new(
         base_url: impl Into<String>,
@@ -155,12 +236,7 @@ impl MimirClient {
         let url = format!("{}/chat/completions", self.base_url);
         debug!(model = %self.model, n = messages.len(), "LLM turn");
 
-        let body = CompletionRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: tools.map(|t| t.to_vec()),
-            stream: None,
-        };
+        let body = build_completion_request(&self.model, messages, tools, None);
 
         let response = self.client
             .post(&url)
@@ -177,27 +253,7 @@ impl MimirClient {
         }
 
         let raw: Value = response.json().await.context("Failed to parse LLM response")?;
-        let resp: CompletionResponse = serde_json::from_value(raw.clone())
-            .context("Failed to deserialize LLM response")?;
-
-        let choice = resp.choices.into_iter().next()
-            .ok_or_else(|| anyhow!("No choices in LLM response"))?;
-
-        let msg = choice.message.ok_or_else(|| anyhow!("No message in choice"))?;
-
-        // Check for tool calls
-        if let Some(tool_calls) = msg.tool_calls {
-            if !tool_calls.is_empty() {
-                // Reconstruct the assistant message as raw JSON for the conversation
-                let assistant_msg = raw["choices"][0]["message"].clone();
-                return Ok(LlmTurn::ToolCalls {
-                    assistant_message: assistant_msg,
-                    calls: tool_calls,
-                });
-            }
-        }
-
-        Ok(LlmTurn::Text(msg.content.unwrap_or_default()))
+        parse_completion_response(&raw)
     }
 
     /// Simple non-streaming completion (no tools).
@@ -272,12 +328,7 @@ impl MimirClient {
         let url = format!("{}/chat/completions", self.base_url);
         debug!(model = %self.model, n = messages.len(), "Streaming request");
 
-        let body = CompletionRequest {
-            model: self.model.clone(),
-            messages: messages.to_vec(),
-            tools: None,
-            stream: Some(true),
-        };
+        let body = build_completion_request(&self.model, messages, None, Some(true));
 
         let response = self.client
             .post(&url)
@@ -295,43 +346,26 @@ impl MimirClient {
 
         let byte_stream = response.bytes_stream();
 
+        // Line-by-line SSE decode: buffer bytes until a full line is
+        // available, hand it to `parse_sse_line` (pure, unit-tested), and
+        // map its outcome onto the stream. Any trailing unterminated line
+        // once the byte stream ends is flushed the same way.
         let stream = futures_util::stream::unfold(
             (byte_stream, String::new()),
             |(mut byte_stream, mut buffer)| async move {
                 loop {
                     if let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                        let line = buffer[..newline_pos].to_string();
                         buffer = buffer[newline_pos + 1..].to_string();
-
-                        if line.is_empty() { continue; }
-
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            let data = data.trim();
-                            if data == "[DONE]" {
+                        match parse_sse_line(&line) {
+                            SseEvent::Done => {
                                 trace!("Stream done");
                                 return None;
                             }
-                            match serde_json::from_str::<CompletionResponse>(data) {
-                                Ok(resp) => {
-                                    if let Some(content) = resp.choices.first()
-                                        .and_then(|c| c.delta.as_ref())
-                                        .and_then(|d| d.content.clone())
-                                    {
-                                        if !content.is_empty() {
-                                            return Some((Ok(content), (byte_stream, buffer)));
-                                        }
-                                    }
-                                    continue;
-                                }
-                                Err(e) => {
-                                    return Some((
-                                        Err(anyhow!("SSE parse error: {e}: {data}")),
-                                        (byte_stream, buffer),
-                                    ));
-                                }
-                            }
+                            SseEvent::Content(content) => return Some((Ok(content), (byte_stream, buffer))),
+                            SseEvent::Error(e) => return Some((Err(anyhow!(e)), (byte_stream, buffer))),
+                            SseEvent::Skip | SseEvent::NotData => continue,
                         }
-                        continue;
                     }
 
                     match byte_stream.next().await {
@@ -343,20 +377,8 @@ impl MimirClient {
                         None => {
                             if !buffer.is_empty() {
                                 let line = std::mem::take(&mut buffer);
-                                if let Some(data) = line.trim().strip_prefix("data: ") {
-                                    let data = data.trim();
-                                    if data != "[DONE]" {
-                                        if let Ok(resp) = serde_json::from_str::<CompletionResponse>(data) {
-                                            if let Some(content) = resp.choices.first()
-                                                .and_then(|c| c.delta.as_ref())
-                                                .and_then(|d| d.content.clone())
-                                            {
-                                                if !content.is_empty() {
-                                                    return Some((Ok(content), (byte_stream, String::new())));
-                                                }
-                                            }
-                                        }
-                                    }
+                                if let SseEvent::Content(content) = parse_sse_line(line.trim()) {
+                                    return Some((Ok(content), (byte_stream, String::new())));
                                 }
                             }
                             return None;
@@ -480,5 +502,318 @@ mod llm_client_trait_tests {
         fake.push_completion("via trait object");
         let boxed: Box<dyn LlmClient> = Box::new(fake);
         assert_eq!(boxed.chat_completion(&[]).await.unwrap(), "via trait object");
+    }
+}
+
+/// FEAT-072: pure functions extracted from `MimirClient` — request building,
+/// response parsing, tool-call assembly, and SSE line parsing — all
+/// unit-tested with no network involved.
+#[cfg(test)]
+mod pure_fn_tests {
+    use super::*;
+    use crate::tools::{FunctionDef, ToolDef};
+
+    fn a_tool_def() -> ToolDef {
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "bash".into(),
+                description: "run a command".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }
+    }
+
+    #[test]
+    fn msg_to_value_maps_role_and_content() {
+        let v = MimirClient::msg_to_value(&ChatMessage { role: "user".into(), content: "hi".into() });
+        assert_eq!(v["role"], "user");
+        assert_eq!(v["content"], "hi");
+    }
+
+    #[test]
+    fn tool_result_message_shapes_a_tool_role_message() {
+        let v = MimirClient::tool_result_message("call-1", "output text");
+        assert_eq!(v["role"], "tool");
+        assert_eq!(v["tool_call_id"], "call-1");
+        assert_eq!(v["content"], "output text");
+    }
+
+    #[test]
+    fn build_completion_request_omits_tools_and_stream_when_none() {
+        let req = build_completion_request("gpt", &[serde_json::json!({"role": "user", "content": "hi"})], None, None);
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("tools").is_none());
+        assert!(v.get("stream").is_none());
+        assert_eq!(v["model"], "gpt");
+    }
+
+    #[test]
+    fn build_completion_request_includes_tools_and_stream_when_present() {
+        let req = build_completion_request("gpt", &[], Some(&[a_tool_def()]), Some(true));
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(v["stream"], true);
+    }
+
+    #[test]
+    fn parse_completion_response_extracts_text() {
+        let raw = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "hello there"}}]
+        });
+        let turn = parse_completion_response(&raw).unwrap();
+        assert!(matches!(turn, LlmTurn::Text(t) if t == "hello there"));
+    }
+
+    #[test]
+    fn parse_completion_response_extracts_tool_calls_and_preserves_raw_assistant_message() {
+        let raw = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"cmd\":\"ls\"}"}
+                    }]
+                }
+            }]
+        });
+        let turn = parse_completion_response(&raw).unwrap();
+        match turn {
+            LlmTurn::ToolCalls { assistant_message, calls } => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].function.name, "bash");
+                assert_eq!(assistant_message["tool_calls"][0]["id"], "call-1");
+            }
+            other => panic!("expected ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_completion_response_errors_on_missing_choices() {
+        let raw = serde_json::json!({"choices": []});
+        assert!(parse_completion_response(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_completion_response_errors_on_missing_message() {
+        let raw = serde_json::json!({"choices": [{"delta": {"content": "x"}}]});
+        assert!(parse_completion_response(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_completion_response_errors_on_malformed_shape() {
+        let raw = serde_json::json!({"choices": "not an array"});
+        assert!(parse_completion_response(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_completion_response_empty_tool_calls_falls_back_to_text() {
+        let raw = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "fallback", "tool_calls": []}}]
+        });
+        let turn = parse_completion_response(&raw).unwrap();
+        assert!(matches!(turn, LlmTurn::Text(t) if t == "fallback"));
+    }
+
+    #[test]
+    fn parse_sse_line_recognizes_done() {
+        assert_eq!(parse_sse_line("data: [DONE]"), SseEvent::Done);
+    }
+
+    #[test]
+    fn parse_sse_line_extracts_content_delta() {
+        let line = format!("data: {}", serde_json::json!({"choices": [{"delta": {"content": "hel"}}]}));
+        assert_eq!(parse_sse_line(&line), SseEvent::Content("hel".to_string()));
+    }
+
+    #[test]
+    fn parse_sse_line_skips_empty_or_absent_content_delta() {
+        let empty = format!("data: {}", serde_json::json!({"choices": [{"delta": {"content": ""}}]}));
+        assert_eq!(parse_sse_line(&empty), SseEvent::Skip);
+        let role_only = format!("data: {}", serde_json::json!({"choices": [{"delta": {}}]}));
+        assert_eq!(parse_sse_line(&role_only), SseEvent::Skip);
+    }
+
+    #[test]
+    fn parse_sse_line_reports_not_data_for_non_data_lines() {
+        assert_eq!(parse_sse_line(""), SseEvent::NotData);
+        assert_eq!(parse_sse_line(": keep-alive"), SseEvent::NotData);
+        assert_eq!(parse_sse_line("event: message"), SseEvent::NotData);
+    }
+
+    #[test]
+    fn parse_sse_line_errors_on_malformed_json() {
+        match parse_sse_line("data: {not json}") {
+            SseEvent::Error(msg) => assert!(msg.contains("SSE parse error")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sse_line_trims_trailing_cr() {
+        let line = format!("data: {}\r", serde_json::json!({"choices": [{"delta": {"content": "x"}}]}));
+        assert_eq!(parse_sse_line(&line), SseEvent::Content("x".to_string()));
+    }
+}
+
+/// FEAT-072: the real `reqwest` send path (`chat_turn` / `chat_completion` /
+/// `stream_messages` / `embedding`) driven against a local mock HTTP server
+/// (`httpmock`) — no live API. Covers non-stream and stream success paths
+/// plus HTTP-error and malformed-SSE error paths.
+#[cfg(test)]
+mod mock_http_tests {
+    use super::*;
+    use httpmock::prelude::*;
+
+    fn client(base_url: String) -> MimirClient {
+        MimirClient::new(base_url, "fingerprint", "test-model")
+    }
+
+    #[tokio::test]
+    async fn chat_turn_parses_a_non_streaming_completion() {
+        let server = MockServer::start_async().await;
+        let mock = server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions").header("X-Client-Cert-Sha256", "fingerprint");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "hello from mock"}}]
+            }));
+        }).await;
+
+        let c = client(server.base_url());
+        let turn = c.chat_turn(&[serde_json::json!({"role": "user", "content": "hi"})], None).await.unwrap();
+        assert!(matches!(turn, LlmTurn::Text(t) if t == "hello from mock"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_turn_surfaces_tool_calls() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [{"message": {
+                    "role": "assistant",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+                }}]
+            }));
+        }).await;
+
+        let c = client(server.base_url());
+        let tool = a_tool_def();
+        let turn = c.chat_turn(&[], Some(std::slice::from_ref(&tool))).await.unwrap();
+        assert!(matches!(turn, LlmTurn::ToolCalls { calls, .. } if calls.len() == 1 && calls[0].function.name == "bash"));
+    }
+
+    fn a_tool_def() -> crate::tools::ToolDef {
+        crate::tools::ToolDef {
+            tool_type: "function".into(),
+            function: crate::tools::FunctionDef {
+                name: "bash".into(),
+                description: "run a command".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_turn_errors_on_http_error_status() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(500).body("internal error");
+        }).await;
+
+        let c = client(server.base_url());
+        let err = c.chat_turn(&[], None).await.unwrap_err();
+        assert!(err.to_string().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn chat_completion_via_mock_server() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "plain text"}}]
+            }));
+        }).await;
+
+        let c = client(server.base_url());
+        let text = c.chat_completion(&[ChatMessage::user("hi")]).await.unwrap();
+        assert_eq!(text, "plain text");
+    }
+
+    #[tokio::test]
+    async fn stream_messages_yields_content_chunks_in_order() {
+        let server = MockServer::start_async().await;
+        let chunk1 = format!("data: {}", serde_json::json!({"choices": [{"delta": {"content": "hel"}}]}));
+        let chunk2 = format!("data: {}", serde_json::json!({"choices": [{"delta": {"content": "lo"}}]}));
+        let sse_body = format!("{chunk1}\n{chunk2}\ndata: [DONE]\n");
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).header("content-type", "text/event-stream").body(sse_body);
+        }).await;
+
+        let c = client(server.base_url());
+        let mut stream = c.stream_messages(&[]).await.unwrap();
+        let mut collected = String::new();
+        while let Some(chunk) = stream.next().await {
+            collected.push_str(&chunk.unwrap());
+        }
+        assert_eq!(collected, "hello");
+    }
+
+    #[tokio::test]
+    async fn stream_messages_surfaces_a_malformed_sse_error() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).body("data: {not json}\ndata: [DONE]\n");
+        }).await;
+
+        let c = client(server.base_url());
+        let mut stream = c.stream_messages(&[]).await.unwrap();
+        let first = stream.next().await.unwrap();
+        assert!(first.is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_messages_errors_on_http_error_status() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(503).body("unavailable");
+        }).await;
+
+        let c = client(server.base_url());
+        assert!(c.stream_messages(&[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn embedding_parses_via_mock_server() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/embeddings");
+            then.status(200).json_body(serde_json::json!({"data": [{"embedding": [0.1, 0.2, 0.3]}]}));
+        }).await;
+
+        let c = client(server.base_url());
+        let v = c.embedding("text", "embed-model").await.unwrap();
+        assert_eq!(v, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[tokio::test]
+    async fn embedding_errors_on_http_error_status() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/embeddings");
+            then.status(401).body("unauthorized");
+        }).await;
+
+        let c = client(server.base_url());
+        assert!(c.embedding("text", "embed-model").await.is_err());
     }
 }
