@@ -60,7 +60,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | FEAT-071 | Injectable LLM client (`LlmClient` trait) | done |
 | FEAT-072 | llm.rs pure extraction + mock-HTTP test | done |
 | FEAT-073 | Daemon loop extraction + full dispatch coverage | done |
-| FEAT-074 | Integration tests over the real binaries | open |
+| FEAT-074 | Integration tests over the real binaries | done |
 | FEAT-075 | Easy-win unit tests + coverage gate ramp to 100% | open |
 
 The testability seams (FEAT-070/071) also make the identity-plane features above

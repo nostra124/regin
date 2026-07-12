@@ -895,3 +895,61 @@ toolchain**. Read it at the start of every session; append to it at the end.
   doc-comment additions).
 - Next: FEAT-074 (integration tests over the real binaries), per the
   milestone's suggested order.
+
+### 2026-07-12 — FEAT-074: Integration tests over the real binaries (0.6.0 coverage)
+- **FEAT-074 implemented and moved to done/.** Third of the four coverage-ramp
+  tickets — the only one that spawns the real, compiled `regind`/`regin`
+  binaries as OS processes rather than calling library functions in-process.
+- New `regin-cli/tests/daemon_integration.rs`. Spawns real `regind` on an
+  isolated `XDG_RUNTIME_DIR`/`XDG_DATA_HOME`/`XDG_CONFIG_HOME` (unique temp
+  dirs per test, removed on drop), polls the raw Unix socket until bound,
+  drives a representative `regin` CLI command set over it (ping, config
+  set/get/list, memory save/list, mode, an unrecognized-subcommand parse
+  failure), sends a malformed line directly over the socket to hit
+  `handle_connection`'s bad-request branch (and confirms the connection
+  survives it — the handler `continue`s rather than closing), then sends
+  real SIGTERM and asserts clean shutdown (process exits 0, socket file
+  removed). A second test spins up two sandboxes concurrently as a
+  regression guard on the isolation itself.
+- **Readiness deliberately does NOT poll via `regin ping`**, despite the
+  ticket's wording. Traced through `ensure_daemon()` (`transport.rs`): its
+  fast path is `UnixStream::connect(&sock).is_ok()`, but on a *miss* — which
+  a race against `regind`'s startup would repeatedly hit — it falls through
+  to registering a **real systemd user service** (`systemctl --user`) or
+  spawning a **second, competing `regind`** on the same socket path. Both are
+  exactly the non-hermetic behavior a "hermetic, no shared global state"
+  acceptance criterion (3) rules out. Fixed by polling the raw socket
+  directly in the test instead; every `regin` CLI invocation still hits
+  `ensure_daemon`'s fast path immediately once that returns, so the CLI's
+  real dispatch/transport path is still fully exercised — this only changes
+  what drives the *readiness wait*, not what's tested.
+- **No stable way to get both binaries' `CARGO_BIN_EXE_*` in one crate.**
+  Tried `regind = { path = "../regind", artifact = "bin" }` as a
+  `regin-cli` dev-dependency first (the "correct" modern answer) — cargo
+  1.94.1 rejected it: `artifact = …` requires `-Z bindeps`, still
+  nightly-only. Fell back to the standard pre-artifact-deps idiom: the test
+  lives in `regin-cli/tests/` (gets `CARGO_BIN_EXE_regin` for free from its
+  own `[[bin]]`), and locates `regind` as a sibling file in the same target
+  directory — which cargo always populates when the workspace builds
+  together, i.e. under this project's own `cargo test --workspace`
+  convention. `cargo test -p regin-cli` in isolation without a prior
+  workspace build won't find it; the lookup panics with a message pointing
+  at the fix rather than silently skipping or failing confusingly.
+- SIGTERM is sent via the `kill` shell command (`kill -TERM <pid>`), not a
+  new `libc`/`nix` dependency — simplest dependency-free option for a
+  one-shot signal in a test.
+- 2 new tests. Full workspace build/test/clippy stays green (346 regin-core
+  + 79 regin-cli unit + 2 regin-cli integration + 49 regind + 5
+  operator-skills-package tests; the new test file produces zero clippy
+  warnings, confirmed directly). Verified stable across repeated runs (no
+  timing flakiness observed).
+- Coverage note: this ticket's purpose (per DISC-020) is letting
+  `cargo-llvm-cov`'s child-process capture attribute `main`/`accept_loop`/
+  `handle_connection`/the real `rpc()` transport/`shutdown_signal` to the
+  spawned instrumented binaries — `cargo-llvm-cov` itself isn't available in
+  this sandbox to print a coverage percentage (same caveat noted since
+  FEAT-070); the mechanism (`LLVM_PROFILE_FILE` env propagation to child
+  processes) is a `cargo-llvm-cov` built-in and needed no test-side wiring
+  beyond spawning real, unmodified binaries, which this test does.
+- Next: FEAT-075 (easy-win unit tests + coverage gate ramp to 100%) — the
+  last ticket in the milestone.
