@@ -105,6 +105,26 @@ fn human_source() -> String {
     "human".to_string()
 }
 
+/// A principle — a `category = "principle"` memory row with a
+/// candidate/active/retired lifecycle (FEAT-031). Human-seeded charter
+/// values (FEAT-030) are inserted directly as `active`; reflection-proposed
+/// candidates start as `candidate` and require human ratification.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Principle {
+    pub id: String,
+    pub content: String,
+    /// `candidate` | `active` | `retired`.
+    pub status: String,
+    /// `human` (FEAT-030 charter seed) or `reflection` (FEAT-031 proposal).
+    pub source: String,
+    /// Deliberation episode ids that produced this candidate (empty for
+    /// human-seeded charter values).
+    #[serde(default)]
+    pub evidence: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // ITIL records (FEAT-002)
 // ---------------------------------------------------------------------------
@@ -274,4 +294,7 @@ pub struct CuratorStats {
     pub decayed: usize,
     pub pruned: usize,
     pub topics: usize,
+    /// New candidate principles reflection proposed from recurring
+    /// deliberation outcomes this pass (FEAT-031).
+    pub principles_proposed: usize,
 }

@@ -19,7 +19,7 @@ use regin_core::promotion::DerivedCheck;
 use regin_core::protocol::Response;
 use regin_core::soul::ValueEntry;
 use regin_core::types::{
-    Change, Incident, Memory, Problem, ProblemHypothesis, Schedule, SkillInfo, TaskRun,
+    Change, Incident, Memory, Principle, Problem, ProblemHypothesis, Schedule, SkillInfo, TaskRun,
 };
 
 /// Short id prefix used throughout the CLI's list views.
@@ -520,6 +520,32 @@ pub fn render_soul_charter_written(added: &[String]) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Principle derivation & ratification (FEAT-031)
+// ---------------------------------------------------------------------------
+
+pub fn render_soul_principles(principles: &[Principle]) -> String {
+    if principles.is_empty() {
+        return "no principles\n".to_string();
+    }
+    let mut out = format!("principles ({}):\n", principles.len());
+    for p in principles {
+        out += &format!("  {} [{:<9}] ({}) {}\n", sid(&p.id), p.status, p.source, p.content);
+        if !p.evidence.is_empty() {
+            out += &format!("      evidence: {} deliberation(s)\n", p.evidence.len());
+        }
+    }
+    out
+}
+
+pub fn render_soul_principle_ratified(p: &Principle) -> String {
+    format!("✓ ratified {} — now active: {}\n", sid(&p.id), p.content)
+}
+
+pub fn render_soul_principle_rejected(p: &Principle) -> String {
+    format!("✓ retired {}: {}\n", sid(&p.id), p.content)
+}
+
 pub fn render_checks(checks: &[DerivedCheck]) -> String {
     if checks.is_empty() {
         return "No derived checks yet. regin promotes stable LLM verdicts into cheap checks over time.\n".to_string();
@@ -978,6 +1004,42 @@ mod tests {
     fn render_soul_charter_written_reports_added_or_nothing_new() {
         assert!(render_soul_charter_written(&[]).contains("no new values"));
         assert!(render_soul_charter_written(&["integrity".to_string()]).contains("integrity"));
+    }
+
+    fn sample_principle(status: &str) -> Principle {
+        Principle {
+            id: "11111111-2222-3333-4444-555555555555".into(),
+            content: "recurring failures — be more careful".into(),
+            status: status.into(),
+            source: "reflection".into(),
+            evidence: vec!["ep1".into(), "ep2".into()],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn render_soul_principles_empty_says_so() {
+        assert!(render_soul_principles(&[]).contains("no principles"));
+    }
+
+    #[test]
+    fn render_soul_principles_shows_status_source_content_and_evidence_count() {
+        let out = render_soul_principles(&[sample_principle("candidate")]);
+        assert!(out.contains("candidate"));
+        assert!(out.contains("reflection"));
+        assert!(out.contains("recurring failures"));
+        assert!(out.contains("2 deliberation"));
+    }
+
+    #[test]
+    fn render_soul_principle_ratified_reports_active() {
+        assert!(render_soul_principle_ratified(&sample_principle("active")).contains("active"));
+    }
+
+    #[test]
+    fn render_soul_principle_rejected_reports_retired() {
+        assert!(render_soul_principle_rejected(&sample_principle("retired")).contains("retired"));
     }
 
     #[test]

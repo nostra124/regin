@@ -688,3 +688,95 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-031 (principle derivation & ratification) — now has both
   FEAT-024's consolidation pipeline and FEAT-032's queryable `deliberation`
   episodes to derive principles from.
+
+### 2026-07-12 — FEAT-031: Principle derivation & ratification (0.6.0 decision plane)
+- **FEAT-031 implemented and moved to done/.** The final decision-plane
+  ticket — the **propose** (reflection surfaces candidates from recurring
+  bad outcomes) and **promote** (human ratify/reject) stages of DISC-018 Q5,
+  layered on the same `category = "principle"` rows FEAT-030's charter uses.
+  The **seed** stage was FEAT-030; this ticket never re-touches it.
+- **Schema**: additive migration (`migrate_memories_principle_columns`, same
+  `ALTER TABLE ... ADD COLUMN` + ignore-if-exists idiom as FEAT-023's
+  `migrate_sessions_schema`) adds `principle_status` and `evidence` to
+  `memories`. `principle_status` is NULL on every pre-migration row and every
+  non-principle row; every reader treats NULL as `active`
+  (`COALESCE(principle_status, 'active')`) so FEAT-030's existing charter
+  rows keep grounding the Soul with **no backfill** required.
+- **Propose is pure + deterministic, not LLM-based.** `derive_principle_candidates`
+  (`decision.rs`) takes scripted `(episode_id, DeliberationRecord)` pairs and
+  groups `Executed` deliberations by `Outcome`, proposing one candidate per
+  bad-outcome group (`Failure`, `RolledBack`) that recurs
+  `>= decision.principles.recurrence_threshold` times (default 3, new
+  setting). Deliberately **executed-only**: `resolve_verdict` (FEAT-029)
+  already refuses to execute a below-threshold-confidence approval, so
+  "the Mind overrode a shaky vote" isn't a reachable shape in this data
+  model — the real learnable signal is "the Soul approved and it still went
+  wrong." `propose_principle_candidates` is the DB-touching glue: reads
+  `deliberation` episodes (FEAT-032), derives, and inserts only candidates
+  that don't already exist (idempotent re-running of a consolidation pass).
+  Candidates are always `status = "candidate"`, `source = "reflection"` —
+  acceptance criterion 1.
+- **Promote is entirely human-driven, one-way.** `soul::principles_ratify`
+  (`candidate` -> `active`, errors on anything else) and
+  `soul::principles_reject` (`candidate` or `active` -> `retired`, errors if
+  already retired) are the only two functions that ever write
+  `principle_status`. `reject` deliberately also retires *active* charter
+  values — the ticket's "retiring an active principle requires explicit
+  human action" stickiness rule reuses the same verb rather than adding a
+  parallel one. No automatic transition exists anywhere (acceptance
+  criterion 4's "retiring is gated").
+- **Grounding correctness was the trickiest part.** `soul::charter_core_ids`
+  (used to resolve catalog-value ids for the Soul's prompt) now reads
+  `identity_db::principle_rows_active` (status-filtered) instead of raw
+  `memory_list`, **and** additionally validates the parsed id against
+  `soul::find()` before accepting it — defense in depth against a free-text
+  reflection candidate (which can legitimately contain a colon) ever being
+  mistaken for a catalog id. A parallel accessor,
+  `identity_db::principle_content_active_reflection`, surfaces *active*,
+  `source = "reflection"` principles as raw free text — these have no
+  catalog entry. `decision::soul_user_prompt` was extended to render a
+  grounding entry as `crate::soul::find(id)`'s catalog lookup when it
+  resolves, or as a plain bullet line when it doesn't (i.e. a ratified
+  principle) — a minimal, backward-compatible change verified not to affect
+  the existing "starved" test (catalog ids render identically).
+- **Decay**: fixed a real latent bug while adding `principle_decay_active`
+  (new — active, reflection-sourced principles decay on a caller-supplied,
+  more lenient cutoff, floor at 0, **never deletes**). `memory_decay`'s
+  unscoped `DELETE FROM memories WHERE source='reflection' AND strength<=0`
+  had zero category guard — before this ticket that was unreachable
+  (reflection never wrote to `category="principle"`), but FEAT-031 makes it
+  reachable, so `memory_decay` now excludes `category = "principle"`
+  entirely (regression-tested). `source = "human"` charter rows are
+  untouched by both functions, as before.
+- **Full protocol + CLI wiring**: `Request`/`Response`
+  `SoulPrinciplesList/Ratify/Reject`, `regind` dispatch (MutexGuard scoped
+  before every `send(...).await`, per this milestone's established
+  pattern), and `regin soul principles list [--candidates] | ratify <id> |
+  reject <id>` built on FEAT-070's `Transport`/render pattern.
+  `post_curation_maintenance` (FEAT-024) gained two new parameters
+  (`principle_decay_before`, `principle_recurrence_threshold`) and now calls
+  `propose_principle_candidates` every consolidation pass — `CuratorStats`
+  gained `principles_proposed`. `curate_once` picked up the same two params
+  for symmetry (`#[allow(clippy::too_many_arguments)]`, matching
+  `post_curation_maintenance`'s existing width) though `regind` still
+  doesn't call it (reimplements curation inline, as noted since FEAT-071).
+- 41 new tests: regin-core identity_db +9 (insert/list/status-transition/
+  decay, including the NULL-status backward-compat case and the
+  memory_decay regression), decision +12 (pure derive with scripted records
+  — acceptance criterion 5 — plus propose/ratify/grounding through the real
+  `run_deliberate`+`IdentityDbSink` path), soul +8 (ratify/reject
+  happy+error paths, the active-charter-retirement case, the defense-in-depth
+  leak test), reflect +1 (post_curation_maintenance proposes from recurring
+  episodes); regin-cli +9 (4 render fns, 1 combined `FakeTransport` cmd test
+  covering list/ratify/reject happy+error paths). Full workspace
+  build/test/clippy stays green (321 regin-core + 79 regin-cli + 8 regind +
+  5 operator-skills-package tests; 24 pre-existing clippy warnings, 0 new).
+- **This closes all five decision-plane FEATs (028-032)** — DISC-018 is now
+  fully implemented, not just decided. What remains in 0.6.0 is entirely the
+  test-coverage-to-100% track (FEAT-072..075); neither `LlmSoulGate` nor
+  `run_deliberate` nor this ticket's propose/promote pipeline is wired into
+  `regind`'s live chat loop yet — that integration is explicitly out of
+  scope for every decision-plane ticket in this milestone (see FEAT-028's
+  module doc comment) and remains future work.
+- Next: FEAT-072 (llm.rs pure extraction + mock-HTTP test), the first of the
+  four remaining coverage-ramp tickets, per the milestone's suggested order.

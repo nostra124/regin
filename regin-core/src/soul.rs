@@ -17,6 +17,14 @@
 //!
 //! The Soul (FEAT-029) reads the **grounding**: [`grounding_union`] of the
 //! core charter's value ids and the active Persona's `values` overlay.
+//!
+//! FEAT-031 adds the **propose** (reflection surfaces `candidate` principles
+//! from recurring `deliberation` episode outcomes — see
+//! [`crate::decision::propose_principle_candidates`]) and **promote**
+//! (human [`principles_ratify`]/[`principles_reject`]) stages on top of the
+//! same `category = "principle"` rows. Only `active` principles — the human
+//! charter plus ratified candidates — feed the grounding; `candidate` rows
+//! are never read by the Soul.
 
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
@@ -24,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 use crate::identity_db::{self, PRINCIPLE_CATEGORY};
-use crate::types::Memory;
+use crate::types::{Memory, Principle};
 
 /// One entry in the value catalog.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,8 +124,8 @@ fn insert_principle(conn: &Connection, entry: &ValueEntry) -> Result<Memory> {
     let now = chrono::Utc::now().to_rfc3339();
     let content = charter_content(entry);
     conn.execute(
-        "INSERT INTO memories (id, category, content, tier, source, trust_score, pinned, created_at, updated_at)
-         VALUES (?1, ?2, ?3, 'long', 'human', 1.0, 1, ?4, ?4)",
+        "INSERT INTO memories (id, category, content, tier, source, trust_score, pinned, principle_status, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'long', 'human', 1.0, 1, 'active', ?4, ?4)",
         params![&id, PRINCIPLE_CATEGORY, &content, &now],
     )?;
     Ok(Memory {
@@ -140,14 +148,57 @@ fn charter_content(entry: &ValueEntry) -> String {
     format!("{}: {} — {}", entry.id, entry.name, entry.description)
 }
 
-/// Extract the value ids of the current core charter (pinned, human-sourced,
-/// `category = "principle"` memories).
+/// Extract the value ids of the current core charter: `category =
+/// "principle"` rows whose effective status is `active` (FEAT-031 —
+/// `retired` charter values, e.g. via [`crate::identity_db::principle_set_status`],
+/// no longer feed the grounding) and whose content parses as a real catalog
+/// id (defense against ever cross-reading a free-text reflection-proposed
+/// principle here — those are surfaced separately by
+/// [`crate::identity_db::principle_content_active_reflection`]).
 pub fn charter_core_ids(conn: &Connection) -> Result<Vec<String>> {
-    let rows = identity_db::memory_list(conn, Some(PRINCIPLE_CATEGORY))?;
+    let rows = identity_db::principle_rows_active(conn)?;
     Ok(rows
         .into_iter()
-        .filter_map(|m| m.content.split_once(':').map(|(id, _)| id.to_string()))
+        .filter_map(|m| {
+            let (id, _) = m.content.split_once(':')?;
+            find(id).is_some().then(|| id.to_string())
+        })
         .collect())
+}
+
+/// Reflection-proposed principle candidates awaiting human ratification
+/// (`regin soul principles list --candidates`).
+pub fn principles_candidates(conn: &Connection) -> Result<Vec<Principle>> {
+    identity_db::principle_list(conn, Some("candidate"))
+}
+
+/// Every principle regardless of status (`regin soul principles list`).
+pub fn principles_all(conn: &Connection) -> Result<Vec<Principle>> {
+    identity_db::principle_list(conn, None)
+}
+
+/// Promote a `candidate` to `active` (`regin soul principles ratify <id>`) —
+/// the human-ratification step of DISC-018 Q5. Errors if `id` isn't a
+/// currently-`candidate` principle (no-op ratify is refused, not silently
+/// accepted).
+pub fn principles_ratify(conn: &Connection, id: &str) -> Result<Principle> {
+    let current = identity_db::principle_get(conn, id)?.ok_or_else(|| anyhow!("no principle {id}"))?;
+    if current.status != "candidate" {
+        return Err(anyhow!("principle {id} is {} — only a candidate can be ratified", current.status));
+    }
+    identity_db::principle_set_status(conn, id, "active")
+}
+
+/// Retire a principle — `candidate` -> `retired` (rejecting a proposal) or
+/// `active` -> `retired` (the "retiring an active principle requires
+/// explicit human action" stickiness rule, FEAT-031 acceptance criterion 4).
+/// Never applies automatically; this is the only path to `retired`.
+pub fn principles_reject(conn: &Connection, id: &str) -> Result<Principle> {
+    let current = identity_db::principle_get(conn, id)?.ok_or_else(|| anyhow!("no principle {id}"))?;
+    if current.status == "retired" {
+        return Err(anyhow!("principle {id} is already retired"));
+    }
+    identity_db::principle_set_status(conn, id, "retired")
 }
 
 /// Remove a value from the core charter by id (the privileged path — only
@@ -282,5 +333,87 @@ mod tests {
             assert!(grounding.contains(&id.to_string()));
         }
         assert_eq!(grounding.len(), core.len(), "overlay id already in core, no growth");
+    }
+
+    // --- Principle derivation & ratification (FEAT-031) ---
+
+    #[test]
+    fn principles_ratify_promotes_candidate_to_active() {
+        let c = conn();
+        let created = identity_db::principle_insert_candidate(&c, "test candidate", &["ep1".into()]).unwrap();
+        assert_eq!(created.status, "candidate");
+        let ratified = principles_ratify(&c, &created.id).unwrap();
+        assert_eq!(ratified.status, "active");
+    }
+
+    #[test]
+    fn principles_ratify_errors_on_non_candidate() {
+        let c = conn();
+        let created = identity_db::principle_insert_candidate(&c, "test candidate", &[]).unwrap();
+        principles_ratify(&c, &created.id).unwrap();
+        assert!(principles_ratify(&c, &created.id).is_err(), "already active, not a candidate anymore");
+    }
+
+    #[test]
+    fn principles_ratify_errors_on_unknown_id() {
+        let c = conn();
+        assert!(principles_ratify(&c, "no-such-id").is_err());
+    }
+
+    #[test]
+    fn principles_reject_retires_a_candidate() {
+        let c = conn();
+        let created = identity_db::principle_insert_candidate(&c, "bad idea", &[]).unwrap();
+        let rejected = principles_reject(&c, &created.id).unwrap();
+        assert_eq!(rejected.status, "retired");
+    }
+
+    #[test]
+    fn principles_reject_can_retire_an_active_charter_value() {
+        // "retiring an active principle requires explicit human action" (acceptance criterion 4)
+        let c = conn();
+        let created = charter_seed(&c, &["integrity"]).unwrap();
+        let rejected = principles_reject(&c, &created[0].id).unwrap();
+        assert_eq!(rejected.status, "retired");
+        assert!(charter_core_ids(&c).unwrap().is_empty(), "retired charter value no longer grounds the Soul");
+    }
+
+    #[test]
+    fn principles_reject_errors_if_already_retired() {
+        let c = conn();
+        let created = identity_db::principle_insert_candidate(&c, "bad idea", &[]).unwrap();
+        principles_reject(&c, &created.id).unwrap();
+        assert!(principles_reject(&c, &created.id).is_err(), "retiring is a one-way, human-gated transition");
+    }
+
+    #[test]
+    fn principles_candidates_lists_only_candidate_status() {
+        let c = conn();
+        identity_db::principle_insert_candidate(&c, "candidate one", &[]).unwrap();
+        charter_seed(&c, &["integrity"]).unwrap(); // active, not a candidate
+        let candidates = principles_candidates(&c).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].content, "candidate one");
+    }
+
+    #[test]
+    fn principles_all_lists_every_status() {
+        let c = conn();
+        let cand = identity_db::principle_insert_candidate(&c, "candidate one", &[]).unwrap();
+        charter_seed(&c, &["integrity"]).unwrap();
+        principles_reject(&c, &cand.id).unwrap();
+        let all = principles_all(&c).unwrap();
+        assert_eq!(all.len(), 2, "one active charter value, one retired candidate");
+    }
+
+    #[test]
+    fn charter_core_ids_never_surfaces_a_ratified_reflection_candidate() {
+        // defense in depth: a ratified free-text candidate must never leak
+        // into the catalog-id path even though it shares the same category
+        // and an "active" status.
+        let c = conn();
+        let cand = identity_db::principle_insert_candidate(&c, "recurring failures: be more careful", &[]).unwrap();
+        principles_ratify(&c, &cand.id).unwrap();
+        assert!(charter_core_ids(&c).unwrap().is_empty());
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use tracing::info;
 
-use crate::types::{CuratorAction, CuratorProposal, Episode, Memory, SessionRow, SessionWithTranscript, TranscriptMessage};
+use crate::types::{CuratorAction, CuratorProposal, Episode, Memory, Principle, SessionRow, SessionWithTranscript, TranscriptMessage};
 
 /// Current schema version stored in `identity_meta`.
 const SCHEMA_VERSION: &str = "1";
@@ -183,6 +183,7 @@ pub fn init_identity_schema(conn: &Connection) -> Result<()> {
     // Pre-release schema migration: add columns that may be missing on dev DBs
     // created with the initial FEAT-021 schema.
     migrate_sessions_schema(conn)?;
+    migrate_memories_principle_columns(conn)?;
 
     seed_identity_meta(conn)?;
 
@@ -200,6 +201,23 @@ fn migrate_sessions_schema(conn: &Connection) -> Result<()> {
         "ALTER TABLE sessions ADD COLUMN token_count INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN state TEXT NOT NULL DEFAULT 'open'",
         "ALTER TABLE sessions ADD COLUMN transcript_text TEXT",
+    ] {
+        let _ = conn.execute(stmt, []);
+    }
+    Ok(())
+}
+
+/// Add the `principle_status` + `evidence` columns to `memories` (FEAT-031,
+/// additive migration on the FEAT-021 schema). `principle_status` is NULL on
+/// rows written before this migration (and on every non-principle row);
+/// callers treat NULL as `active` (see [`principle_rows_active`]) so
+/// pre-existing FEAT-030 charter rows keep grounding the Soul without a
+/// backfill. Safe to call on fresh (already-correct) DBs — missing-column
+/// errors are ignored.
+fn migrate_memories_principle_columns(conn: &Connection) -> Result<()> {
+    for stmt in [
+        "ALTER TABLE memories ADD COLUMN principle_status TEXT",
+        "ALTER TABLE memories ADD COLUMN evidence TEXT",
     ] {
         let _ = conn.execute(stmt, []);
     }
@@ -696,6 +714,140 @@ pub fn memory_delete(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Principle lifecycle (FEAT-031): candidate -> active -> retired, layered on
+// the `principle` category rows FEAT-030 introduced. Reachable only from
+// `crate::soul`'s privileged ratify/reject/propose path — never from the
+// general memory verbs (guarded above) or the curator's Add/Update/Delete
+// proposals (guarded in `curator_apply_proposal`).
+// ---------------------------------------------------------------------------
+
+fn row_to_principle(row: &rusqlite::Row) -> rusqlite::Result<Principle> {
+    let evidence_json: Option<String> = row.get(4)?;
+    let evidence = evidence_json
+        .and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+        .unwrap_or_default();
+    Ok(Principle {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        status: row.get::<_, Option<String>>(2)?.unwrap_or_else(|| "active".to_string()),
+        source: row.get(3)?,
+        evidence,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
+    })
+}
+
+const PRINCIPLE_COLS: &str = "id, content, principle_status, source, evidence, created_at, updated_at";
+
+/// Insert a reflection-proposed candidate principle. `evidence` is the set of
+/// `deliberation` episode ids whose recurring outcome produced this
+/// candidate. Never `active` on insert (acceptance criterion 1).
+pub fn principle_insert_candidate(conn: &Connection, content: &str, evidence: &[String]) -> Result<Principle> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let evidence_json = serde_json::to_string(evidence)?;
+    conn.execute(
+        "INSERT INTO memories (id, category, content, tier, source, trust_score, principle_status, evidence, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'medium', 'reflection', 0.5, 'candidate', ?4, ?5, ?5)",
+        params![&id, PRINCIPLE_CATEGORY, content, &evidence_json, &now],
+    )?;
+    Ok(Principle {
+        id,
+        content: content.to_string(),
+        status: "candidate".to_string(),
+        source: "reflection".to_string(),
+        evidence: evidence.to_vec(),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
+/// Whether a candidate with this exact content already exists (idempotent
+/// proposal, mirrors [`memory_find_similar`]'s case/whitespace-insensitive match).
+pub fn principle_candidate_exists(conn: &Connection, content: &str) -> Result<bool> {
+    let needle = content.trim().to_lowercase();
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE category = ?1 AND lower(trim(content)) = ?2",
+        params![PRINCIPLE_CATEGORY, needle],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// List principles, optionally filtered by effective status (NULL treated as
+/// `active`, matching [`principle_rows_active`]'s convention).
+pub fn principle_list(conn: &Connection, status: Option<&str>) -> Result<Vec<Principle>> {
+    let sql = format!(
+        "SELECT {PRINCIPLE_COLS} FROM memories
+         WHERE category = ?1 AND (?2 IS NULL OR COALESCE(principle_status, 'active') = ?2)
+         ORDER BY created_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![PRINCIPLE_CATEGORY, status], row_to_principle)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Fetch one principle by id.
+pub fn principle_get(conn: &Connection, id: &str) -> Result<Option<Principle>> {
+    let sql = format!("SELECT {PRINCIPLE_COLS} FROM memories WHERE id = ?1 AND category = ?2");
+    conn.query_row(&sql, params![id, PRINCIPLE_CATEGORY], row_to_principle)
+        .optional()
+        .map_err(Into::into)
+}
+
+/// Transition a principle's status (the only way `principle_status`
+/// changes — no automatic transition ever writes here, keeping retirement
+/// human-gated). Errors if `id` is not a `principle`-category row.
+pub fn principle_set_status(conn: &Connection, id: &str, status: &str) -> Result<Principle> {
+    if memory_category(conn, id)?.as_deref() != Some(PRINCIPLE_CATEGORY) {
+        return Err(anyhow!("no principle {id}"));
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE memories SET principle_status = ?1, updated_at = ?2 WHERE id = ?3",
+        params![status, &now, id],
+    )?;
+    principle_get(conn, id)?.ok_or_else(|| anyhow!("no principle {id}"))
+}
+
+/// `principle`-category rows whose effective status is `active` (NULL
+/// treated as active, so pre-FEAT-031 FEAT-030 charter rows keep grounding
+/// the Soul without a backfill) — the row set [`crate::soul::charter_core_ids`]
+/// and the Soul's grounding actually read from.
+pub fn principle_rows_active(conn: &Connection) -> Result<Vec<Memory>> {
+    let sql = format!(
+        "SELECT {MEMORY_COLS} FROM memories
+         WHERE category = ?1 AND COALESCE(principle_status, 'active') = 'active'
+         ORDER BY strength DESC, updated_at DESC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(params![PRINCIPLE_CATEGORY], row_to_memory)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// Free-text content of `active`, reflection-sourced principles (ratified
+/// FEAT-031 candidates) — distinct from [`crate::soul::charter_core_ids`],
+/// which only recovers catalog value ids from `source = "human"` rows. This
+/// is the piece of the grounding the Soul's prompt renders as plain text
+/// rather than looking up in the value catalog.
+pub fn principle_content_active_reflection(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT content FROM memories
+         WHERE category = ?1 AND source = 'reflection'
+           AND COALESCE(principle_status, 'active') = 'active'
+         ORDER BY created_at ASC",
+    )?;
+    let rows = stmt
+        .query_map(params![PRINCIPLE_CATEGORY], |r| r.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 pub fn memory_search(conn: &Connection, query: &str) -> Result<Vec<Memory>> {
     let pattern = format!("%{query}%");
     let sql = format!(
@@ -1053,14 +1205,19 @@ pub fn memory_reinforce(conn: &Connection, id: &str) -> Result<()> {
 
 /// Decay reflection memories — medium decays by 1, long decays by 1 only if
 /// past the `long_decay_cutoff` (more lenient). Human-sourced and pinned
-/// memories are never decayed.
+/// memories are never decayed. `principle`-category rows are excluded
+/// entirely (FEAT-031): they have their own [`principle_decay_active`],
+/// which never deletes — retiring a principle is human-gated, never
+/// automatic, and this function's `DELETE ... strength <= 0` would otherwise
+/// silently retire a reflection-sourced candidate/active principle.
 pub fn memory_decay(conn: &Connection, before: &str) -> Result<usize> {
     // Medium-tier: decay by 1 if unseen since `before`.
     conn.execute(
         "UPDATE memories SET strength = strength - 1
          WHERE source = 'reflection' AND tier = 'medium' AND strength > 0
+           AND category != ?2
            AND (last_seen IS NULL OR last_seen < ?1)",
-        params![before],
+        params![before, PRINCIPLE_CATEGORY],
     )?;
     // Long-tier: only decay past a more lenient cutoff (double the window).
     // We approximate by applying a shorter window check, but for simplicity
@@ -1069,15 +1226,33 @@ pub fn memory_decay(conn: &Connection, before: &str) -> Result<usize> {
     conn.execute(
         "UPDATE memories SET strength = strength - 1
          WHERE source = 'reflection' AND tier = 'long' AND strength > 0
+           AND category != ?2
            AND last_seen IS NOT NULL AND last_seen < ?1
            AND strength <= 2",
-        params![before],
+        params![before, PRINCIPLE_CATEGORY],
     )?;
     let dropped = conn.execute(
-        "DELETE FROM memories WHERE source = 'reflection' AND strength <= 0",
-        [],
+        "DELETE FROM memories WHERE source = 'reflection' AND strength <= 0 AND category != ?1",
+        params![PRINCIPLE_CATEGORY],
     )?;
     Ok(dropped)
+}
+
+/// Decay `active`, reflection-sourced principles — slowly (a caller-chosen,
+/// more lenient cutoff than [`memory_decay`]'s) and **never past zero, never
+/// deleting**: retiring an active principle is a human action
+/// ([`principle_set_status`] via `regin soul principles reject`), not an
+/// automatic side effect of decay (FEAT-031 acceptance criterion 4).
+/// `source = "human"` charter rows and `candidate`-status rows are untouched.
+pub fn principle_decay_active(conn: &Connection, before: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE memories SET strength = MAX(strength - 1, 0)
+         WHERE category = ?1 AND source = 'reflection'
+           AND COALESCE(principle_status, 'active') = 'active'
+           AND (last_seen IS NULL OR last_seen < ?2)",
+        params![PRINCIPLE_CATEGORY, before],
+    )?;
+    Ok(n)
 }
 
 /// Promote medium-tier memories to long-tier when strength crosses the
@@ -2629,5 +2804,121 @@ mod tests {
         };
         assert!(!curator_apply_proposal(&conn, &delete).unwrap());
         assert!(memory_category(&conn, &id).unwrap().is_some(), "principle row survives curation");
+    }
+
+    // --- Principle lifecycle (FEAT-031) ---
+
+    #[test]
+    fn principle_insert_candidate_defaults_to_candidate_status_and_reflection_source() {
+        let conn = test_conn();
+        let p = principle_insert_candidate(&conn, "recurring failures need a backout", &["ep1".into(), "ep2".into()]).unwrap();
+        assert_eq!(p.status, "candidate");
+        assert_eq!(p.source, "reflection");
+        assert_eq!(p.evidence, vec!["ep1".to_string(), "ep2".to_string()]);
+    }
+
+    #[test]
+    fn principle_candidate_exists_matches_case_and_whitespace_insensitively() {
+        let conn = test_conn();
+        principle_insert_candidate(&conn, "Be Careful", &[]).unwrap();
+        assert!(principle_candidate_exists(&conn, "  be careful  ").unwrap());
+        assert!(!principle_candidate_exists(&conn, "something else").unwrap());
+    }
+
+    #[test]
+    fn principle_list_filters_by_effective_status() {
+        let conn = test_conn();
+        principle_insert_candidate(&conn, "candidate one", &[]).unwrap();
+        seed_principle(&conn, "integrity: never fabricate"); // legacy row, principle_status NULL
+        assert_eq!(principle_list(&conn, Some("candidate")).unwrap().len(), 1);
+        assert_eq!(principle_list(&conn, Some("active")).unwrap().len(), 1, "NULL status treated as active");
+        assert_eq!(principle_list(&conn, None).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn principle_set_status_errors_on_a_non_principle_row() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "not a principle").unwrap();
+        assert!(principle_set_status(&conn, &m.id, "active").is_err());
+    }
+
+    #[test]
+    fn principle_set_status_errors_on_an_unknown_id() {
+        let conn = test_conn();
+        assert!(principle_set_status(&conn, "no-such-id", "active").is_err());
+    }
+
+    #[test]
+    fn principle_rows_active_treats_null_status_as_active() {
+        // Backward compat: FEAT-030 charter rows written before this
+        // migration have no principle_status — they must keep grounding
+        // the Soul without a backfill.
+        let conn = test_conn();
+        seed_principle(&conn, "integrity: never fabricate");
+        principle_insert_candidate(&conn, "a fresh candidate", &[]).unwrap();
+        let active = principle_rows_active(&conn).unwrap();
+        assert_eq!(active.len(), 1, "the legacy row, not the fresh candidate");
+        assert_eq!(active[0].content, "integrity: never fabricate");
+    }
+
+    #[test]
+    fn principle_content_active_reflection_excludes_human_and_candidate_rows() {
+        let conn = test_conn();
+        seed_principle(&conn, "integrity: never fabricate"); // source=human
+        let cand = principle_insert_candidate(&conn, "a fresh candidate", &[]).unwrap();
+        assert!(principle_content_active_reflection(&conn).unwrap().is_empty(), "still a candidate, not active");
+        principle_set_status(&conn, &cand.id, "active").unwrap();
+        let active = principle_content_active_reflection(&conn).unwrap();
+        assert_eq!(active, vec!["a fresh candidate".to_string()]);
+    }
+
+    #[test]
+    fn memory_decay_never_deletes_a_low_strength_principle_row() {
+        // Regression: `memory_decay`'s unscoped DELETE would otherwise
+        // silently retire a reflection-sourced principle — retirement must
+        // be human-gated (FEAT-031 acceptance criterion 4).
+        let conn = test_conn();
+        let p = principle_insert_candidate(&conn, "will it survive", &[]).unwrap();
+        principle_set_status(&conn, &p.id, "active").unwrap();
+        conn.execute("UPDATE memories SET strength = 0 WHERE id = ?1", params![&p.id]).unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        memory_decay(&conn, &future).unwrap();
+        assert!(memory_category(&conn, &p.id).unwrap().is_some(), "principle row survives memory_decay");
+    }
+
+    #[test]
+    fn principle_decay_active_reduces_strength_but_never_goes_negative_or_deletes() {
+        let conn = test_conn();
+        let p = principle_insert_candidate(&conn, "will it survive", &[]).unwrap();
+        principle_set_status(&conn, &p.id, "active").unwrap();
+        conn.execute("UPDATE memories SET strength = 1 WHERE id = ?1", params![&p.id]).unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+
+        let n = principle_decay_active(&conn, &future).unwrap();
+        assert_eq!(n, 1);
+        let strength: i64 = conn.query_row("SELECT strength FROM memories WHERE id = ?1", params![&p.id], |r| r.get(0)).unwrap();
+        assert_eq!(strength, 0);
+
+        // decaying again never goes negative, and the row (and its status) survives.
+        principle_decay_active(&conn, &future).unwrap();
+        let strength: i64 = conn.query_row("SELECT strength FROM memories WHERE id = ?1", params![&p.id], |r| r.get(0)).unwrap();
+        assert_eq!(strength, 0);
+        assert_eq!(principle_get(&conn, &p.id).unwrap().unwrap().status, "active", "never auto-retired");
+    }
+
+    #[test]
+    fn principle_decay_active_never_touches_human_or_candidate_rows() {
+        let conn = test_conn();
+        let human_id = seed_principle(&conn, "integrity: never fabricate");
+        conn.execute("UPDATE memories SET strength = 1, last_seen = '2000-01-01T00:00:00Z' WHERE id = ?1", params![&human_id]).unwrap();
+        let candidate = principle_insert_candidate(&conn, "unratified", &[]).unwrap();
+
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        principle_decay_active(&conn, &future).unwrap();
+
+        let human_strength: i64 = conn.query_row("SELECT strength FROM memories WHERE id = ?1", params![&human_id], |r| r.get(0)).unwrap();
+        assert_eq!(human_strength, 1, "source=human never decays");
+        let candidate_strength: i64 = conn.query_row("SELECT strength FROM memories WHERE id = ?1", params![&candidate.id], |r| r.get(0)).unwrap();
+        assert_eq!(candidate_strength, 1, "candidates aren't decayed");
     }
 }
