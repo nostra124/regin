@@ -19,12 +19,21 @@
 //! `CARGO_BIN_EXE_*` — there is no stable artifact-dependency support on
 //! this toolchain (`artifact = "bin"` requires `-Z bindeps`, nightly-only —
 //! confirmed by trying it before writing this test). `regind`'s path is
-//! instead derived as a sibling of `regin`'s in the same target directory,
-//! which cargo always populates when the workspace is built together —
-//! i.e. under `cargo test --workspace` (this project's own convention).
-//! `cargo test -p regin-cli` in isolation, without a prior workspace
-//! build, will not find it; [`regind_bin`] panics with a message pointing
-//! at the fix rather than silently skipping.
+//! instead derived as a sibling of `regin`'s in the same target directory.
+//!
+//! That sibling is **not** reliably present just because the workspace was
+//! built or tested — verified the hard way: even a clean `cargo test
+//! --workspace` does not build a plain `[[bin]]` target that (a) isn't a
+//! declared dependency of anything and (b) belongs to a package whose only
+//! *other* build need is its own `#[cfg(test)]` harness (which recompiles
+//! `main.rs` under `--cfg test`, a separate artifact from the production
+//! binary). `cargo llvm-cov` narrows the build footprint further still. So
+//! [`regind_bin`] self-heals: if the sibling is missing, it shells out to
+//! `cargo build -p regind --bin regind` targeting the exact directory
+//! `regin`'s own binary landed in (derived from `CARGO_BIN_EXE_regin`, not
+//! assumed) — this works unmodified under plain `cargo test` and under
+//! `cargo llvm-cov` alike, since it inherits whatever coverage
+//! instrumentation env vars the outer test run was invoked with.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -38,15 +47,24 @@ fn regin_bin() -> PathBuf {
 }
 
 fn regind_bin() -> PathBuf {
-    let p = regin_bin().with_file_name("regind");
-    assert!(
-        p.exists(),
-        "regind binary not found at {} — run `cargo test --workspace` (or `cargo build \
-         --workspace` first) so both binaries are built together; `cargo test -p regin-cli` \
-         alone does not build the sibling `regind` binary.",
-        p.display()
-    );
-    p
+    let regin = regin_bin();
+    let sibling = regin.with_file_name("regind");
+    if sibling.exists() {
+        return sibling;
+    }
+    let target_dir = regin
+        .parent() // .../<target-dir>/debug
+        .and_then(|p| p.parent()) // .../<target-dir>
+        .unwrap_or_else(|| panic!("{} has no target directory ancestor", regin.display()));
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let status = Command::new(&cargo)
+        .args(["build", "-p", "regind", "--bin", "regind", "--target-dir"])
+        .arg(target_dir)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run `{cargo} build -p regind`: {e}"));
+    assert!(status.success(), "`{cargo} build -p regind` failed");
+    assert!(sibling.exists(), "regind binary still missing at {} after building it", sibling.display());
+    sibling
 }
 
 static SANDBOX_COUNTER: AtomicU64 = AtomicU64::new(0);
