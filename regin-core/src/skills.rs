@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 use crate::db;
-use crate::llm::MimirClient;
+use crate::llm::LlmClient;
 use crate::types::{ChatMessage, TaskRun};
 
 /// A skill definition loaded from disk.
@@ -221,7 +221,7 @@ fn load_skill_from_path(path: &Path, source: SkillSource) -> Result<Skill> {
 /// save the result as a task run in the database.
 pub async fn run_skill(
     skill: &Skill,
-    llm_client: &MimirClient,
+    llm_client: &dyn LlmClient,
     db_conn: &Connection,
 ) -> Result<TaskRun> {
     info!(skill = %skill.name, source = %skill.source, "Running skill");

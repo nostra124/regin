@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::identity_db;
-use crate::llm::MimirClient;
+use crate::llm::LlmClient;
 use crate::types::{ChatMessage, CuratorAction, CuratorProposal, CuratorStats, Episode, Memory, SessionRow};
 
 const CURATE_CATEGORIES: &str = "fact, preference, pattern, project, skill, person";
@@ -195,7 +195,7 @@ pub fn post_curation_maintenance(
 /// mark consolidated, then maintain (decay/promote/prune).
 pub async fn curate_once(
     conn: &Connection,
-    client: &MimirClient,
+    client: &dyn LlmClient,
     episode_window: usize,
     transcript_window: usize,
     decay_before: &str,
@@ -347,7 +347,7 @@ pub fn reflection_prompt(episodes: &[Episode], existing: &[Memory]) -> String {
 /// reflection memories.
 pub async fn reflect_once(
     conn: &Connection,
-    client: &MimirClient,
+    client: &dyn LlmClient,
     window: usize,
     decay_before: &str,
 ) -> Result<ReflectionStats> {
