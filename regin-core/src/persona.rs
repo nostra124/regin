@@ -30,6 +30,10 @@ pub struct Persona {
     /// DISC-018). Unset = no override; the risk classifier decides.
     #[serde(default)]
     pub default_mode: Option<String>,
+    /// Per-Persona values overlay (catalog ids, FEAT-030 / DISC-018) — layered
+    /// onto the identity-core charter; see `crate::soul::grounding_union`.
+    #[serde(default)]
+    pub values: Vec<String>,
 }
 
 impl Persona {
@@ -122,6 +126,14 @@ mod tests {
     fn validation_rejects_empty_role_and_unknown_tool() {
         assert!(Persona::from_toml("role = \"\"\n").is_err());
         assert!(Persona::from_toml("role = \"x\"\ntools = [\"telepathy\"]\n").is_err());
+    }
+
+    #[test]
+    fn values_overlay_is_optional_and_round_trips() {
+        let p = Persona::from_toml("role = \"x\"\n").unwrap();
+        assert!(p.values.is_empty());
+        let p = Persona::from_toml("role = \"x\"\nvalues = [\"integrity\", \"prudence\"]\n").unwrap();
+        assert_eq!(p.values, vec!["integrity", "prudence"]);
     }
 
     #[test]

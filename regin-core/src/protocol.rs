@@ -233,6 +233,28 @@ pub enum Request {
     /// Run the periodic CSI self-audit now and file its findings.
     #[serde(rename = "audit_run")]
     AuditRun,
+
+    // --- Soul configurator + value catalog (FEAT-030) ---
+    /// Browse the bundled value catalog.
+    #[serde(rename = "soul_values_list")]
+    SoulValuesList,
+    /// Show one catalog entry by id.
+    #[serde(rename = "soul_values_show")]
+    SoulValuesShow { id: String },
+    /// Render the active grounding: core charter ∪ active Persona overlay.
+    #[serde(rename = "soul_charter_show")]
+    SoulCharterShow,
+    /// Propose a starting value set for the active Persona's role
+    /// (`role_default_values`) — preview only, nothing is written.
+    #[serde(rename = "soul_charter_derive")]
+    SoulCharterDerive,
+    /// Write value ids into the identity-core charter (human confirmation of
+    /// a derive proposal, or a direct `regin soul charter set`).
+    #[serde(rename = "soul_charter_confirm")]
+    SoulCharterConfirm { value_ids: Vec<String> },
+    /// Remove a value from the identity-core charter.
+    #[serde(rename = "soul_charter_remove")]
+    SoulCharterRemove { value_id: String },
 }
 
 /// Response from daemon to CLI.
@@ -368,6 +390,18 @@ pub enum Response {
 
     #[serde(rename = "reflect_stats")]
     ReflectStats { episodes: u32, reinforced: u32, created: u32, decayed: u32 },
+
+    // --- Soul configurator + value catalog (FEAT-030) ---
+    #[serde(rename = "soul_values")]
+    SoulValues { version: String, values: Vec<crate::soul::ValueEntry> },
+    #[serde(rename = "soul_value_detail")]
+    SoulValueDetail { value: crate::soul::ValueEntry },
+    #[serde(rename = "soul_charter")]
+    SoulCharter { core_ids: Vec<String>, persona_overlay: Vec<String>, grounding: Vec<String> },
+    #[serde(rename = "soul_charter_proposal")]
+    SoulCharterProposal { role: String, proposed: Vec<String> },
+    #[serde(rename = "soul_charter_written")]
+    SoulCharterWritten { added: Vec<String> },
 }
 
 #[cfg(test)]

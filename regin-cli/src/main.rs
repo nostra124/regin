@@ -277,6 +277,49 @@ enum Commands {
 
     /// Check if the daemon (regind) is running.
     Ping,
+
+    /// Soul configurator: browse the value catalog · manage the core charter (FEAT-030).
+    Soul {
+        #[command(subcommand)]
+        action: SoulAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SoulAction {
+    /// Browse the bundled value catalog.
+    Values {
+        #[command(subcommand)]
+        action: SoulValuesAction,
+    },
+    /// Manage the identity-core charter (human-only — never agent/reflection-writable).
+    Charter {
+        #[command(subcommand)]
+        action: SoulCharterAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SoulValuesAction {
+    /// List every entry in the value catalog.
+    List,
+    /// Show one catalog entry by id.
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
+enum SoulCharterAction {
+    /// Show the active grounding: core charter ∪ the active Persona's overlay.
+    Show,
+    /// Propose a starting value set for the active Persona's role (preview only).
+    Derive,
+    /// Write value ids into the identity-core charter.
+    Set {
+        /// Catalog value ids (repeatable; see `regin soul values list`)
+        ids: Vec<String>,
+    },
+    /// Remove a value from the identity-core charter.
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]
@@ -777,6 +820,18 @@ async fn main() -> Result<()> {
         },
         Commands::Deputy { action } => cmd_deputy(action),
         Commands::Ping => cmd_ping(&t).await,
+        Commands::Soul { action } => match action {
+            SoulAction::Values { action } => match action {
+                SoulValuesAction::List => cmd_soul_values_list(&t).await,
+                SoulValuesAction::Show { id } => cmd_soul_values_show(&t, &id).await,
+            },
+            SoulAction::Charter { action } => match action {
+                SoulCharterAction::Show => cmd_soul_charter_show(&t).await,
+                SoulCharterAction::Derive => cmd_soul_charter_derive(&t).await,
+                SoulCharterAction::Set { ids } => cmd_soul_charter_set(&t, ids).await,
+                SoulCharterAction::Remove { id } => cmd_soul_charter_remove(&t, &id).await,
+            },
+        },
     }
 }
 
@@ -1550,6 +1605,56 @@ async fn cmd_problems(t: &impl Transport, req: Request) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_soul_values_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::SoulValuesList).await? {
+        Response::SoulValues { version, values } => print!("{}", render_soul_values_list(&version, &values)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_values_show(t: &impl Transport, id: &str) -> Result<()> {
+    match t.request(&Request::SoulValuesShow { id: id.into() }).await? {
+        Response::SoulValueDetail { value } => print!("{}", render_soul_value_detail(&value)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_charter_show(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::SoulCharterShow).await? {
+        Response::SoulCharter { core_ids, persona_overlay, grounding } => {
+            print!("{}", render_soul_charter(&core_ids, &persona_overlay, &grounding));
+        }
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_charter_derive(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::SoulCharterDerive).await? {
+        Response::SoulCharterProposal { role, proposed } => print!("{}", render_soul_charter_proposal(&role, &proposed)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_charter_set(t: &impl Transport, ids: Vec<String>) -> Result<()> {
+    match t.request(&Request::SoulCharterConfirm { value_ids: ids }).await? {
+        Response::SoulCharterWritten { added } => print!("{}", render_soul_charter_written(&added)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_soul_charter_remove(t: &impl Transport, id: &str) -> Result<()> {
+    match t.request(&Request::SoulCharterRemove { value_id: id.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1656,6 +1761,12 @@ mod tests {
         parses(&["regin", "deputy", "brief", "text"]);
         parses(&["regin", "deputy", "activate", "--confirmed"]);
         parses(&["regin", "deputy", "handback"]);
+        parses(&["regin", "soul", "values", "list"]);
+        parses(&["regin", "soul", "values", "show", "integrity"]);
+        parses(&["regin", "soul", "charter", "show"]);
+        parses(&["regin", "soul", "charter", "derive"]);
+        parses(&["regin", "soul", "charter", "set", "integrity", "prudence"]);
+        parses(&["regin", "soul", "charter", "remove", "integrity"]);
     }
 
     #[test]
@@ -2006,5 +2117,58 @@ mod tests {
         print_chat_event(&Response::StreamDone { conversation_id: "c9".into() }, &mut full, &mut conv_id);
         assert_eq!(full, "hi");
         assert_eq!(conv_id, "c9");
+    }
+
+    // -----------------------------------------------------------------
+    // Soul configurator (FEAT-030)
+    // -----------------------------------------------------------------
+
+    fn value_entry(id: &str) -> regin_core::soul::ValueEntry {
+        regin_core::soul::ValueEntry {
+            id: id.into(),
+            name: id.into(),
+            description: "d".into(),
+            tradition: "agent-operational".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_soul_values_list_and_show() {
+        let t = FakeTransport::new();
+        t.push(Response::SoulValues { version: "1".into(), values: vec![value_entry("integrity")] });
+        assert!(cmd_soul_values_list(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::SoulValuesList));
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulValueDetail { value: value_entry("integrity") });
+        assert!(cmd_soul_values_show(&t, "integrity").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "unknown value id".into() });
+        assert!(cmd_soul_values_show(&t, "nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_soul_charter_show_derive_set_remove() {
+        let t = FakeTransport::new();
+        t.push(Response::SoulCharter { core_ids: vec![], persona_overlay: vec![], grounding: vec![] });
+        assert!(cmd_soul_charter_show(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulCharterProposal { role: "cfo".into(), proposed: vec!["prudence".into()] });
+        assert!(cmd_soul_charter_derive(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::SoulCharterWritten { added: vec!["prudence".into()] });
+        assert!(cmd_soul_charter_set(&t, vec!["prudence".into()]).await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::SoulCharterConfirm { value_ids } if value_ids == &["prudence".to_string()]));
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "removed prudence".into() });
+        assert!(cmd_soul_charter_remove(&t, "prudence").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "not in the core charter".into() });
+        assert!(cmd_soul_charter_remove(&t, "nope").await.is_err());
     }
 }
