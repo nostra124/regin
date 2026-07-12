@@ -990,72 +990,80 @@ async fn exec_skill_agentic<W: tokio::io::AsyncWrite + Unpin>(
     Ok(run)
 }
 
+/// One scheduler tick: stamp the heartbeat, find schedules due at `now`, and
+/// run each due skill — best-effort, one skill's failure never stops the
+/// others or the loop (FEAT-073). Extracted from `schedule_checker`'s
+/// `loop {}` body so due-vs-not-due, success/failure, and fail-safe
+/// behaviour are unit-testable without a real 30s timer.
+async fn run_due_schedules(state: &Arc<AppState>, now: &str) {
+    let due = {
+        let db = state.db.lock().expect("DB poisoned");
+        // FEAT-048: stamp the scheduler heartbeat so a stalled loop is detectable.
+        let _ = db::setting_set(&db, "regind.heartbeat", now);
+        match db::get_due_schedules(&db, now) { Ok(s) => s, Err(e) => { error!("Schedule check: {e}"); return; } }
+    };
+    for sched in due {
+        info!(skill = %sched.skill, "Scheduled task");
+        let sys = config::system_skills_dir();
+        let usr = match config::user_skills_dir() { Ok(d) => d, Err(e) => { error!("{e}"); continue; } };
+        let skill = match skills::load_skill(&sys, &usr, &sched.skill) { Ok(s) => s, Err(e) => { error!("Load: {e}"); continue; } };
+        let client = match state.llm_client() { Ok(c) => c, Err(e) => { warn!("{e}"); continue; } };
+        // Scheduled tasks use simple non-agentic execution (no writer to stream to)
+        let started_at = chrono::Utc::now().to_rfc3339();
+        let mut content = skill.prompt.clone();
+        if !skill.files.is_empty() {
+            content.push_str("\n\n--- Supporting Files ---\n");
+            for (f, b) in &skill.files { content.push_str(&format!("\n### {f}\n```\n{b}\n```\n")); }
+        }
+        let msgs = vec![ChatMessage::user(content)];
+        let (status, output) = match client.chat_completion(&msgs).await {
+            Ok(r) => ("success".to_string(), r),
+            Err(e) => { error!(skill = %sched.skill, "Run: {e}"); ("error".to_string(), format!("{e}")) }
+        };
+        let finished_at = chrono::Utc::now().to_rfc3339();
+        {
+            let db = state.db.lock().expect("DB poisoned");
+            let _ = db::save_task_run(&db, &sched.skill, &status, &output, &started_at, &finished_at);
+            // FEAT-004: evaluate the result; gated by monitor.auto_incident.
+            // Fails safe — a bad evaluation never breaks the scheduler loop.
+            let auto = db::setting_get(&db, "monitor.auto_incident").map(|v| v == "true").unwrap_or(false);
+            if auto {
+                let severity = db::setting_get(&db, "monitor.severity").unwrap_or_else(|_| "medium".into());
+                let default_threshold = db::setting_get(&db, "monitor.recurrence_threshold")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(3);
+                // FEAT-036: the domain's to-be-state may override the global default.
+                let user_desired = config::user_desired_dir().unwrap_or_default();
+                let threshold = desired::recurrence_threshold(
+                    &config::system_desired_dir(), &user_desired, &sched.skill, default_threshold,
+                );
+                match db::monitor_evaluate(&db, &sched.skill, &status, &output, &severity, threshold) {
+                    Ok(o) => {
+                        if o.created_incident {
+                            info!(skill = %sched.skill, incident = ?o.incident_id, "monitor opened incident");
+                        }
+                        if let Some(p) = &o.problem_id {
+                            warn!(skill = %sched.skill, problem = %p, "monitor: recurrence -> problem");
+                        }
+                    }
+                    Err(e) => error!(skill = %sched.skill, "monitor_evaluate: {e}"),
+                }
+            }
+        }
+        let last_run = chrono::Utc::now().to_rfc3339();
+        if let Ok(next) = compute_next_run(&sched.interval, &sched.skill) {
+            let db = state.db.lock().expect("DB poisoned");
+            let _ = db::update_schedule_after_run(&db, &sched.skill, &last_run, &next);
+        }
+    }
+}
+
 async fn schedule_checker(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
     loop {
         interval.tick().await;
-        let now = chrono::Utc::now().to_rfc3339();
-        let due = {
-            let db = state.db.lock().expect("DB poisoned");
-            // FEAT-048: stamp the scheduler heartbeat so a stalled loop is detectable.
-            let _ = db::setting_set(&db, "regind.heartbeat", &now);
-            match db::get_due_schedules(&db, &now) { Ok(s) => s, Err(e) => { error!("Schedule check: {e}"); continue; } }
-        };
-        for sched in due {
-            info!(skill = %sched.skill, "Scheduled task");
-            let sys = config::system_skills_dir();
-            let usr = match config::user_skills_dir() { Ok(d) => d, Err(e) => { error!("{e}"); continue; } };
-            let skill = match skills::load_skill(&sys, &usr, &sched.skill) { Ok(s) => s, Err(e) => { error!("Load: {e}"); continue; } };
-            let client = match state.llm_client() { Ok(c) => c, Err(e) => { warn!("{e}"); continue; } };
-            // Scheduled tasks use simple non-agentic execution (no writer to stream to)
-            let started_at = chrono::Utc::now().to_rfc3339();
-            let mut content = skill.prompt.clone();
-            if !skill.files.is_empty() {
-                content.push_str("\n\n--- Supporting Files ---\n");
-                for (f, b) in &skill.files { content.push_str(&format!("\n### {f}\n```\n{b}\n```\n")); }
-            }
-            let msgs = vec![ChatMessage::user(content)];
-            let (status, output) = match client.chat_completion(&msgs).await {
-                Ok(r) => ("success".to_string(), r),
-                Err(e) => { error!(skill = %sched.skill, "Run: {e}"); ("error".to_string(), format!("{e}")) }
-            };
-            let finished_at = chrono::Utc::now().to_rfc3339();
-            {
-                let db = state.db.lock().expect("DB poisoned");
-                let _ = db::save_task_run(&db, &sched.skill, &status, &output, &started_at, &finished_at);
-                // FEAT-004: evaluate the result; gated by monitor.auto_incident.
-                // Fails safe — a bad evaluation never breaks the scheduler loop.
-                let auto = db::setting_get(&db, "monitor.auto_incident").map(|v| v == "true").unwrap_or(false);
-                if auto {
-                    let severity = db::setting_get(&db, "monitor.severity").unwrap_or_else(|_| "medium".into());
-                    let default_threshold = db::setting_get(&db, "monitor.recurrence_threshold")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                        .unwrap_or(3);
-                    // FEAT-036: the domain's to-be-state may override the global default.
-                    let user_desired = config::user_desired_dir().unwrap_or_default();
-                    let threshold = desired::recurrence_threshold(
-                        &config::system_desired_dir(), &user_desired, &sched.skill, default_threshold,
-                    );
-                    match db::monitor_evaluate(&db, &sched.skill, &status, &output, &severity, threshold) {
-                        Ok(o) => {
-                            if o.created_incident {
-                                info!(skill = %sched.skill, incident = ?o.incident_id, "monitor opened incident");
-                            }
-                            if let Some(p) = &o.problem_id {
-                                warn!(skill = %sched.skill, problem = %p, "monitor: recurrence -> problem");
-                            }
-                        }
-                        Err(e) => error!(skill = %sched.skill, "monitor_evaluate: {e}"),
-                    }
-                }
-            }
-            let last_run = chrono::Utc::now().to_rfc3339();
-            if let Ok(next) = compute_next_run(&sched.interval, &sched.skill) {
-                let db = state.db.lock().expect("DB poisoned");
-                let _ = db::update_schedule_after_run(&db, &sched.skill, &last_run, &next);
-            }
-        }
+        run_due_schedules(&state, &chrono::Utc::now().to_rfc3339()).await;
     }
 }
 
@@ -1180,6 +1188,32 @@ async fn run_curation(state: &Arc<AppState>) -> Result<regin_core::types::Curato
     Ok(stats)
 }
 
+/// One reflection-checker tick: run curation and log its result (or a
+/// non-fatal warning on failure) — returning the outcome so tests can
+/// observe it directly rather than only through log lines. Extracted from
+/// `reflection_checker`'s `loop {}` body (FEAT-073) so success/failure is
+/// unit-testable without the interval sleep.
+async fn reflection_tick(state: &Arc<AppState>) -> Result<regin_core::types::CuratorStats> {
+    let result = run_curation(state).await;
+    match &result {
+        Ok(s) if s.episodes > 0 || s.sessions > 0 || s.decayed > 0 || s.promoted > 0 => info!(
+            episodes = s.episodes,
+            sessions = s.sessions,
+            added = s.added,
+            updated = s.updated,
+            deleted = s.deleted,
+            promoted = s.promoted,
+            decayed = s.decayed,
+            pruned = s.pruned,
+            topics = s.topics,
+            "curation pass"
+        ),
+        Ok(_) => {}
+        Err(e) => warn!("curation: {e}"),
+    }
+    result
+}
+
 /// Periodically curate episodes and transcripts (FEAT-024).
 /// Fails safe — errors are logged and never stop the loop.
 async fn reflection_checker(state: Arc<AppState>) {
@@ -1194,22 +1228,7 @@ async fn reflection_checker(state: Arc<AppState>) {
             .unwrap_or_else(|| std::time::Duration::from_secs(86_400));
         tokio::time::sleep(dur).await;
 
-        match run_curation(&state).await {
-            Ok(s) if s.episodes > 0 || s.sessions > 0 || s.decayed > 0 || s.promoted > 0 => info!(
-                episodes = s.episodes,
-                sessions = s.sessions,
-                added = s.added,
-                updated = s.updated,
-                deleted = s.deleted,
-                promoted = s.promoted,
-                decayed = s.decayed,
-                pruned = s.pruned,
-                topics = s.topics,
-                "curation pass"
-            ),
-            Ok(_) => {}
-            Err(e) => warn!("curation: {e}"),
-        }
+        let _ = reflection_tick(&state).await;
     }
 }
 
@@ -1373,5 +1392,566 @@ mod dispatch_tests {
         // refuses to build a client with no fingerprint set.
         let st = state();
         assert!(st.llm_client().is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-073: scheduler + reflection tick functions (acceptance criterion 1)
+    // -----------------------------------------------------------------
+
+    /// Creates a skill under the REAL user skills dir for a test's duration
+    /// and removes it on drop (even on panic). There is no DI seam for
+    /// `config::user_skills_dir()` — `run_due_schedules` calls it directly,
+    /// same as production — so this is the only way to exercise the actual
+    /// success path of a scheduled skill run. The name is unique per call to
+    /// avoid any collision with a real skill or another test.
+    struct TempSkillGuard {
+        name: String,
+    }
+    impl TempSkillGuard {
+        fn new(name: &str, prompt: &str) -> Self {
+            let dir = config::user_skills_dir().unwrap().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("skill.md"), prompt).unwrap();
+            Self { name: name.to_string() }
+        }
+    }
+    impl Drop for TempSkillGuard {
+        fn drop(&mut self) {
+            if let Ok(dir) = config::user_skills_dir() {
+                let _ = std::fs::remove_dir_all(dir.join(&self.name));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_due_schedules_stamps_the_heartbeat_even_with_nothing_due() {
+        let st = state();
+        let now = chrono::Utc::now().to_rfc3339();
+        run_due_schedules(&st, &now).await;
+        let db = st.db.lock().unwrap();
+        assert_eq!(db::setting_get(&db, "regind.heartbeat").unwrap(), now);
+    }
+
+    #[tokio::test]
+    async fn run_due_schedules_skips_a_schedule_not_yet_due() {
+        let st = state();
+        let future = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        { let db = st.db.lock().unwrap(); db::save_schedule(&db, "feat073-not-due", "daily", &future).unwrap(); }
+
+        run_due_schedules(&st, &chrono::Utc::now().to_rfc3339()).await;
+
+        let db = st.db.lock().unwrap();
+        assert!(db::get_task_runs(&db, "feat073-not-due", 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_due_schedules_is_fail_safe_when_the_skill_cannot_be_loaded() {
+        // No skill file exists for this name anywhere — load_skill errors;
+        // the tick must log and continue, not panic or stop other schedules.
+        let st = state();
+        let name = format!("feat073-missing-{}", uuid::Uuid::new_v4());
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        { let db = st.db.lock().unwrap(); db::save_schedule(&db, &name, "daily", &past).unwrap(); }
+
+        run_due_schedules(&st, &chrono::Utc::now().to_rfc3339()).await; // must not panic
+
+        let db = st.db.lock().unwrap();
+        assert!(db::get_task_runs(&db, &name, 10).unwrap().is_empty(), "no run recorded for an unloadable skill");
+    }
+
+    #[tokio::test]
+    async fn run_due_schedules_runs_a_due_skill_and_advances_next_run() {
+        let name = format!("feat073-success-{}", uuid::Uuid::new_v4());
+        let _guard = TempSkillGuard::new(&name, "a temp scheduler-tick test skill\n\nsay hi.");
+        let fake = Arc::new(FakeLlm::new());
+        fake.push_completion("scheduled reply");
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        { let db = st.db.lock().unwrap(); db::save_schedule(&db, &name, "daily", &past).unwrap(); }
+
+        run_due_schedules(&st, &chrono::Utc::now().to_rfc3339()).await;
+
+        let db = st.db.lock().unwrap();
+        let runs = db::get_task_runs(&db, &name, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "success");
+        assert_eq!(runs[0].output, "scheduled reply");
+        let next_run = db::list_schedules(&db).unwrap().into_iter().find(|s| s.skill == name).unwrap().next_run;
+        assert!(next_run > past, "next_run advanced past the due time");
+    }
+
+    #[tokio::test]
+    async fn run_due_schedules_records_a_failure_status_when_the_llm_errors() {
+        let name = format!("feat073-failure-{}", uuid::Uuid::new_v4());
+        let _guard = TempSkillGuard::new(&name, "a temp scheduler-tick test skill\n\nsay hi.");
+        let fake = Arc::new(FakeLlm::new()); // no queued completion -> chat_completion errors
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        { let db = st.db.lock().unwrap(); db::save_schedule(&db, &name, "daily", &past).unwrap(); }
+
+        run_due_schedules(&st, &chrono::Utc::now().to_rfc3339()).await;
+
+        let db = st.db.lock().unwrap();
+        let runs = db::get_task_runs(&db, &name, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "error");
+    }
+
+    #[tokio::test]
+    async fn reflection_tick_returns_stats_on_an_empty_db() {
+        let fake = Arc::new(FakeLlm::new());
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        let stats = reflection_tick(&st).await.unwrap();
+        assert_eq!(stats.episodes, 0);
+    }
+
+    #[tokio::test]
+    async fn reflection_tick_surfaces_the_error_when_no_llm_is_configured() {
+        let st = state(); // no override, no fingerprint -> llm_client() errors
+        assert!(reflection_tick(&st).await.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-073: full dispatch-arm coverage (acceptance criterion 2)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn config_list_get_set_roundtrip() {
+        let st = state();
+        let set = run(Request::ConfigSet { key: "kpi.reliability_floor".into(), value: "0.99".into() }, &st).await;
+        assert!(matches!(set.as_slice(), [Response::Ok { .. }]));
+        let got = run(Request::ConfigGet { key: "kpi.reliability_floor".into() }, &st).await;
+        assert!(matches!(got.as_slice(), [Response::ConfigValue { value, .. }] if value == "0.99"));
+        let listed = run(Request::ConfigList, &st).await;
+        assert!(matches!(
+            listed.as_slice(),
+            [Response::ConfigEntries { entries }] if entries.iter().any(|(k, _)| k == "kpi.reliability_floor")
+        ));
+    }
+
+    #[tokio::test]
+    async fn chat_history_lists_conversations() {
+        let st = state();
+        assert!(matches!(run(Request::ChatHistory, &st).await.as_slice(), [Response::ChatHistory { .. }]));
+    }
+
+    #[tokio::test]
+    async fn memory_save_list_search_update_delete_roundtrip() {
+        let st = state();
+        let saved = run(Request::MemorySave { category: "fact".into(), content: "the sky is blue".into() }, &st).await;
+        assert!(matches!(saved.as_slice(), [Response::Ok { .. }]));
+
+        let listed = run(Request::MemoryList { category: Some("fact".into()) }, &st).await;
+        let id = match listed.as_slice() {
+            [Response::MemoryList { memories }] => { assert_eq!(memories.len(), 1); memories[0].id.clone() }
+            other => panic!("expected one memory, got {other:?}"),
+        };
+
+        // embeddings enabled by default but no fingerprint configured -> falls
+        // back to FTS-only search, no network.
+        let searched = run(Request::MemorySearch { query: "sky".into() }, &st).await;
+        assert!(matches!(searched.as_slice(), [Response::MemoryList { memories }] if !memories.is_empty()));
+
+        assert!(matches!(
+            run(Request::MemoryUpdate { id: id.clone(), content: "the sky is grey".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(run(Request::MemoryDelete { id }, &st).await.as_slice(), [Response::Ok { .. }]));
+
+        let after = run(Request::MemoryList { category: Some("fact".into()) }, &st).await;
+        assert!(matches!(after.as_slice(), [Response::MemoryList { memories }] if memories.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn memory_info_reports_identity_metadata() {
+        let st = state();
+        assert!(matches!(run(Request::MemoryInfo, &st).await.as_slice(), [Response::MemoryInfo { .. }]));
+    }
+
+    #[tokio::test]
+    async fn memory_export_then_import_merge_round_trips() {
+        let st = state();
+        let path = std::env::temp_dir().join(format!("regind-test-export-{}.db", uuid::Uuid::new_v4()));
+        let path_str = path.to_string_lossy().to_string();
+
+        let exported = run(Request::MemoryExport { path: path_str.clone() }, &st).await;
+        assert!(matches!(exported.as_slice(), [Response::MemoryExport { .. }]));
+
+        let imported = run(Request::MemoryImport { path: path_str, merge: true }, &st).await;
+        assert!(matches!(imported.as_slice(), [Response::Ok { .. }]));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn memory_import_without_merge_refuses_a_different_identity() {
+        // MemoryImport propagates identity_db::memory_import's error via `?`
+        // (same pattern as ChatSend/SkillShow), so assert on dispatch()'s
+        // own Result rather than going through the `run()` helper (which
+        // unwraps).
+        let st = state();
+        let other = rusqlite::Connection::open_in_memory().unwrap();
+        identity_db::init_identity_schema(&other).unwrap(); // fresh, different identity_id
+        let path = std::env::temp_dir().join(format!("regind-test-other-identity-{}.db", uuid::Uuid::new_v4()));
+        other.execute_batch(&format!("VACUUM INTO '{}'", path.to_string_lossy())).unwrap();
+
+        let mut sink: Vec<u8> = Vec::new();
+        let result = dispatch(
+            Request::MemoryImport { path: path.to_string_lossy().to_string(), merge: false },
+            &st,
+            &mut sink,
+        ).await;
+        assert!(result.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn memory_reflect_returns_stats_when_an_llm_is_configured() {
+        let fake = Arc::new(FakeLlm::new());
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        assert!(matches!(run(Request::MemoryReflect, &st).await.as_slice(), [Response::ReflectStats { .. }]));
+    }
+
+    #[tokio::test]
+    async fn memory_reflect_errors_without_a_configured_llm() {
+        let st = state();
+        let mut sink: Vec<u8> = Vec::new();
+        assert!(dispatch(Request::MemoryReflect, &st, &mut sink).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn itil_incident_lifecycle_update_resolve_block_close_and_show() {
+        let st = state();
+        run(Request::IncidentOpen { title: "t".into(), description: "d".into(), severity: "high".into() }, &st).await;
+        let id = match run(Request::IncidentList { status: None }, &st).await.as_slice() {
+            [Response::Incidents { incidents }] => incidents[0].id.clone(),
+            other => panic!("expected one incident, got {other:?}"),
+        };
+
+        assert!(matches!(
+            run(Request::IncidentShow { id: id.clone() }, &st).await.as_slice(),
+            [Response::Incidents { incidents }] if incidents.len() == 1
+        ));
+        assert!(matches!(
+            run(Request::IncidentUpdate { id: id.clone(), status: "investigating".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(
+            run(Request::IncidentBlock { id: id.clone(), workaround: "manual restart".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(
+            run(Request::IncidentResolve { id: id.clone(), resolution: "patched".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(run(Request::IncidentClose { id }, &st).await.as_slice(), [Response::Ok { .. }]));
+    }
+
+    #[tokio::test]
+    async fn itil_change_lifecycle_request_approve_show_apply_close() {
+        let st = state();
+        run(Request::ChangeRecord {
+            title: "c".into(), description: "d".into(), incident_id: None, problem_id: None, before: None, after: None,
+        }, &st).await;
+        let id = match run(Request::ChangeList, &st).await.as_slice() {
+            [Response::Changes { changes }] => changes[0].id.clone(),
+            other => panic!("expected one change, got {other:?}"),
+        };
+
+        assert!(matches!(
+            run(Request::ChangeShow { id: id.clone() }, &st).await.as_slice(),
+            [Response::Changes { changes }] if changes.len() == 1
+        ));
+        assert!(matches!(
+            run(Request::ChangeRequestApproval { id: id.clone() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(
+            run(Request::ChangeApprove { id: id.clone(), approved_by: "rene".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(run(Request::ChangeApply { id: id.clone() }, &st).await.as_slice(), [Response::Ok { .. }]));
+        assert!(matches!(run(Request::ChangeClose { id }, &st).await.as_slice(), [Response::Ok { .. }]));
+    }
+
+    #[tokio::test]
+    async fn itil_change_show_errors_on_unknown_id() {
+        let st = state();
+        assert!(matches!(
+            run(Request::ChangeShow { id: "nope".into() }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn itil_problem_lifecycle_link_known_error_hypotheses_close() {
+        let st = state();
+        run(Request::IncidentOpen { title: "t".into(), description: "d".into(), severity: "high".into() }, &st).await;
+        let incident_id = match run(Request::IncidentList { status: None }, &st).await.as_slice() {
+            [Response::Incidents { incidents }] => incidents[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+        run(Request::ProblemOpen { title: "p".into(), description: "d".into() }, &st).await;
+        let problem_id = match run(Request::ProblemList { status: None }, &st).await.as_slice() {
+            [Response::Problems { problems }] => problems[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+
+        assert!(matches!(
+            run(Request::ProblemShow { id: problem_id.clone() }, &st).await.as_slice(),
+            [Response::Problems { problems }] if problems.len() == 1
+        ));
+        assert!(matches!(
+            run(Request::ProblemLink { problem_id: problem_id.clone(), incident_id }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(
+            run(Request::ProblemKnownError { id: problem_id.clone(), root_cause: "disk".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+
+        run(Request::ProblemHypothesisAdd { problem_id: problem_id.clone(), text: "maybe X".into() }, &st).await;
+        let hyp_id = match run(Request::ProblemHypothesisList { problem_id: problem_id.clone() }, &st).await.as_slice() {
+            [Response::Hypotheses { hypotheses }] => hypotheses[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert!(matches!(
+            run(Request::ProblemHypothesisStatus { id: hyp_id, status: "confirmed".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(run(Request::ProblemClose { id: problem_id }, &st).await.as_slice(), [Response::Ok { .. }]));
+    }
+
+    #[tokio::test]
+    async fn itil_problem_show_errors_on_unknown_id() {
+        let st = state();
+        assert!(matches!(
+            run(Request::ProblemShow { id: "nope".into() }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn desired_show_errors_on_unknown_domain() {
+        let st = state();
+        let r = run(Request::DesiredShow { domain: "definitely-not-a-real-domain-xyz".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn desired_check_reports_a_summary_message() {
+        let st = state();
+        assert!(matches!(run(Request::DesiredCheck, &st).await.as_slice(), [Response::Ok { .. }]));
+    }
+
+    #[tokio::test]
+    async fn filters_test_reports_not_filtered_when_no_rules_match() {
+        let st = state();
+        let r = run(Request::FiltersTest { domain: "disk".into(), text: "some log line".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Ok { .. }]));
+    }
+
+    #[tokio::test]
+    async fn posture_query_reports_a_posture() {
+        let st = state();
+        assert!(matches!(run(Request::PostureQuery, &st).await.as_slice(), [Response::PostureInfo { .. }]));
+    }
+
+    #[tokio::test]
+    async fn greeting_query_builds_a_greeting() {
+        let st = state();
+        assert!(matches!(run(Request::GreetingQuery, &st).await.as_slice(), [Response::GreetingResp { .. }]));
+    }
+
+    #[tokio::test]
+    async fn push_test_errors_without_a_configured_target() {
+        let st = state();
+        assert!(matches!(run(Request::PushTest, &st).await.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn checks_list_is_empty_on_a_fresh_db() {
+        let st = state();
+        assert!(matches!(
+            run(Request::ChecksList, &st).await.as_slice(),
+            [Response::DerivedChecks { checks }] if checks.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn audit_run_produces_a_result_on_a_fresh_db() {
+        let st = state();
+        assert!(matches!(run(Request::AuditRun, &st).await.as_slice(), [Response::AuditResult { .. }]));
+    }
+
+    #[tokio::test]
+    async fn soul_values_list_and_show_happy_and_error() {
+        let st = state();
+        assert!(matches!(run(Request::SoulValuesList, &st).await.as_slice(), [Response::SoulValues { .. }]));
+        assert!(matches!(
+            run(Request::SoulValuesShow { id: "integrity".into() }, &st).await.as_slice(),
+            [Response::SoulValueDetail { .. }]
+        ));
+        assert!(matches!(
+            run(Request::SoulValuesShow { id: "made-up".into() }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn soul_charter_show_derive_confirm_remove() {
+        let st = state();
+        assert!(matches!(run(Request::SoulCharterShow, &st).await.as_slice(), [Response::SoulCharter { .. }]));
+        assert!(matches!(run(Request::SoulCharterDerive, &st).await.as_slice(), [Response::SoulCharterProposal { .. }]));
+
+        let written = run(Request::SoulCharterConfirm { value_ids: vec!["integrity".into()] }, &st).await;
+        assert!(matches!(written.as_slice(), [Response::SoulCharterWritten { added }] if added == &vec!["integrity".to_string()]));
+
+        assert!(matches!(
+            run(Request::SoulCharterConfirm { value_ids: vec!["made-up".into()] }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+        assert!(matches!(
+            run(Request::SoulCharterRemove { value_id: "integrity".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        assert!(matches!(
+            run(Request::SoulCharterRemove { value_id: "integrity".into() }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn soul_principles_list_and_ratify_a_real_candidate() {
+        let st = state();
+        let candidate_id = {
+            let idb = st.identity_db.lock().unwrap();
+            identity_db::principle_insert_candidate(&idb, "a reflection-proposed principle", &["ep1".into()]).unwrap().id
+        };
+
+        let candidates = run(Request::SoulPrinciplesList { candidates_only: true }, &st).await;
+        assert!(matches!(candidates.as_slice(), [Response::SoulPrinciples { principles }] if principles.len() == 1));
+
+        let ratified = run(Request::SoulPrinciplesRatify { id: candidate_id.clone() }, &st).await;
+        assert!(matches!(ratified.as_slice(), [Response::SoulPrincipleRatified { principle }] if principle.status == "active"));
+
+        // no longer a candidate, so ratifying again errors
+        assert!(matches!(
+            run(Request::SoulPrinciplesRatify { id: candidate_id }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn soul_principles_reject_retires_and_is_not_repeatable() {
+        let st = state();
+        run(Request::SoulCharterConfirm { value_ids: vec!["integrity".into()] }, &st).await;
+        let id = match run(Request::SoulPrinciplesList { candidates_only: false }, &st).await.as_slice() {
+            [Response::SoulPrinciples { principles }] => principles[0].id.clone(),
+            other => panic!("{other:?}"),
+        };
+
+        let rejected = run(Request::SoulPrinciplesReject { id: id.clone() }, &st).await;
+        assert!(matches!(rejected.as_slice(), [Response::SoulPrincipleRejected { principle }] if principle.status == "retired"));
+        assert!(matches!(
+            run(Request::SoulPrinciplesReject { id }, &st).await.as_slice(),
+            [Response::Error { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn skill_list_responds_regardless_of_ambient_skill_state() {
+        let st = state();
+        assert!(matches!(run(Request::SkillList { cwd: None }, &st).await.as_slice(), [Response::SkillList { .. }]));
+    }
+
+    #[tokio::test]
+    async fn skill_show_and_task_exec_error_on_an_unknown_skill() {
+        // dispatch() propagates the load error via `?` (same pattern as
+        // ChatSend), so assert on dispatch()'s Result directly.
+        let st = state();
+        let name = format!("definitely-not-a-real-skill-{}", uuid::Uuid::new_v4());
+        let mut sink: Vec<u8> = Vec::new();
+        assert!(dispatch(Request::SkillShow { name: name.clone(), cwd: None }, &st, &mut sink).await.is_err());
+        assert!(dispatch(Request::TaskExec { skill: name, cwd: None }, &st, &mut sink).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn task_schedule_errors_on_an_unknown_skill() {
+        let st = state();
+        let name = format!("definitely-not-a-real-skill-{}", uuid::Uuid::new_v4());
+        let mut sink: Vec<u8> = Vec::new();
+        assert!(dispatch(Request::TaskSchedule { skill: name, interval: "daily".into() }, &st, &mut sink).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn task_unschedule_and_schedules_list() {
+        let st = state();
+        assert!(matches!(run(Request::TaskUnschedule { skill: "nope".into() }, &st).await.as_slice(), [Response::Ok { .. }]));
+        assert!(matches!(run(Request::TaskSchedules, &st).await.as_slice(), [Response::SchedulesList { .. }]));
+    }
+
+    #[tokio::test]
+    async fn runs_list_all_and_by_skill() {
+        let st = state();
+        { let db = st.db.lock().unwrap(); db::save_task_run(&db, "some-skill", "success", "ok", "t1", "t2").unwrap(); }
+        assert!(matches!(
+            run(Request::RunsList { skill: None, limit: 10 }, &st).await.as_slice(),
+            [Response::RunsList { runs }] if runs.len() == 1
+        ));
+        assert!(matches!(
+            run(Request::RunsList { skill: Some("some-skill".into()), limit: 10 }, &st).await.as_slice(),
+            [Response::RunsList { runs }] if runs.len() == 1
+        ));
+    }
+
+    #[tokio::test]
+    async fn task_create_repo_scoped_happy_then_duplicate_without_force_errors() {
+        let st = state();
+        let cwd = Some("/tmp/feat073-taskcreate-test".to_string());
+        let created = run(
+            Request::TaskCreate { name: "my-skill".into(), from_prompt: None, force: false, repo: true, cwd: cwd.clone() },
+            &st,
+        ).await;
+        assert!(matches!(created.as_slice(), [Response::SkillCreated { .. }]));
+
+        let dup = run(
+            Request::TaskCreate { name: "my-skill".into(), from_prompt: None, force: false, repo: true, cwd },
+            &st,
+        ).await;
+        assert!(matches!(dup.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn task_create_repo_scoped_requires_a_resolvable_repo() {
+        let st = state();
+        let r = run(
+            Request::TaskCreate { name: "my-skill".into(), from_prompt: None, force: false, repo: true, cwd: None },
+            &st,
+        ).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn context_show_and_set_roundtrip() {
+        let st = state();
+        let cwd = Some("/tmp/feat073-context-test".to_string());
+        assert!(matches!(
+            run(Request::ContextSet { cwd: cwd.clone(), content: "some repo context".into() }, &st).await.as_slice(),
+            [Response::Ok { .. }]
+        ));
+        match run(Request::ContextShow { cwd }, &st).await.as_slice() {
+            [Response::Context { repo_key: Some(_), content: Some(c) }] => assert_eq!(c, "some repo context"),
+            other => panic!("expected Context with content, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn context_show_without_a_cwd_has_no_key() {
+        let st = state();
+        assert!(matches!(
+            run(Request::ContextShow { cwd: None }, &st).await.as_slice(),
+            [Response::Context { repo_key: None, content: None }]
+        ));
     }
 }
