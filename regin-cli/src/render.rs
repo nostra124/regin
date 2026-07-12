@@ -17,6 +17,7 @@ use regin_core::greeting::Greeting;
 use regin_core::kpi::{KpiSummary, Objective};
 use regin_core::promotion::DerivedCheck;
 use regin_core::protocol::Response;
+use regin_core::soul::ValueEntry;
 use regin_core::types::{
     Change, Incident, Memory, Problem, ProblemHypothesis, Schedule, SkillInfo, TaskRun,
 };
@@ -463,6 +464,62 @@ pub fn render_task_result(run: &TaskRun) -> String {
     format!("\nStatus: {}\n\n{}\n", run.status, run.output)
 }
 
+// ---------------------------------------------------------------------------
+// Soul configurator + value catalog (FEAT-030)
+// ---------------------------------------------------------------------------
+
+pub fn render_soul_values_list(version: &str, values: &[ValueEntry]) -> String {
+    let mut out = format!("Value catalog (v{version}, {} entries):\n", values.len());
+    for v in values {
+        out += &format!("  {:<20}[{:<14}] {}\n", v.id, v.tradition, v.name);
+    }
+    out
+}
+
+pub fn render_soul_value_detail(v: &ValueEntry) -> String {
+    format!("{} ({})\ntradition: {}\n{}\n", v.name, v.id, v.tradition, v.description)
+}
+
+pub fn render_soul_charter(core_ids: &[String], persona_overlay: &[String], grounding: &[String]) -> String {
+    let mut out = String::new();
+    out += &format!("core charter ({}):\n", core_ids.len());
+    if core_ids.is_empty() {
+        out += "  (empty — seed it with: regin soul charter set <id>...)\n";
+    } else {
+        for id in core_ids {
+            out += &format!("  {id}\n");
+        }
+    }
+    if !persona_overlay.is_empty() {
+        out += &format!("persona overlay ({}):\n", persona_overlay.len());
+        for id in persona_overlay {
+            out += &format!("  {id}\n");
+        }
+    }
+    out += &format!("grounding — what the Soul reads ({}):\n", grounding.len());
+    for id in grounding {
+        out += &format!("  {id}\n");
+    }
+    out
+}
+
+pub fn render_soul_charter_proposal(role: &str, proposed: &[String]) -> String {
+    let mut out = format!("proposed starting values for role '{role}':\n");
+    for id in proposed {
+        out += &format!("  {id}\n");
+    }
+    out += &format!("\nreview, then confirm with: regin soul charter set {}\n", proposed.join(" "));
+    out
+}
+
+pub fn render_soul_charter_written(added: &[String]) -> String {
+    if added.is_empty() {
+        "✓ no new values (already in the core charter)\n".to_string()
+    } else {
+        format!("✓ added to the core charter: {}\n", added.join(", "))
+    }
+}
+
 pub fn render_checks(checks: &[DerivedCheck]) -> String {
     if checks.is_empty() {
         return "No derived checks yet. regin promotes stable LLM verdicts into cheap checks over time.\n".to_string();
@@ -863,6 +920,64 @@ mod tests {
         assert_eq!(fmt_secs(90), "1m");
         assert_eq!(fmt_secs(3661), "1h1m");
         assert_eq!(fmt_secs(90000), "1d1h");
+    }
+
+    #[test]
+    fn render_soul_values_list_shows_id_tradition_and_name() {
+        let values = vec![ValueEntry {
+            id: "integrity".into(),
+            name: "Integrity".into(),
+            description: "Never fabricate.".into(),
+            tradition: "agent-operational".into(),
+        }];
+        let out = render_soul_values_list("1", &values);
+        assert!(out.contains("v1"));
+        assert!(out.contains("integrity"));
+        assert!(out.contains("agent-operational"));
+        assert!(out.contains("Integrity"));
+    }
+
+    #[test]
+    fn render_soul_value_detail_includes_description() {
+        let v = ValueEntry {
+            id: "prudence".into(),
+            name: "Prudence".into(),
+            description: "Practical wisdom.".into(),
+            tradition: "cardinal".into(),
+        };
+        let out = render_soul_value_detail(&v);
+        assert!(out.contains("Prudence"));
+        assert!(out.contains("Practical wisdom."));
+    }
+
+    #[test]
+    fn render_soul_charter_shows_empty_core_hint() {
+        let out = render_soul_charter(&[], &[], &[]);
+        assert!(out.contains("seed it with"));
+    }
+
+    #[test]
+    fn render_soul_charter_lists_core_overlay_and_grounding() {
+        let core = vec!["integrity".to_string()];
+        let overlay = vec!["prudence".to_string()];
+        let grounding = vec!["integrity".to_string(), "prudence".to_string()];
+        let out = render_soul_charter(&core, &overlay, &grounding);
+        assert!(out.contains("core charter (1)"));
+        assert!(out.contains("persona overlay (1)"));
+        assert!(out.contains("grounding"));
+    }
+
+    #[test]
+    fn render_soul_charter_proposal_shows_confirm_command() {
+        let out = render_soul_charter_proposal("cfo", &["prudence".to_string(), "integrity".to_string()]);
+        assert!(out.contains("role 'cfo'"));
+        assert!(out.contains("regin soul charter set prudence integrity"));
+    }
+
+    #[test]
+    fn render_soul_charter_written_reports_added_or_nothing_new() {
+        assert!(render_soul_charter_written(&[]).contains("no new values"));
+        assert!(render_soul_charter_written(&["integrity".to_string()]).contains("integrity"));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashSet;
 use std::path::Path;
 use tracing::info;
@@ -663,7 +663,23 @@ pub fn memories_pending_embedding(conn: &Connection, batch_size: usize) -> Resul
     Ok(rows)
 }
 
+/// Category reserved for the Soul's core charter (FEAT-030 / DISC-018).
+/// Rows in this category are written only via [`crate::soul::charter_seed`]
+/// (the human-only `regin soul charter` CLI path) — never by the general
+/// memory verbs, the agent, or reflection/curation.
+pub const PRINCIPLE_CATEGORY: &str = "principle";
+
+/// The category of a memory row, if it exists.
+fn memory_category(conn: &Connection, id: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT category FROM memories WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(Into::into)
+}
+
 pub fn memory_update(conn: &Connection, id: &str, content: &str) -> Result<()> {
+    if memory_category(conn, id)?.as_deref() == Some(PRINCIPLE_CATEGORY) {
+        return Err(anyhow!("the core charter is human-editable only via `regin soul charter` — refusing to update principle memory {id}"));
+    }
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "UPDATE memories SET content = ?1, updated_at = ?2 WHERE id = ?3",
@@ -673,6 +689,9 @@ pub fn memory_update(conn: &Connection, id: &str, content: &str) -> Result<()> {
 }
 
 pub fn memory_delete(conn: &Connection, id: &str) -> Result<()> {
+    if memory_category(conn, id)?.as_deref() == Some(PRINCIPLE_CATEGORY) {
+        return Err(anyhow!("the core charter is human-editable only via `regin soul charter` — refusing to delete principle memory {id}"));
+    }
     conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -1430,6 +1449,12 @@ pub fn curator_apply_proposal(conn: &Connection, p: &CuratorProposal) -> Result<
     if category.is_empty() || content.is_empty() {
         return Ok(false);
     }
+    // FEAT-030: the core charter is human-editable only via `regin soul
+    // charter` — the curator/reflection pipeline never touches it, whether
+    // proposing a new principle memory or mutating an existing one.
+    if category == PRINCIPLE_CATEGORY {
+        return Ok(false);
+    }
     match p.action {
         CuratorAction::Add => {
             let m = memory_save_reflection_detailed(conn, category, content, p.topic.as_deref(), &p.tags)?;
@@ -1438,6 +1463,9 @@ pub fn curator_apply_proposal(conn: &Connection, p: &CuratorProposal) -> Result<
         }
         CuratorAction::Update => {
             if let Some(ref target_id) = p.target_id {
+                if memory_category(conn, target_id)?.as_deref() == Some(PRINCIPLE_CATEGORY) {
+                    return Ok(false);
+                }
                 conn.execute(
                     "UPDATE memories SET content = ?1, updated_at = ?2, category = ?3 WHERE id = ?4",
                     params![content, &chrono::Utc::now().to_rfc3339(), category, target_id],
@@ -1452,6 +1480,9 @@ pub fn curator_apply_proposal(conn: &Connection, p: &CuratorProposal) -> Result<
         }
         CuratorAction::Delete => {
             if let Some(ref target_id) = p.target_id {
+                if memory_category(conn, target_id)?.as_deref() == Some(PRINCIPLE_CATEGORY) {
+                    return Ok(false);
+                }
                 let n = conn.execute("DELETE FROM memories WHERE id = ?1", params![target_id])?;
                 return Ok(n > 0);
             }
@@ -2490,5 +2521,83 @@ mod tests {
             )
             .unwrap();
         assert_eq!(after, 1, "hybrid search should reinforce retrieved hits");
+    }
+
+    // --- FEAT-030: the core charter is immune to general/agent/reflection writes ---
+
+    fn seed_principle(conn: &Connection, content: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (id, category, content, tier, source, trust_score, pinned, created_at, updated_at)
+             VALUES (?1, 'principle', ?2, 'long', 'human', 1.0, 1, ?3, ?3)",
+            params![&id, content, &now],
+        ).unwrap();
+        id
+    }
+
+    #[test]
+    fn memory_update_refuses_a_principle_row() {
+        let conn = test_conn();
+        let id = seed_principle(&conn, "integrity: never fabricate");
+        assert!(memory_update(&conn, &id, "rewritten").is_err());
+        let content: String = conn.query_row("SELECT content FROM memories WHERE id = ?1", params![&id], |r| r.get(0)).unwrap();
+        assert_eq!(content, "integrity: never fabricate", "unchanged");
+    }
+
+    #[test]
+    fn memory_delete_refuses_a_principle_row() {
+        let conn = test_conn();
+        let id = seed_principle(&conn, "integrity: never fabricate");
+        assert!(memory_delete(&conn, &id).is_err());
+        assert!(memory_category(&conn, &id).unwrap().is_some(), "still present");
+    }
+
+    #[test]
+    fn memory_update_delete_still_work_on_ordinary_memories() {
+        let conn = test_conn();
+        let m = memory_save(&conn, "fact", "runs Ubuntu").unwrap();
+        assert!(memory_update(&conn, &m.id, "runs Debian").is_ok());
+        assert!(memory_delete(&conn, &m.id).is_ok());
+    }
+
+    #[test]
+    fn curator_cannot_add_update_or_delete_principle_memories() {
+        let conn = test_conn();
+        let id = seed_principle(&conn, "integrity: never fabricate");
+
+        // Add attempt under the reserved category is silently refused (Ok(false)).
+        let add = CuratorProposal {
+            action: CuratorAction::Add,
+            target_id: None,
+            category: "principle".into(),
+            content: "self-appointed value: convenience".into(),
+            topic: None,
+            tags: vec![],
+        };
+        assert!(!curator_apply_proposal(&conn, &add).unwrap());
+        assert_eq!(memory_list(&conn, Some("principle")).unwrap().len(), 1, "no new principle row");
+
+        // Update/Delete against the existing principle row are refused too.
+        let update = CuratorProposal {
+            action: CuratorAction::Update,
+            target_id: Some(id.clone()),
+            category: "principle".into(),
+            content: "rewritten by the curator".into(),
+            topic: None,
+            tags: vec![],
+        };
+        assert!(!curator_apply_proposal(&conn, &update).unwrap());
+
+        let delete = CuratorProposal {
+            action: CuratorAction::Delete,
+            target_id: Some(id.clone()),
+            category: "principle".into(),
+            content: "n/a".into(),
+            topic: None,
+            tags: vec![],
+        };
+        assert!(!curator_apply_proposal(&conn, &delete).unwrap());
+        assert!(memory_category(&conn, &id).unwrap().is_some(), "principle row survives curation");
     }
 }

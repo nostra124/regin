@@ -536,3 +536,47 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-030 (Soul configurator + value catalog), per the milestone's
   suggested order — lands before FEAT-029 so the real Soul gate has a value
   catalog to vote from when it's built.
+
+### 2026-07-12 — FEAT-030: Soul configurator + value catalog (0.6.0 decision plane)
+- **FEAT-030 implemented and moved to done/.** New `regin-core/assets/values.toml`
+  (checked-in, versioned, `include_str!`-embedded) — ~37 entries across cardinal/
+  Stoic, theological, Confucian, Aristotelian, chivalric, Enlightenment, Schwartz,
+  and agent-operational traditions, each with `id`/`name`/`description`/`tradition`.
+  New `regin-core/src/soul.rs`: `catalog()`/`find()` (parsed once via `OnceLock`),
+  `role_default_values()` (built-in map for cfo/dev-lead/operator/security/foreman/
+  auditor + a generic agent-operational-virtue fallback for unknown roles — the
+  ticket's "LLM-assisted suggestion for novel roles" was scoped out: the acceptance
+  criteria only require a *known* Persona's derive to work, and the deterministic
+  fallback is instant/testable vs. a network call for marginal benefit),
+  `grounding_union()` (core ∪ overlay, deduplicated, order-stable), and the
+  privileged charter read/write path (`charter_seed`/`charter_core_ids`/
+  `charter_remove`).
+- **Core-charter immutability (acceptance criterion 4) — the trickiest part.**
+  `identity_db::memory_update`/`memory_delete`/`curator_apply_proposal` had *zero*
+  existing protection for `pinned` or any category — a real latent gap. Added a
+  `PRINCIPLE_CATEGORY` guard: those three functions now refuse (Update/Delete →
+  `Err`; the curator's Add/Update/Delete → silently `Ok(false)`, consistent with its
+  existing "malformed proposal" convention) whenever the target row's category is
+  `"principle"`. `soul::charter_seed`/`charter_remove` are the *only* privileged
+  bypass — reachable solely from `regin soul charter`. No schema migration: the
+  value id is encoded as a `"{id}: ..."` prefix in the memory's `content` (the
+  `memories` table has no dedicated column for it, and adding one for a feature
+  this narrow wasn't worth a migration).
+- **Persona** gains two new optional, backward-compatible fields:
+  `values: Vec<String>` (the per-role overlay this ticket needed) — `default_mode`
+  was already added by FEAT-028.
+- **Full protocol + CLI wiring** (not scoped out, unlike FEAT-028's deliberate
+  pipeline): `Request`/`Response` variants (`SoulValuesList/Show`,
+  `SoulCharterShow/Derive/Confirm/Remove`), `regind` dispatch arms (careful to
+  scope every `identity_db` `MutexGuard` in a block *before* the `send(...).await`
+  — the exact bug class flagged in FEAT-024's notes; caught it via a real compile
+  error, "future cannot be sent between threads safely", not by memory), and a full
+  `regin soul values list|show` / `regin soul charter show|derive|set|remove` CLI
+  surface built on FEAT-070's `Transport`/render pattern.
+- 34 new tests total: regin-core +17 (soul.rs catalog/derivation/union/charter
+  round-trip, identity_db principle-guard enforcement, persona `values` overlay);
+  regin-cli +8 (render fns + `FakeTransport`-driven `cmd_soul_*`, `Cli::try_parse_from`
+  coverage for the whole `regin soul` tree). Full workspace build/test/clippy green.
+- Next: FEAT-029 (the Soul gate itself) — now has both FEAT-028's pipeline
+  (`SoulGate` trait, `PassthroughSoulGate` stub to replace) and FEAT-030's value
+  catalog + grounding union to vote from.

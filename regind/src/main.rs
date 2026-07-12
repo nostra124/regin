@@ -10,7 +10,7 @@ use regin_core::{
     promotion,
     protocol::{Request, Response},
     push,
-    reflect, repo, schedule, skills,
+    reflect, repo, schedule, skills, soul,
     tools,
     types::ChatMessage,
 };
@@ -815,6 +815,54 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
                 (report, opened)
             };
             send(w, &Response::AuditResult { findings: report.findings, trimmed: report.trimmed, opened }).await?;
+        }
+
+        // --- Soul configurator + value catalog (FEAT-030) ---
+        Request::SoulValuesList => {
+            let cat = soul::catalog();
+            send(w, &Response::SoulValues { version: cat.version.clone(), values: cat.values.clone() }).await?;
+        }
+        Request::SoulValuesShow { id } => match soul::find(&id) {
+            Some(value) => send(w, &Response::SoulValueDetail { value: value.clone() }).await?,
+            None => send(w, &Response::Error { message: format!("unknown value id {id:?} — see `regin soul values list`") }).await?,
+        },
+        Request::SoulCharterShow => {
+            let core_ids = { let idb = state.identity_db.lock().expect("DB poisoned"); soul::charter_core_ids(&idb)? };
+            let persona = regin_core::persona::Persona::from_env().unwrap_or(None);
+            let persona_overlay = persona.map(|p| p.values).unwrap_or_default();
+            let grounding = soul::grounding_union(&core_ids, &persona_overlay);
+            send(w, &Response::SoulCharter { core_ids, persona_overlay, grounding }).await?;
+        }
+        Request::SoulCharterDerive => {
+            let persona = regin_core::persona::Persona::from_env().unwrap_or(None);
+            let role = persona.map(|p| p.role).unwrap_or_else(|| "operator".to_string());
+            let proposed = soul::role_default_values(&role).into_iter().map(str::to_string).collect();
+            send(w, &Response::SoulCharterProposal { role, proposed }).await?;
+        }
+        Request::SoulCharterConfirm { value_ids } => {
+            let ids: Vec<&str> = value_ids.iter().map(String::as_str).collect();
+            let result = {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                soul::charter_seed(&idb, &ids)
+            };
+            match result {
+                Ok(created) => {
+                    let added = created.into_iter().filter_map(|m| m.content.split_once(':').map(|(id, _)| id.to_string())).collect();
+                    send(w, &Response::SoulCharterWritten { added }).await?;
+                }
+                Err(e) => send(w, &Response::Error { message: e.to_string() }).await?,
+            }
+        }
+        Request::SoulCharterRemove { value_id } => {
+            let removed = {
+                let idb = state.identity_db.lock().expect("DB poisoned");
+                soul::charter_remove(&idb, &value_id)?
+            };
+            if removed {
+                send(w, &Response::Ok { message: format!("removed {value_id} from the core charter") }).await?;
+            } else {
+                send(w, &Response::Error { message: format!("{value_id} is not in the core charter") }).await?;
+            }
         }
 
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
