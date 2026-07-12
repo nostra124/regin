@@ -47,7 +47,7 @@ Modes: **act** = `Mind → Body` (fast default); **deliberate** = `Mind ⇄ Soul
 | ID | Title | Status |
 |----|-------|--------|
 | FEAT-028 | Dual-mode agent loop (act vs deliberate) | done |
-| FEAT-029 | The Soul gate (values-grounded vote + veto) | open |
+| FEAT-029 | The Soul gate (values-grounded vote + veto) | done |
 | FEAT-030 | Soul configurator + value catalog | done |
 | FEAT-031 | Principle derivation & ratification | open |
 | FEAT-032 | Deliberation capture | open |
