@@ -1,3 +1,6 @@
+mod render;
+mod transport;
+
 use std::io::{self, BufRead, Write};
 use std::process::Command;
 
@@ -5,12 +8,12 @@ use anyhow::{anyhow, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use crossterm::style::{Color, ResetColor, SetForegroundColor};
 use regin_core::{
-    config, db,
+    config,
     protocol::{Request, Response},
     types::ChatMessage,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use render::*;
+use transport::{install_regind_service, SocketTransport, Transport};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -666,93 +669,94 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let t = SocketTransport;
 
     match cli.command {
         Commands::GenMan { dir } => cmd_gen_man(&dir),
-        Commands::Chat => cmd_chat().await,
+        Commands::Chat => cmd_chat(&t).await,
         Commands::Task { action } => match action {
-            TaskAction::List => cmd_task_list().await,
-            TaskAction::Show { name } => cmd_task_show(&name).await,
-            TaskAction::Exec { name, schedule } => cmd_task_exec(&name, schedule.as_deref()).await,
-            TaskAction::Unschedule { name } => cmd_task_unschedule(&name).await,
-            TaskAction::Schedules => cmd_task_schedules().await,
+            TaskAction::List => cmd_task_list(&t).await,
+            TaskAction::Show { name } => cmd_task_show(&t, &name).await,
+            TaskAction::Exec { name, schedule } => cmd_task_exec(&t, &name, schedule.as_deref()).await,
+            TaskAction::Unschedule { name } => cmd_task_unschedule(&t, &name).await,
+            TaskAction::Schedules => cmd_task_schedules(&t).await,
             TaskAction::Create { name, from_prompt, force, edit, repo } => {
-                cmd_task_create(&name, from_prompt, force, edit, repo).await
+                cmd_task_create(&t, &name, from_prompt, force, edit, repo).await
             }
         },
-        Commands::Runs { skill, limit } => cmd_runs(skill.as_deref(), limit).await,
+        Commands::Runs { skill, limit } => cmd_runs(&t, skill.as_deref(), limit).await,
         Commands::Config { action } => match action {
-            ConfigAction::List => cmd_config_list().await,
-            ConfigAction::Get { key } => cmd_config_get(&key).await,
-            ConfigAction::Set { key, value } => cmd_config_set(&key, &value).await,
+            ConfigAction::List => cmd_config_list(&t).await,
+            ConfigAction::Get { key } => cmd_config_get(&t, &key).await,
+            ConfigAction::Set { key, value } => cmd_config_set(&t, &key, &value).await,
         },
         Commands::Memory { action } => match action {
-            MemoryAction::List { category } => cmd_memory_list(category.as_deref()).await,
-            MemoryAction::Search { query } => cmd_memory_search(&query).await,
-            MemoryAction::Save { category, content } => cmd_memory_save(&category, &content).await,
-            MemoryAction::Update { id, content } => cmd_memory_update(&id, &content).await,
-            MemoryAction::Delete { id } => cmd_memory_delete(&id).await,
-            MemoryAction::Reflect => cmd_memory_reflect().await,
-            MemoryAction::Export { path } => cmd_memory_export(&path).await,
-            MemoryAction::Import { path, merge } => cmd_memory_import(&path, merge).await,
-            MemoryAction::Info => cmd_memory_info().await,
+            MemoryAction::List { category } => cmd_memory_list(&t, category.as_deref()).await,
+            MemoryAction::Search { query } => cmd_memory_search(&t, &query).await,
+            MemoryAction::Save { category, content } => cmd_memory_save(&t, &category, &content).await,
+            MemoryAction::Update { id, content } => cmd_memory_update(&t, &id, &content).await,
+            MemoryAction::Delete { id } => cmd_memory_delete(&t, &id).await,
+            MemoryAction::Reflect => cmd_memory_reflect(&t).await,
+            MemoryAction::Export { path } => cmd_memory_export(&t, &path).await,
+            MemoryAction::Import { path, merge } => cmd_memory_import(&t, &path, merge).await,
+            MemoryAction::Info => cmd_memory_info(&t).await,
         },
         Commands::Incident { action } => match action {
             IncidentAction::Open { title, severity, desc } => {
-                cmd_ok(Request::IncidentOpen { title, description: desc, severity }).await
+                cmd_ok(&t, Request::IncidentOpen { title, description: desc, severity }).await
             }
-            IncidentAction::List { status } => cmd_incidents(Request::IncidentList { status }).await,
-            IncidentAction::Show { id } => cmd_incidents(Request::IncidentShow { id }).await,
-            IncidentAction::Update { id, status } => cmd_ok(Request::IncidentUpdate { id, status }).await,
-            IncidentAction::Resolve { id, resolution } => cmd_ok(Request::IncidentResolve { id, resolution }).await,
-            IncidentAction::Block { id, workaround } => cmd_ok(Request::IncidentBlock { id, workaround }).await,
-            IncidentAction::Close { id } => cmd_ok(Request::IncidentClose { id }).await,
+            IncidentAction::List { status } => cmd_incidents(&t, Request::IncidentList { status }).await,
+            IncidentAction::Show { id } => cmd_incidents(&t, Request::IncidentShow { id }).await,
+            IncidentAction::Update { id, status } => cmd_ok(&t, Request::IncidentUpdate { id, status }).await,
+            IncidentAction::Resolve { id, resolution } => cmd_ok(&t, Request::IncidentResolve { id, resolution }).await,
+            IncidentAction::Block { id, workaround } => cmd_ok(&t, Request::IncidentBlock { id, workaround }).await,
+            IncidentAction::Close { id } => cmd_ok(&t, Request::IncidentClose { id }).await,
         },
         Commands::Change { action } => match action {
             ChangeAction::Record { title, desc, incident, problem, before, after } => {
-                cmd_ok(Request::ChangeRecord { title, description: desc, incident_id: incident, problem_id: problem, before, after }).await
+                cmd_ok(&t, Request::ChangeRecord { title, description: desc, incident_id: incident, problem_id: problem, before, after }).await
             }
-            ChangeAction::List => cmd_changes(Request::ChangeList).await,
-            ChangeAction::Show { id } => cmd_changes(Request::ChangeShow { id }).await,
-            ChangeAction::RequestApproval { id } => cmd_ok(Request::ChangeRequestApproval { id }).await,
-            ChangeAction::Approve { id, by } => cmd_ok(Request::ChangeApprove { id, approved_by: by }).await,
-            ChangeAction::Apply { id } => cmd_ok(Request::ChangeApply { id }).await,
-            ChangeAction::Close { id } => cmd_ok(Request::ChangeClose { id }).await,
+            ChangeAction::List => cmd_changes(&t, Request::ChangeList).await,
+            ChangeAction::Show { id } => cmd_changes(&t, Request::ChangeShow { id }).await,
+            ChangeAction::RequestApproval { id } => cmd_ok(&t, Request::ChangeRequestApproval { id }).await,
+            ChangeAction::Approve { id, by } => cmd_ok(&t, Request::ChangeApprove { id, approved_by: by }).await,
+            ChangeAction::Apply { id } => cmd_ok(&t, Request::ChangeApply { id }).await,
+            ChangeAction::Close { id } => cmd_ok(&t, Request::ChangeClose { id }).await,
         },
         Commands::Problem { action } => match action {
-            ProblemAction::Open { title, desc } => cmd_ok(Request::ProblemOpen { title, description: desc }).await,
-            ProblemAction::List { status } => cmd_problems(Request::ProblemList { status }).await,
-            ProblemAction::Show { id } => cmd_problems(Request::ProblemShow { id }).await,
-            ProblemAction::Link { problem_id, incident_id } => cmd_ok(Request::ProblemLink { problem_id, incident_id }).await,
-            ProblemAction::KnownError { id, root_cause } => cmd_ok(Request::ProblemKnownError { id, root_cause }).await,
-            ProblemAction::HypothesisAdd { problem_id, text } => cmd_ok(Request::ProblemHypothesisAdd { problem_id, text }).await,
-            ProblemAction::HypothesisList { problem_id } => cmd_hypotheses(Request::ProblemHypothesisList { problem_id }).await,
-            ProblemAction::HypothesisStatus { id, status } => cmd_ok(Request::ProblemHypothesisStatus { id, status }).await,
-            ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&id, &kind, to).await,
-            ProblemAction::Close { id } => cmd_ok(Request::ProblemClose { id }).await,
+            ProblemAction::Open { title, desc } => cmd_ok(&t, Request::ProblemOpen { title, description: desc }).await,
+            ProblemAction::List { status } => cmd_problems(&t, Request::ProblemList { status }).await,
+            ProblemAction::Show { id } => cmd_problems(&t, Request::ProblemShow { id }).await,
+            ProblemAction::Link { problem_id, incident_id } => cmd_ok(&t, Request::ProblemLink { problem_id, incident_id }).await,
+            ProblemAction::KnownError { id, root_cause } => cmd_ok(&t, Request::ProblemKnownError { id, root_cause }).await,
+            ProblemAction::HypothesisAdd { problem_id, text } => cmd_ok(&t, Request::ProblemHypothesisAdd { problem_id, text }).await,
+            ProblemAction::HypothesisList { problem_id } => cmd_hypotheses(&t, Request::ProblemHypothesisList { problem_id }).await,
+            ProblemAction::HypothesisStatus { id, status } => cmd_ok(&t, Request::ProblemHypothesisStatus { id, status }).await,
+            ProblemAction::Escalate { id, kind, to } => cmd_problem_escalate(&t, &id, &kind, to).await,
+            ProblemAction::Close { id } => cmd_ok(&t, Request::ProblemClose { id }).await,
         },
         Commands::Desired { action } => match action {
-            DesiredAction::List => cmd_desired_list().await,
-            DesiredAction::Show { domain } => cmd_desired_show(&domain).await,
-            DesiredAction::Check => cmd_ok(Request::DesiredCheck).await,
+            DesiredAction::List => cmd_desired_list(&t).await,
+            DesiredAction::Show { domain } => cmd_desired_show(&t, &domain).await,
+            DesiredAction::Check => cmd_ok(&t, Request::DesiredCheck).await,
         },
-        Commands::Metrics { days } => cmd_metrics(days).await,
+        Commands::Metrics { days } => cmd_metrics(&t, days).await,
         Commands::Filters { action } => match action {
-            FiltersAction::List => cmd_filters_list().await,
-            FiltersAction::Test { domain, text } => cmd_ok(Request::FiltersTest { domain, text }).await,
+            FiltersAction::List => cmd_filters_list(&t).await,
+            FiltersAction::Test { domain, text } => cmd_ok(&t, Request::FiltersTest { domain, text }).await,
         },
-        Commands::Mode => cmd_mode().await,
-        Commands::Posture => cmd_posture().await,
-        Commands::Greeting => cmd_greeting().await,
+        Commands::Mode => cmd_mode(&t).await,
+        Commands::Posture => cmd_posture(&t).await,
+        Commands::Greeting => cmd_greeting(&t).await,
         Commands::Push { action } => match action {
-            PushAction::Test => cmd_ok(Request::PushTest).await,
+            PushAction::Test => cmd_ok(&t, Request::PushTest).await,
         },
-        Commands::Checks => cmd_checks().await,
-        Commands::Audit => cmd_audit().await,
+        Commands::Checks => cmd_checks(&t).await,
+        Commands::Audit => cmd_audit(&t).await,
         Commands::Context { action } => match action {
-            ContextAction::Show => cmd_context_show().await,
+            ContextAction::Show => cmd_context_show(&t).await,
             ContextAction::Set { content } => {
-                cmd_ok(Request::ContextSet { cwd: Some(cwd_string()), content }).await
+                cmd_ok(&t, Request::ContextSet { cwd: Some(cwd_string()), content }).await
             }
         },
         Commands::Bus { action } => match action {
@@ -761,18 +765,18 @@ async fn main() -> Result<()> {
         },
         Commands::Persona => cmd_persona(),
         Commands::Meeting { action } => match action {
-            MeetingAction::Chair { name, agenda, to } => cmd_meeting_chair(&name, agenda, to).await,
+            MeetingAction::Chair { name, agenda, to } => cmd_meeting_chair(&t, &name, agenda, to).await,
         },
-        Commands::Plan { cadence, needs, emit, owner, cao } => cmd_plan(&cadence, needs, emit, owner, cao).await,
+        Commands::Plan { cadence, needs, emit, owner, cao } => cmd_plan(&t, &cadence, needs, emit, owner, cao).await,
         Commands::Foreman { action } => match action {
-            ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(dry_run).await,
+            ForemanAction::RunOnce { dry_run } => cmd_foreman_run_once(&t, dry_run).await,
         },
         Commands::Skill { action } => match action {
             SkillAction::Install { dir } => cmd_skill_install(&dir),
             SkillAction::Packages => cmd_skill_packages(),
         },
         Commands::Deputy { action } => cmd_deputy(action),
-        Commands::Ping => cmd_ping().await,
+        Commands::Ping => cmd_ping(&t).await,
     }
 }
 
@@ -803,7 +807,7 @@ fn cmd_bus_inbox(peek: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
+async fn cmd_foreman_run_once(t: &impl Transport, dry_run: bool) -> Result<()> {
     use regin_core::bus::{BusClient, KIND_STRUCTURED};
     use regin_core::foreman::{handover_body, handover_recipient, plan_handover, CaveTask};
     use regin_core::worker;
@@ -834,7 +838,7 @@ async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
         println!("handover [{}] outcome={} -> {to}", handover.ref_id.as_deref().unwrap_or("-"), handover.outcome);
         // discipline boundary: a broken in-cave step becomes an ITIL incident.
         if let Some(draft) = incident {
-            match rpc(&Request::IncidentOpen { title: draft.title, description: draft.description, severity: draft.severity }).await {
+            match t.request(&Request::IncidentOpen { title: draft.title, description: draft.description, severity: draft.severity }).await {
                 Ok(_) => println!("  opened incident for the failed worker run"),
                 Err(e) => eprintln!("  (could not open incident — daemon down? {e})"),
             }
@@ -844,16 +848,15 @@ async fn cmd_foreman_run_once(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_problem_escalate(id: &str, kind: &str, to: Option<String>) -> Result<()> {
+async fn cmd_problem_escalate(t: &impl Transport, id: &str, kind: &str, to: Option<String>) -> Result<()> {
     use regin_core::bus::{BusClient, KIND_STRUCTURED};
     use regin_core::escalation::{body, build, EscalationKind};
 
     let ekind = EscalationKind::parse(kind)?;
     // fetch the problem so the escalation carries its title + (root-cause) description
-    let problem = match rpc(&Request::ProblemShow { id: id.to_string() }).await? {
+    let problem = match t.request(&Request::ProblemShow { id: id.to_string() }).await? {
         Response::Problems { problems } => problems.into_iter().next()
             .ok_or_else(|| anyhow!("no problem {id}"))?,
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("unexpected: {other:?}")),
     };
     let description = problem.root_cause.clone().unwrap_or_else(|| problem.description.clone());
@@ -870,7 +873,7 @@ async fn cmd_problem_escalate(id: &str, kind: &str, to: Option<String>) -> Resul
         "Escalated problem {} to dvalin as {} (ref {}) -> {target}",
         esc.problem_id, esc.ticket, esc.ref_id
     );
-    let _ = rpc(&Request::MemorySave { category: "escalation".into(), content: note.clone() }).await;
+    let _ = t.request(&Request::MemorySave { category: "escalation".into(), content: note.clone() }).await;
     println!("regin: {note}");
     println!("(dvalin will reply with the ticket id, correlated by {})", esc.ref_id);
     Ok(())
@@ -934,14 +937,14 @@ fn cmd_skill_packages() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_meeting_chair(name: &str, agenda: Vec<String>, to: Option<String>) -> Result<()> {
+async fn cmd_meeting_chair(t: &impl Transport, name: &str, agenda: Vec<String>, to: Option<String>) -> Result<()> {
     use regin_core::bus::{BusClient, KIND_STRUCTURED};
     use regin_core::chair::{collect_reports, compile, minutes_message_body};
 
     let client = BusClient::from_env()?;
     let reports = collect_reports(&client.inbox(true)?);
     // pull the chair's own open ITIL count (best-effort — discipline feed)
-    let open_itil = match rpc(&Request::IncidentList { status: Some("open".into()) }).await {
+    let open_itil = match t.request(&Request::IncidentList { status: Some("open".into()) }).await {
         Ok(Response::Incidents { incidents }) => incidents.len(),
         _ => 0,
     };
@@ -960,7 +963,7 @@ async fn cmd_meeting_chair(name: &str, agenda: Vec<String>, to: Option<String>) 
     Ok(())
 }
 
-async fn cmd_plan(cadence: &str, needs: Vec<String>, emit: bool, owner: Option<String>, cao: Option<String>) -> Result<()> {
+async fn cmd_plan(t: &impl Transport, cadence: &str, needs: Vec<String>, emit: bool, owner: Option<String>, cao: Option<String>) -> Result<()> {
     use regin_core::bus::{BusClient, KIND_STRUCTURED};
     use regin_core::planning::{build_plan, capability_gap_body, cadence_scope, priority_ask_body};
 
@@ -968,7 +971,7 @@ async fn cmd_plan(cadence: &str, needs: Vec<String>, emit: bool, owner: Option<S
         return Err(anyhow!("unknown cadence {cadence:?} (use weekly|monthly|yearly)"));
     }
     // gather decentralized signals (best-effort — work without the daemon too)
-    let schedules: Vec<String> = match rpc(&Request::TaskSchedules).await {
+    let schedules: Vec<String> = match t.request(&Request::TaskSchedules).await {
         Ok(Response::SchedulesList { schedules }) => schedules.into_iter().map(|s| s.skill).collect(),
         _ => Vec::new(),
     };
@@ -979,8 +982,8 @@ async fn cmd_plan(cadence: &str, needs: Vec<String>, emit: bool, owner: Option<S
             _ => 0,
         }
     };
-    let open_incidents = count(rpc(&Request::IncidentList { status: Some("open".into()) }).await);
-    let open_problems = count(rpc(&Request::ProblemList { status: Some("open".into()) }).await);
+    let open_incidents = count(t.request(&Request::IncidentList { status: Some("open".into()) }).await);
+    let open_problems = count(t.request(&Request::ProblemList { status: Some("open".into()) }).await);
     let available = regin_core::config::user_skills_dir().ok()
         .map(|d| regin_core::skillpkg::installed_packages(&d)).unwrap_or_default();
 
@@ -1026,146 +1029,7 @@ fn cmd_persona() -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Daemon auto-start
-// ---------------------------------------------------------------------------
-
-async fn ensure_daemon() -> Result<()> {
-    let sock = config::socket_path()?;
-    if UnixStream::connect(&sock).await.is_ok() {
-        return Ok(());
-    }
-
-    // BUG-001: prefer registering the persistent systemd *user* service so regind
-    // survives logout/reboot, instead of a loose transient process. Honour an
-    // opt-out (daemon.auto_register = false) and fall back to a transient spawn
-    // when systemd-user is unavailable (e.g. minimal containers).
-    let auto_register = read_local_setting("daemon.auto_register")
-        .map(|v| v != "false")
-        .unwrap_or(true);
-
-    if auto_register && systemd_user_available() {
-        eprintln!("Registering regind as a user service...");
-        if install_regind_service().is_ok() {
-            let _ = set_local_setting("daemon.enabled", "true");
-            for _ in 0..50 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                if UnixStream::connect(&sock).await.is_ok() {
-                    return Ok(());
-                }
-            }
-        }
-        // fall through to a transient spawn if the service did not come up
-    }
-
-    eprintln!("Starting regind...");
-    let regind = regind_bin();
-    if regind.exists() {
-        let _ = Command::new(&regind).spawn();
-    } else {
-        let _ = Command::new("regind").spawn();
-    }
-    for _ in 0..30 {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        if UnixStream::connect(&sock).await.is_ok() {
-            return Ok(());
-        }
-    }
-    Err(anyhow!("Failed to start regind. Run it manually or check logs."))
-}
-
-/// Path to the bundled `regind` binary next to this executable.
-fn regind_bin() -> std::path::PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("regind")))
-        .unwrap_or_else(|| "regind".into())
-}
-
-/// Whether a systemd *user* manager is reachable (so we can install a service).
-fn systemd_user_available() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "show-environment"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Read a setting directly from the SQLite store (used before the daemon is up).
-fn read_local_setting(key: &str) -> Option<String> {
-    let path = config::db_path().ok()?;
-    let conn = db::init_db(&path).ok()?;
-    db::setting_get(&conn, key).ok()
-}
-
-/// Write a setting directly to the SQLite store (used before the daemon is up).
-fn set_local_setting(key: &str, value: &str) -> Result<()> {
-    let path = config::db_path()?;
-    let conn = db::init_db(&path)?;
-    db::setting_set(&conn, key, value)?;
-    Ok(())
-}
-
-/// Install + enable the regind systemd user service with lingering, so it
-/// survives logout and starts at boot.
-fn install_regind_service() -> Result<()> {
-    let unit_dir = config::user_systemd_dir()?;
-    let unit_path = config::regind_service_path()?;
-    let regind = regind_bin();
-    let regind_str = if regind.exists() {
-        regind.to_string_lossy().to_string()
-    } else {
-        which_cmd("regind").unwrap_or_else(|| "/usr/bin/regind".into())
-    };
-    std::fs::create_dir_all(&unit_dir)?;
-    std::fs::write(&unit_path, config::regind_service_unit(&regind_str))?;
-    let _ = Command::new("loginctl").args(["enable-linger"]).status();
-    let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).status();
-    let _ = Command::new("systemctl").args(["--user", "enable", "--now", "regind"]).status();
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Socket helpers
-// ---------------------------------------------------------------------------
-
-async fn connect_daemon() -> Result<(
-    tokio::io::WriteHalf<UnixStream>,
-    BufReader<tokio::io::ReadHalf<UnixStream>>,
-)> {
-    ensure_daemon().await?;
-    let sock = config::socket_path()?;
-    let stream = UnixStream::connect(&sock).await
-        .with_context(|| format!("Cannot connect to regind at {}", sock.display()))?;
-    let (r, w) = tokio::io::split(stream);
-    Ok((w, BufReader::new(r)))
-}
-
-async fn send_req(w: &mut tokio::io::WriteHalf<UnixStream>, req: &Request) -> Result<()> {
-    let mut line = serde_json::to_string(req)?;
-    line.push('\n');
-    w.write_all(line.as_bytes()).await?;
-    Ok(())
-}
-
-async fn read_resp(r: &mut BufReader<tokio::io::ReadHalf<UnixStream>>) -> Result<Response> {
-    let mut line = String::new();
-    let n = r.read_line(&mut line).await?;
-    if n == 0 { return Err(anyhow!("Connection closed")); }
-    Ok(serde_json::from_str(&line)?)
-}
-
-async fn rpc(req: &Request) -> Result<Response> {
-    let (mut w, mut r) = connect_daemon().await?;
-    send_req(&mut w, req).await?;
-    let resp = read_resp(&mut r).await?;
-    if let Response::Error { ref message } = resp {
-        return Err(anyhow!("{message}"));
-    }
-    Ok(resp)
-}
+// Daemon auto-start + socket plumbing lives in `transport.rs` (FEAT-070).
 
 fn cwd_string() -> String {
     std::env::current_dir().unwrap_or_default().to_string_lossy().to_string()
@@ -1187,63 +1051,36 @@ fn println_color(text: &str, color: Color) {
     println!();
 }
 
-/// Handle streamed responses (text chunks + tool activity) until StreamDone.
-/// Returns (final_text, conversation_id).
-async fn consume_stream(
-    r: &mut BufReader<tokio::io::ReadHalf<UnixStream>>,
-) -> Result<(String, String)> {
-    let mut full = String::new();
-    let mut conv_id = String::new();
-
-    loop {
-        let resp = read_resp(r).await?;
-        match resp {
-            Response::StreamChunk { token } => {
-                print_color(&token, Color::Green);
-                io::stdout().flush()?;
-                full.push_str(&token);
-            }
-            Response::ToolCallEvent { name, arguments } => {
-                let args_preview: String = arguments.chars().take(120).collect();
-                println!();
-                print_color(&format!("▶ {name}"), Color::Magenta);
-                println_color(&format!(" {args_preview}"), Color::DarkGrey);
-            }
-            Response::ToolResultEvent { name, success, output } => {
-                let icon = if success { "✓" } else { "✗" };
-                let color = if success { Color::Green } else { Color::Red };
-                print_color(&format!("  {icon} {name}"), color);
-                // Show first few lines of output
-                let preview: String = output.lines().take(5).collect::<Vec<_>>().join("\n    ");
-                if !preview.is_empty() {
-                    println_color(&format!("\n    {preview}"), Color::DarkGrey);
-                } else {
-                    println!();
-                }
-            }
-            Response::StreamDone { conversation_id } => {
-                conv_id = conversation_id;
-                break;
-            }
-            Response::Error { message } => {
-                println_color(&format!("\n[error: {message}]"), Color::Red);
-                break;
-            }
-            _ => break,
+/// Print one chat-stream event live (colors included) and fold it into
+/// (full, conv_id) via the pure `apply_chat_event`.
+fn print_chat_event(resp: &Response, full: &mut String, conv_id: &mut String) {
+    match resp {
+        Response::StreamChunk { token } => {
+            print_color(token, Color::Green);
+            let _ = io::stdout().flush();
         }
+        Response::ToolCallEvent { name, arguments } => {
+            println!();
+            println_color(&render_tool_call(name, arguments), Color::Magenta);
+        }
+        Response::ToolResultEvent { name, success, output } => {
+            let color = if *success { Color::Green } else { Color::Red };
+            println_color(&render_tool_result(name, *success, output, 5), color);
+        }
+        Response::Error { message } => {
+            println_color(&format!("\n[error: {message}]"), Color::Red);
+        }
+        _ => {}
     }
-    Ok((full, conv_id))
+    apply_chat_event(resp, full, conv_id);
 }
 
 // ---------------------------------------------------------------------------
 // Commands
 // ---------------------------------------------------------------------------
 
-async fn cmd_chat() -> Result<()> {
-    let (mut w, mut r) = connect_daemon().await?;
-
-    send_req(&mut w, &Request::ChatNew).await?;
-    let mut conv_id = match read_resp(&mut r).await? {
+async fn cmd_chat(t: &impl Transport) -> Result<()> {
+    let mut conv_id = match t.request(&Request::ChatNew).await? {
         Response::ChatNew { conversation_id } => conversation_id,
         resp => return Err(anyhow!("Unexpected: {resp:?}")),
     };
@@ -1251,8 +1088,8 @@ async fn cmd_chat() -> Result<()> {
     println_color("regin — Linux server administration agent", Color::Yellow);
     println_color("Commands: /new  /history  /quit", Color::DarkGrey);
     // FEAT-043: open with the login greeting (health + parked actionable items).
-    if let Ok(Response::GreetingResp { greeting }) = rpc(&Request::GreetingQuery).await {
-        render_greeting(&greeting);
+    if let Ok(Response::GreetingResp { greeting }) = t.request(&Request::GreetingQuery).await {
+        print!("{}", render_greeting(&greeting));
     }
     println!();
 
@@ -1274,8 +1111,7 @@ async fn cmd_chat() -> Result<()> {
         match trimmed {
             "/quit" | "/exit" => break,
             "/new" => {
-                send_req(&mut w, &Request::ChatNew).await?;
-                conv_id = match read_resp(&mut r).await? {
+                conv_id = match t.request(&Request::ChatNew).await? {
                     Response::ChatNew { conversation_id } => conversation_id,
                     _ => continue,
                 };
@@ -1285,8 +1121,7 @@ async fn cmd_chat() -> Result<()> {
                 continue;
             }
             "/history" => {
-                send_req(&mut w, &Request::ChatHistory).await?;
-                if let Response::ChatHistory { conversations } = read_resp(&mut r).await? {
+                if let Response::ChatHistory { conversations } = t.request(&Request::ChatHistory).await? {
                     if conversations.is_empty() {
                         println_color("No conversations yet.", Color::Yellow);
                     } else {
@@ -1302,16 +1137,16 @@ async fn cmd_chat() -> Result<()> {
         }
 
         history.push(ChatMessage::user(trimmed));
-        send_req(&mut w, &Request::ChatSend {
-            conversation_id: conv_id.clone(),
-            messages: history.clone(),
-            cwd: Some(cwd_string()),
-        }).await?;
 
         print_color("regin> ", Color::Green);
         io::stdout().flush()?;
 
-        let (full, new_conv) = consume_stream(&mut r).await?;
+        let mut full = String::new();
+        let mut new_conv = String::new();
+        t.request_stream(
+            &Request::ChatSend { conversation_id: conv_id.clone(), messages: history.clone(), cwd: Some(cwd_string()) },
+            |resp| print_chat_event(resp, &mut full, &mut new_conv),
+        ).await?;
         if !new_conv.is_empty() { conv_id = new_conv; }
         println!();
         println!();
@@ -1325,196 +1160,109 @@ async fn cmd_chat() -> Result<()> {
     Ok(())
 }
 
-async fn cmd_task_list() -> Result<()> {
-    match rpc(&Request::SkillList { cwd: Some(cwd_string()) }).await? {
-        Response::SkillList { skills } => {
-            if skills.is_empty() {
-                println!("No tasks found.");
-                println_color("  Add skills to ~/.config/regin/skills/ or /usr/share/regin/skills/", Color::DarkGrey);
-                return Ok(());
-            }
-            println_color(&format!("Tasks ({}):", skills.len()), Color::Yellow);
-            for s in &skills {
-                print_color(&format!("  {:<20}", s.name), Color::Cyan);
-                print_color(&format!("[{:<6}] ", s.source), Color::DarkGrey);
-                println!("{}", s.description);
-            }
-        }
+async fn cmd_task_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::SkillList { cwd: Some(cwd_string()) }).await? {
+        Response::SkillList { skills } => print!("{}", render_task_list(&skills)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_task_show(name: &str) -> Result<()> {
-    match rpc(&Request::SkillShow { name: name.into(), cwd: Some(cwd_string()) }).await? {
+async fn cmd_task_show(t: &impl Transport, name: &str) -> Result<()> {
+    match t.request(&Request::SkillShow { name: name.into(), cwd: Some(cwd_string()) }).await? {
         Response::SkillDetail { name, description, prompt, files } => {
-            println_color(&format!("Task: {name}"), Color::Cyan);
-            println!("  {description}");
-            println!();
-            println_color("— prompt —", Color::Yellow);
-            println!("{prompt}");
-            if !files.is_empty() {
-                println_color(&format!("Supporting files ({}):", files.len()), Color::Yellow);
-                for f in &files { println!("  • {f}"); }
-            }
+            print!("{}", render_task_show(&name, &description, &prompt, &files));
         }
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_task_exec(name: &str, schedule: Option<&str>) -> Result<()> {
-    let (mut w, mut r) = connect_daemon().await?;
-
+async fn cmd_task_exec(t: &impl Transport, name: &str, schedule: Option<&str>) -> Result<()> {
     if let Some(interval) = schedule {
-        send_req(&mut w, &Request::TaskSchedule {
-            skill: name.into(), interval: interval.into(),
-        }).await?;
-        match read_resp(&mut r).await? {
-            Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Yellow),
-            Response::Error { message } => return Err(anyhow!("Schedule error: {message}")),
-            _ => {}
+        match t.request(&Request::TaskSchedule { skill: name.into(), interval: interval.into() }).await {
+            Ok(Response::Ok { message }) => println_color(&format!("✓ {message}"), Color::Yellow),
+            Ok(_) => {}
+            Err(e) => return Err(anyhow!("Schedule error: {e}")),
         }
     }
 
     println_color(&format!("Running '{name}'…"), Color::Yellow);
-    send_req(&mut w, &Request::TaskExec {
-        skill: name.into(),
-        cwd: Some(cwd_string()),
-    }).await?;
-
-    // Consume tool events until TaskResult
-    loop {
-        let resp = read_resp(&mut r).await?;
-        match resp {
+    let events = t.request_stream(
+        &Request::TaskExec { skill: name.into(), cwd: Some(cwd_string()) },
+        |resp| match resp {
             Response::ToolCallEvent { name, arguments } => {
-                let preview: String = arguments.chars().take(120).collect();
-                print_color(&format!("▶ {name}"), Color::Magenta);
-                println_color(&format!(" {preview}"), Color::DarkGrey);
+                println_color(&render_tool_call(name, arguments), Color::Magenta);
             }
             Response::ToolResultEvent { name, success, output } => {
-                let icon = if success { "✓" } else { "✗" };
-                let color = if success { Color::Green } else { Color::Red };
-                print_color(&format!("  {icon} {name}"), color);
-                let preview: String = output.lines().take(3).collect::<Vec<_>>().join("\n    ");
-                if !preview.is_empty() { println_color(&format!("\n    {preview}"), Color::DarkGrey); }
-                else { println!(); }
+                let color = if *success { Color::Green } else { Color::Red };
+                println_color(&render_tool_result(name, *success, output, 3), color);
             }
             Response::StreamChunk { token } => {
-                print_color(&token, Color::Green);
-                io::stdout().flush()?;
+                print_color(token, Color::Green);
+                let _ = io::stdout().flush();
             }
-            Response::StreamDone { .. } => {}
-            Response::TaskResult { run } => {
-                println!();
-                let color = if run.status == "success" { Color::Green } else { Color::Red };
-                println_color(&format!("Status: {}", run.status), color);
-                println!();
-                println!("{}", run.output);
-                break;
-            }
-            Response::Error { message } => {
-                println_color(&format!("Error: {message}"), Color::Red);
-                break;
-            }
-            _ => break,
+            _ => {}
+        },
+    ).await?;
+
+    match events.last() {
+        Some(Response::TaskResult { run }) => {
+            let color = if run.status == "success" { Color::Green } else { Color::Red };
+            println_color(&render_task_result(run), color);
         }
+        Some(Response::Error { message }) => println_color(&format!("Error: {message}"), Color::Red),
+        _ => {}
     }
     Ok(())
 }
 
-async fn cmd_task_unschedule(name: &str) -> Result<()> {
-    match rpc(&Request::TaskUnschedule { skill: name.into() }).await? {
-        Response::Ok { message } => println_color(&message, Color::Yellow),
+async fn cmd_task_unschedule(t: &impl Transport, name: &str) -> Result<()> {
+    match t.request(&Request::TaskUnschedule { skill: name.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_task_schedules() -> Result<()> {
-    match rpc(&Request::TaskSchedules).await? {
-        Response::SchedulesList { schedules } => {
-            if schedules.is_empty() {
-                println!("No active schedules.");
-                return Ok(());
-            }
-            println_color(&format!("Schedules ({}):", schedules.len()), Color::Yellow);
-            for s in &schedules {
-                print_color(&format!("  {:<20}", s.skill), Color::Cyan);
-                print!("  {:<10}  next: {}", s.interval, s.next_run);
-                if let Some(ref last) = s.last_run { print!("  last: {last}"); }
-                println!();
-            }
-        }
+async fn cmd_task_schedules(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::TaskSchedules).await? {
+        Response::SchedulesList { schedules } => print!("{}", render_schedules(&schedules)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_runs(skill: Option<&str>, limit: u32) -> Result<()> {
-    match rpc(&Request::RunsList { skill: skill.map(String::from), limit }).await? {
-        Response::RunsList { runs } => {
-            if runs.is_empty() {
-                println!("No task runs found.");
-                return Ok(());
-            }
-            println_color(&format!("Task runs ({}):", runs.len()), Color::Yellow);
-            for r in &runs {
-                let color = if r.status == "success" { Color::Green } else { Color::Red };
-                print!("  {} | {:<20} | ", r.started_at, r.skill_name);
-                println_color(&r.status, color);
-                if let Some(first) = r.output.lines().next() {
-                    let preview: String = first.chars().take(100).collect();
-                    println_color(&format!("    {preview}"), Color::DarkGrey);
-                }
-            }
-        }
+async fn cmd_runs(t: &impl Transport, skill: Option<&str>, limit: u32) -> Result<()> {
+    match t.request(&Request::RunsList { skill: skill.map(String::from), limit }).await? {
+        Response::RunsList { runs } => print!("{}", render_runs(&runs)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_config_list() -> Result<()> {
-    match rpc(&Request::ConfigList).await? {
-        Response::ConfigEntries { entries } => {
-            println_color("Settings:", Color::Yellow);
-            for (key, value) in &entries {
-                let display = if key.contains("api_key") && value.len() > 8 {
-                    format!("{}…{}", &value[..4], &value[value.len()-4..])
-                } else if key.contains("api_key") && !value.is_empty() {
-                    "****".into()
-                } else {
-                    value.clone()
-                };
-                print_color(&format!("  {key:<25}"), Color::Cyan);
-                println!("{display}");
-            }
-        }
+async fn cmd_config_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::ConfigList).await? {
+        Response::ConfigEntries { entries } => print!("{}", render_config_entries(&entries)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_config_get(key: &str) -> Result<()> {
-    match rpc(&Request::ConfigGet { key: key.into() }).await? {
-        Response::ConfigValue { key, value } => {
-            if key.contains("api_key") && value.len() > 8 {
-                println!("{}…{}", &value[..4], &value[value.len()-4..]);
-            } else {
-                println!("{value}");
-            }
-        }
+async fn cmd_config_get(t: &impl Transport, key: &str) -> Result<()> {
+    match t.request(&Request::ConfigGet { key: key.into() }).await? {
+        Response::ConfigValue { key, value } => print!("{}", render_config_value(&key, &value)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_config_set(key: &str, value: &str) -> Result<()> {
+async fn cmd_config_set(t: &impl Transport, key: &str, value: &str) -> Result<()> {
     if key == "daemon.enabled" {
         handle_daemon_enabled(value).await?;
     }
-    match rpc(&Request::ConfigSet { key: key.into(), value: value.into() }).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+    match t.request(&Request::ConfigSet { key: key.into(), value: value.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
@@ -1537,118 +1285,74 @@ async fn handle_daemon_enabled(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn which_cmd(name: &str) -> Option<String> {
-    Command::new("which").arg(name).output().ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-async fn cmd_memory_list(category: Option<&str>) -> Result<()> {
-    match rpc(&Request::MemoryList { category: category.map(String::from) }).await? {
-        Response::MemoryList { memories } => {
-            if memories.is_empty() {
-                println!("No memories stored.");
-                println_color("  Save one with: regin memory save <category> '<content>'", Color::DarkGrey);
-                return Ok(());
-            }
-            println_color(&format!("Memories ({}):", memories.len()), Color::Yellow);
-            for m in &memories {
-                print_color(&format!("  {}", &m.id[..m.id.len().min(8)]), Color::DarkGrey);
-                print_color(&format!("  [{:<10}] ", m.category), Color::Cyan);
-                println!("{}", m.content);
-                if m.source == "reflection" {
-                    println_color(
-                        &format!("            ⟳ reflection · strength {}", m.strength),
-                        Color::DarkGrey,
-                    );
-                }
-            }
-        }
+async fn cmd_memory_list(t: &impl Transport, category: Option<&str>) -> Result<()> {
+    match t.request(&Request::MemoryList { category: category.map(String::from) }).await? {
+        Response::MemoryList { memories } => print!("{}", render_memory_list(&memories)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_search(query: &str) -> Result<()> {
-    match rpc(&Request::MemorySearch { query: query.into() }).await? {
-        Response::MemoryList { memories } => {
-            if memories.is_empty() {
-                println!("No matching memories.");
-                return Ok(());
-            }
-            for m in &memories {
-                print_color(&format!("  {}", &m.id[..m.id.len().min(8)]), Color::DarkGrey);
-                print_color(&format!("  [{:<10}] ", m.category), Color::Cyan);
-                println!("{}", m.content);
-            }
-        }
+async fn cmd_memory_search(t: &impl Transport, query: &str) -> Result<()> {
+    match t.request(&Request::MemorySearch { query: query.into() }).await? {
+        Response::MemoryList { memories } => print!("{}", render_memory_search(&memories)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_save(category: &str, content: &str) -> Result<()> {
-    match rpc(&Request::MemorySave { category: category.into(), content: content.into() }).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+async fn cmd_memory_save(t: &impl Transport, category: &str, content: &str) -> Result<()> {
+    match t.request(&Request::MemorySave { category: category.into(), content: content.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_update(id: &str, content: &str) -> Result<()> {
-    match rpc(&Request::MemoryUpdate { id: id.into(), content: content.into() }).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+async fn cmd_memory_update(t: &impl Transport, id: &str, content: &str) -> Result<()> {
+    match t.request(&Request::MemoryUpdate { id: id.into(), content: content.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_delete(id: &str) -> Result<()> {
-    match rpc(&Request::MemoryDelete { id: id.into() }).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
+async fn cmd_memory_delete(t: &impl Transport, id: &str) -> Result<()> {
+    match t.request(&Request::MemoryDelete { id: id.into() }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_export(path: &str) -> Result<()> {
-    match rpc(&Request::MemoryExport { path: path.into() }).await? {
-        Response::MemoryExport { path: p } => {
-            println_color(&format!("✓ Exported identity to {p}"), Color::Green);
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_memory_export(t: &impl Transport, path: &str) -> Result<()> {
+    match t.request(&Request::MemoryExport { path: path.into() }).await? {
+        Response::MemoryExport { path: p } => print!("{}", render_memory_export(&p)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_import(path: &str, merge: bool) -> Result<()> {
-    match rpc(&Request::MemoryImport { path: path.into(), merge }).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_memory_import(t: &impl Transport, path: &str, merge: bool) -> Result<()> {
+    match t.request(&Request::MemoryImport { path: path.into(), merge }).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_info() -> Result<()> {
-    match rpc(&Request::MemoryInfo).await? {
+async fn cmd_memory_info(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::MemoryInfo).await? {
         Response::MemoryInfo { identity_id, name, host, schema_version, memory_count, created_at } => {
-            println!("Identity:    {identity_id}");
-            println!("Name:        {name}");
-            println!("Host:        {host}");
-            println!("Schema:      {schema_version}");
-            println!("Memories:    {memory_count}");
-            println!("Created:     {created_at}");
+            print!("{}", render_memory_info(&identity_id, &name, &host, &schema_version, memory_count, &created_at));
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
 async fn cmd_task_create(
+    t: &impl Transport,
     name: &str,
     from_prompt: Option<String>,
     force: bool,
@@ -1656,15 +1360,9 @@ async fn cmd_task_create(
     repo: bool,
 ) -> Result<()> {
     let cwd = repo.then(cwd_string);
-    match rpc(&Request::TaskCreate { name: name.into(), from_prompt, force, repo, cwd }).await? {
+    match t.request(&Request::TaskCreate { name: name.into(), from_prompt, force, repo, cwd }).await? {
         Response::SkillCreated { path, shadows_system } => {
-            println_color(&format!("✓ Created skill '{name}' at {path}"), Color::Green);
-            if shadows_system {
-                println_color(
-                    &format!("  note: this user skill shadows a system skill named '{name}'"),
-                    Color::Yellow,
-                );
-            }
+            print!("{}", render_task_created(name, &path, shadows_system));
             if edit && !repo {
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
                 std::process::Command::new(editor)
@@ -1675,49 +1373,34 @@ async fn cmd_task_create(
                 println_color(&format!("  edit it: $EDITOR {path}"), Color::DarkGrey);
             }
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_context_show() -> Result<()> {
-    match rpc(&Request::ContextShow { cwd: Some(cwd_string()) }).await? {
+async fn cmd_context_show(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::ContextShow { cwd: Some(cwd_string()) }).await? {
         Response::Context { repo_key, content } => {
-            match repo_key {
-                Some(k) => println_color(&format!("repo: {k}"), Color::DarkGrey),
-                None => println!("(no repo resolved for the current directory)"),
-            }
-            match content {
-                Some(c) => println!("{c}"),
-                None => println_color("  (no context stored — set one with: regin context set '<text>')", Color::DarkGrey),
-            }
+            print!("{}", render_context_show(repo_key.as_deref(), content.as_deref()));
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_memory_reflect() -> Result<()> {
-    match rpc(&Request::MemoryReflect).await? {
+async fn cmd_memory_reflect(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::MemoryReflect).await? {
         Response::ReflectStats { episodes, reinforced, created, decayed } => {
-            println_color(
-                &format!(
-                    "✓ Reflection: {episodes} episodes → {reinforced} reinforced, {created} new, {decayed} decayed"
-                ),
-                Color::Green,
-            );
+            print!("{}", render_reflect_stats(episodes, reinforced, created, decayed));
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_ping() -> Result<()> {
-    match rpc(&Request::Ping).await? {
-        Response::Pong => println_color("regind is running ✓", Color::Green),
+async fn cmd_ping(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::Ping).await? {
+        Response::Pong => print!("{}", render_ping(true)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
@@ -1725,202 +1408,63 @@ async fn cmd_ping() -> Result<()> {
 
 // --- ITIL command helpers ---
 
-fn sid(id: &str) -> &str {
-    &id[..id.len().min(8)]
-}
-
 /// Run a request that returns a simple Ok/Error acknowledgement.
-async fn cmd_ok(req: Request) -> Result<()> {
-    match rpc(&req).await? {
-        Response::Ok { message } => println_color(&format!("✓ {message}"), Color::Green),
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_ok(t: &impl Transport, req: Request) -> Result<()> {
+    match t.request(&req).await? {
+        Response::Ok { message } => print!("{}", render_ok(&message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_incidents(req: Request) -> Result<()> {
-    match rpc(&req).await? {
-        Response::Incidents { incidents } => {
-            if incidents.is_empty() {
-                println!("No incidents.");
-                return Ok(());
-            }
-            for i in &incidents {
-                print_color(&format!("  {}", sid(&i.id)), Color::DarkGrey);
-                print_color(&format!("  [{:<13}] ", i.status), Color::Cyan);
-                print_color(&format!("{:<8} ", i.severity), Color::Yellow);
-                println!("{}", i.title);
-                if !i.description.is_empty() {
-                    println!("            {}", i.description);
-                }
-                if let Some(w) = &i.workaround {
-                    println_color(&format!("            workaround: {w}"), Color::DarkGrey);
-                }
-                if let Some(r) = &i.resolution {
-                    println_color(&format!("            resolution: {r}"), Color::Green);
-                }
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_incidents(t: &impl Transport, req: Request) -> Result<()> {
+    match t.request(&req).await? {
+        Response::Incidents { incidents } => print!("{}", render_incidents(&incidents)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_changes(req: Request) -> Result<()> {
-    match rpc(&req).await? {
-        Response::Changes { changes } => {
-            if changes.is_empty() {
-                println!("No changes.");
-                return Ok(());
-            }
-            for c in &changes {
-                print_color(&format!("  {}", sid(&c.id)), Color::DarkGrey);
-                print_color(&format!("  [{:<8}] ", c.status), Color::Cyan);
-                println!("{}", c.title);
-                if let Some(inc) = &c.incident_id {
-                    println_color(&format!("            incident: {}", sid(inc)), Color::DarkGrey);
-                }
-                if let Some(p) = &c.problem_id {
-                    println_color(&format!("            problem: {}", sid(p)), Color::DarkGrey);
-                }
-                if c.before.is_some() || c.after.is_some() {
-                    println!(
-                        "            {} -> {}",
-                        c.before.as_deref().unwrap_or("?"),
-                        c.after.as_deref().unwrap_or("?")
-                    );
-                }
-                if let Some(by) = &c.approved_by {
-                    println_color(&format!("            approved by {by}"), Color::Green);
-                }
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_changes(t: &impl Transport, req: Request) -> Result<()> {
+    match t.request(&req).await? {
+        Response::Changes { changes } => print!("{}", render_changes(&changes)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_hypotheses(req: Request) -> Result<()> {
-    match rpc(&req).await? {
-        Response::Hypotheses { hypotheses } => {
-            if hypotheses.is_empty() {
-                println!("No hypotheses.");
-                return Ok(());
-            }
-            for h in &hypotheses {
-                print_color(&format!("  {}", sid(&h.id)), Color::DarkGrey);
-                print_color(&format!("  [{:<10}] ", h.status), Color::Cyan);
-                println!("{}", h.text);
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_hypotheses(t: &impl Transport, req: Request) -> Result<()> {
+    match t.request(&req).await? {
+        Response::Hypotheses { hypotheses } => print!("{}", render_hypotheses(&hypotheses)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_desired_list() -> Result<()> {
-    match rpc(&Request::DesiredList).await? {
-        Response::DesiredListResp { items } => {
-            if items.is_empty() {
-                println!("No desired-state domains. Add files under ~/.config/regin/desired/<domain>.md");
-                return Ok(());
-            }
-            for d in &items {
-                print_color(&format!("  {:<16}", d.domain), Color::Cyan);
-                print_color(&format!("[{}] ", d.source), Color::DarkGrey);
-                print!("{} assertion(s)", d.assertions);
-                if let Some(rt) = d.recurrence_threshold {
-                    print!(", recurrence>={rt}");
-                }
-                println!();
-                for c in &d.conflicts {
-                    println_color(&format!("        conflict: {c}"), Color::Red);
-                }
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_desired_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::DesiredList).await? {
+        Response::DesiredListResp { items } => print!("{}", render_desired_list(&items)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_desired_show(domain: &str) -> Result<()> {
-    match rpc(&Request::DesiredShow { domain: domain.to_string() }).await? {
-        Response::DesiredDetail { state } => {
-            print_color(&format!("{} ", state.domain), Color::Cyan);
-            println_color(&format!("[{}] {}", state.source, state.path.display()), Color::DarkGrey);
-            if let Some(rt) = state.recurrence_threshold {
-                println_color(&format!("recurrence threshold: {rt}"), Color::DarkGrey);
-            }
-            if !state.intent.is_empty() {
-                println!("\n{}", state.intent);
-            }
-            if !state.assertions.is_empty() {
-                println_color("\nassertions:", Color::Yellow);
-                for a in &state.assertions {
-                    print!("  {a}");
-                    if let Some(d) = &a.description {
-                        print_color(&format!("  — {d}"), Color::DarkGrey);
-                    }
-                    println!();
-                }
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_desired_show(t: &impl Transport, domain: &str) -> Result<()> {
+    match t.request(&Request::DesiredShow { domain: domain.to_string() }).await? {
+        Response::DesiredDetail { state } => print!("{}", render_desired_show(&state)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-fn fmt_secs(secs: i64) -> String {
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
-    } else {
-        format!("{}d{}h", secs / 86400, (secs % 86400) / 3600)
-    }
-}
-
-async fn cmd_mode() -> Result<()> {
-    match rpc(&Request::ModeQuery).await? {
+async fn cmd_mode(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::ModeQuery).await? {
         Response::ModeInfo { mode, configured, last_ok, failures } => {
-            let color = if mode == "org" { Color::Green } else { Color::Yellow };
-            print!("effective mode: ");
-            println_color(&mode, color);
-            println!("  bus configured: {configured}");
-            println!("  last reachable: {}", last_ok.as_deref().unwrap_or("never"));
-            println!("  consecutive failures: {failures}");
+            print!("{}", render_mode(&mode, configured, last_ok.as_deref(), failures));
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
-}
-
-fn render_greeting(g: &regin_core::greeting::Greeting) {
-    println_color(&g.health_line(), Color::DarkGrey);
-    if !g.has_actions() {
-        return;
-    }
-    if !g.pending_changes.is_empty() {
-        println_color("changes awaiting approval:", Color::Yellow);
-        for a in &g.pending_changes {
-            println!("  {}  {}", sid(&a.id), a.title);
-        }
-    }
-    if !g.decision_problems.is_empty() {
-        println_color("problems needing a decision:", Color::Yellow);
-        for a in &g.decision_problems {
-            println!("  {}  {}", sid(&a.id), a.title);
-        }
-    }
 }
 
 /// Generate man pages from the clap surface (FEAT-019) so they never drift from
@@ -1948,154 +1492,59 @@ fn cmd_gen_man(dir: &str) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_audit() -> Result<()> {
-    match rpc(&Request::AuditRun).await? {
-        Response::AuditResult { findings, trimmed, opened } => {
-            if trimmed {
-                println_color("(audit trimmed to stay within budget)", Color::DarkGrey);
-            }
-            if findings.is_empty() {
-                println_color("Self-audit clean — no findings.", Color::Green);
-                return Ok(());
-            }
-            for f in &findings {
-                print_color(&format!("  [{}] ", f.area), Color::Yellow);
-                println!("{}", f.message);
-            }
-            println_color(&format!("{opened} new problem(s) filed for review.", ), Color::DarkGrey);
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_audit(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::AuditRun).await? {
+        Response::AuditResult { findings, trimmed, opened } => print!("{}", render_audit(&findings, trimmed, opened)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_checks() -> Result<()> {
-    match rpc(&Request::ChecksList).await? {
-        Response::DerivedChecks { checks } => {
-            if checks.is_empty() {
-                println!("No derived checks yet. regin promotes stable LLM verdicts into cheap checks over time.");
-                return Ok(());
-            }
-            for c in &checks {
-                print_color(&format!("  {:<16}", c.domain), Color::Cyan);
-                print!("{}", c.description);
-                println_color(&format!("  [{}]", c.signature), Color::DarkGrey);
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_checks(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::ChecksList).await? {
+        Response::DerivedChecks { checks } => print!("{}", render_checks(&checks)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_greeting() -> Result<()> {
-    match rpc(&Request::GreetingQuery).await? {
-        Response::GreetingResp { greeting } => render_greeting(&greeting),
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_greeting(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::GreetingQuery).await? {
+        Response::GreetingResp { greeting } => print!("{}", render_greeting(&greeting)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_posture() -> Result<()> {
-    match rpc(&Request::PostureQuery).await? {
+async fn cmd_posture(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::PostureQuery).await? {
         Response::PostureInfo { posture, allow_auto, change_successes, change_failures, change_success_rate, promotion_error_rate } => {
-            let color = if posture == "trusted" { Color::Green } else { Color::Yellow };
-            print!("autonomy posture: ");
-            println_color(&posture, color);
-            println!("  master switch (posture.allow_auto): {allow_auto}");
-            println!("  change outcomes: {change_successes} ok / {change_failures} failed ({:.0}% success)", change_success_rate * 100.0);
-            println!("  promotion error rate: {:.0}%", promotion_error_rate * 100.0);
-            if posture == "conservative" {
-                println_color("  safe fixes still route to approval until trust is earned", Color::DarkGrey);
-            } else {
-                println_color("  safe, reversible fixes may auto-apply", Color::DarkGrey);
-            }
+            print!("{}", render_posture(&posture, allow_auto, change_successes, change_failures, change_success_rate, promotion_error_rate));
         }
-        Response::Error { message } => return Err(anyhow!("{message}")),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_filters_list() -> Result<()> {
-    match rpc(&Request::FiltersList).await? {
-        Response::Filters { rules } => {
-            if rules.is_empty() {
-                println!("No notice filters. Add rule files under ~/.config/regin/filters/*.toml");
-                return Ok(());
-            }
-            for r in &rules {
-                print_color(&format!("  {:<20}", r.name), Color::Cyan);
-                print_color(&format!("[{}] ", r.source), Color::DarkGrey);
-                print!("contains {:?}", r.contains);
-                if let Some(d) = &r.domain {
-                    print!(" (domain: {d})");
-                }
-                println!();
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_filters_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::FiltersList).await? {
+        Response::Filters { rules } => print!("{}", render_filters(&rules)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_metrics(days: Option<u32>) -> Result<()> {
-    match rpc(&Request::Metrics { since_days: days }).await? {
-        Response::Metrics { summary: s, objective: o } => {
-            println_color(&format!("CSI metrics — last {} days", days.unwrap_or(30)), Color::Cyan);
-
-            println_color("\nObjective (minimize cost s.t. reliability >= floor)", Color::Yellow);
-            let verdict = if o.meets_floor { "MEETS floor" } else { "BELOW floor" };
-            let vcolor = if o.meets_floor { Color::Green } else { Color::Red };
-            print!("  reliability {:.0}% (floor {:.0}%)  ", o.reliability * 100.0, o.reliability_floor * 100.0);
-            println_color(verdict, vcolor);
-            println!("  LLM cost: ${:.2}", o.cost_llm_usd);
-
-            println_color("\nReliability / quality", Color::Yellow);
-            println!("  incidents: {} opened, {} resolved, {} open", s.incidents_opened, s.incidents_resolved, s.open_incidents);
-            println!("  time in deviation: {}", fmt_secs(s.time_in_deviation_secs));
-            match s.mttr_secs {
-                Some(m) => println!("  MTTR: {}", fmt_secs(m)),
-                None => println!("  MTTR: n/a"),
-            }
-            println!("  recurring problems: {}", s.recurring_problems);
-
-            println_color("\nAutomation / autonomy", Color::Yellow);
-            println!("  remediations: {} auto, {} approved, {} escalated", s.remediations_auto, s.remediations_approved, s.remediations_escalated);
-            println!("  automation ratio: {:.0}%   autonomy ratio: {:.0}%", s.automation_ratio * 100.0, s.autonomy_ratio * 100.0);
-
-            println_color("\nCost / efficiency", Color::Yellow);
-            println!("  LLM spend: ${:.2}   avoided: ${:.2}   notices filtered: {}", s.cost_llm_usd, s.cost_avoided_usd, s.notice_filter_saved);
-
-            println_color("\nLearning / health", Color::Yellow);
-            println!("  promotions: {}   errors: {}   error rate: {:.0}%", s.promotions, s.promotion_errors, s.promotion_error_rate * 100.0);
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_metrics(t: &impl Transport, days: Option<u32>) -> Result<()> {
+    match t.request(&Request::Metrics { since_days: days }).await? {
+        Response::Metrics { summary, objective } => print!("{}", render_metrics(&summary, &objective, days)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
 }
 
-async fn cmd_problems(req: Request) -> Result<()> {
-    match rpc(&req).await? {
-        Response::Problems { problems } => {
-            if problems.is_empty() {
-                println!("No problems.");
-                return Ok(());
-            }
-            for p in &problems {
-                print_color(&format!("  {}", sid(&p.id)), Color::DarkGrey);
-                print_color(&format!("  [{:<11}] ", p.status), Color::Cyan);
-                println!("{}", p.title);
-                if let Some(rc) = &p.root_cause {
-                    println_color(&format!("            root cause: {rc}"), Color::Yellow);
-                }
-            }
-        }
-        Response::Error { message } => return Err(anyhow!("{message}")),
+async fn cmd_problems(t: &impl Transport, req: Request) -> Result<()> {
+    match t.request(&req).await? {
+        Response::Problems { problems } => print!("{}", render_problems(&problems)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
@@ -2122,5 +1571,440 @@ mod tests {
         // the hidden gen-man subcommand is not documented
         assert!(!dir.join("regin-gen-man.1").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // -----------------------------------------------------------------
+    // clap surface (FEAT-070 acceptance criterion 2)
+    // -----------------------------------------------------------------
+
+    fn parses(argv: &[&str]) {
+        Cli::try_parse_from(argv).unwrap_or_else(|e| panic!("failed to parse {argv:?}: {e}"));
+    }
+
+    #[test]
+    fn clap_parses_representative_commands_across_the_tree() {
+        parses(&["regin", "chat"]);
+        parses(&["regin", "ping"]);
+        parses(&["regin", "task", "list"]);
+        parses(&["regin", "task", "show", "disk-usage"]);
+        parses(&["regin", "task", "exec", "disk-usage"]);
+        parses(&["regin", "task", "exec", "disk-usage", "daily"]);
+        parses(&["regin", "task", "unschedule", "disk-usage"]);
+        parses(&["regin", "task", "schedules"]);
+        parses(&["regin", "task", "create", "my-skill", "--from-prompt", "check disk", "--force", "--edit", "--repo"]);
+        parses(&["regin", "runs", "--skill", "disk-usage", "--limit", "5"]);
+        parses(&["regin", "config", "list"]);
+        parses(&["regin", "config", "get", "mimir.model"]);
+        parses(&["regin", "config", "set", "mimir.model", "gpt-4o"]);
+        parses(&["regin", "memory", "list", "--category", "fact"]);
+        parses(&["regin", "memory", "search", "postgres"]);
+        parses(&["regin", "memory", "save", "fact", "runs Ubuntu"]);
+        parses(&["regin", "memory", "update", "id1", "new content"]);
+        parses(&["regin", "memory", "delete", "id1"]);
+        parses(&["regin", "memory", "reflect"]);
+        parses(&["regin", "memory", "export", "/tmp/out.db"]);
+        parses(&["regin", "memory", "import", "/tmp/out.db", "--merge"]);
+        parses(&["regin", "memory", "info"]);
+        parses(&["regin", "incident", "open", "disk full", "--severity", "high", "--desc", "d"]);
+        parses(&["regin", "incident", "list", "--status", "open"]);
+        parses(&["regin", "incident", "show", "id1"]);
+        parses(&["regin", "incident", "update", "id1", "--status", "investigating"]);
+        parses(&["regin", "incident", "resolve", "id1", "fixed it"]);
+        parses(&["regin", "incident", "block", "id1", "restarted service"]);
+        parses(&["regin", "incident", "close", "id1"]);
+        parses(&["regin", "change", "record", "bump disk", "--incident", "id1"]);
+        parses(&["regin", "change", "list"]);
+        parses(&["regin", "change", "show", "id1"]);
+        parses(&["regin", "change", "request-approval", "id1"]);
+        parses(&["regin", "change", "approve", "id1", "--by", "rene"]);
+        parses(&["regin", "change", "apply", "id1"]);
+        parses(&["regin", "change", "close", "id1"]);
+        parses(&["regin", "problem", "open", "recurring disk full"]);
+        parses(&["regin", "problem", "list", "--status", "open"]);
+        parses(&["regin", "problem", "show", "id1"]);
+        parses(&["regin", "problem", "link", "p1", "i1"]);
+        parses(&["regin", "problem", "known-error", "p1", "log rotation"]);
+        parses(&["regin", "problem", "hypothesis-add", "p1", "cron misfires"]);
+        parses(&["regin", "problem", "hypothesis-list", "p1"]);
+        parses(&["regin", "problem", "hypothesis-status", "h1", "confirmed"]);
+        parses(&["regin", "problem", "escalate", "p1", "--as", "bug", "--to", "cio@hq"]);
+        parses(&["regin", "problem", "close", "p1"]);
+        parses(&["regin", "desired", "list"]);
+        parses(&["regin", "desired", "show", "disk"]);
+        parses(&["regin", "desired", "check"]);
+        parses(&["regin", "metrics", "--days", "7"]);
+        parses(&["regin", "filters", "list"]);
+        parses(&["regin", "filters", "test", "network", "connection reset"]);
+        parses(&["regin", "mode"]);
+        parses(&["regin", "posture"]);
+        parses(&["regin", "greeting"]);
+        parses(&["regin", "push", "test"]);
+        parses(&["regin", "checks"]);
+        parses(&["regin", "audit"]);
+        parses(&["regin", "context", "show"]);
+        parses(&["regin", "context", "set", "notes"]);
+        parses(&["regin", "bus", "send", "role@cave", "hello", "--structured", "--ref-id", "r1"]);
+        parses(&["regin", "bus", "inbox", "--peek"]);
+        parses(&["regin", "persona"]);
+        parses(&["regin", "meeting", "chair", "board", "--agenda", "incidents", "--to", "dvalin@hq"]);
+        parses(&["regin", "plan", "--cadence", "monthly", "--need", "rust", "--emit"]);
+        parses(&["regin", "foreman", "run-once", "--dry-run"]);
+        parses(&["regin", "skill", "install", "/path/to/pkg"]);
+        parses(&["regin", "skill", "packages"]);
+        parses(&["regin", "deputy", "assign", "operator", "regin@host1"]);
+        parses(&["regin", "deputy", "show"]);
+        parses(&["regin", "deputy", "brief", "text"]);
+        parses(&["regin", "deputy", "activate", "--confirmed"]);
+        parses(&["regin", "deputy", "handback"]);
+    }
+
+    #[test]
+    fn clap_rejects_missing_required_args() {
+        assert!(Cli::try_parse_from(["regin", "task", "show"]).is_err());
+        assert!(Cli::try_parse_from(["regin", "incident", "show"]).is_err());
+        assert!(Cli::try_parse_from(["regin", "memory", "save", "fact"]).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // cmd_* logic via FakeTransport (FEAT-070 acceptance criterion 1)
+    // -----------------------------------------------------------------
+
+    use crate::transport::fake::FakeTransport;
+    use regin_core::types::TaskRun;
+
+    #[tokio::test]
+    async fn cmd_ping_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Pong);
+        assert!(cmd_ping(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::Ping));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "daemon down".into() });
+        let err = cmd_ping(&t).await.unwrap_err();
+        assert_eq!(err.to_string(), "daemon down");
+    }
+
+    #[tokio::test]
+    async fn cmd_task_list_sends_skill_list_request() {
+        let t = FakeTransport::new();
+        t.push(Response::SkillList { skills: vec![] });
+        assert!(cmd_task_list(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::SkillList { .. }));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "no daemon".into() });
+        assert!(cmd_task_list(&t).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_task_show_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::SkillDetail { name: "disk-usage".into(), description: "d".into(), prompt: "p".into(), files: vec![] });
+        assert!(cmd_task_show(&t, "disk-usage").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "not found".into() });
+        assert!(cmd_task_show(&t, "nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_task_exec_runs_without_schedule() {
+        let t = FakeTransport::new();
+        t.push_stream(vec![
+            Response::ToolCallEvent { name: "bash".into(), arguments: "{}".into() },
+            Response::ToolResultEvent { name: "bash".into(), success: true, output: "ok".into() },
+            Response::TaskResult { run: TaskRun {
+                id: "1".into(), skill_name: "disk-usage".into(), status: "success".into(),
+                output: "done".into(), started_at: "t0".into(), finished_at: "t1".into(),
+            }},
+        ]);
+        assert!(cmd_task_exec(&t, "disk-usage", None).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::TaskExec { .. }));
+    }
+
+    #[tokio::test]
+    async fn cmd_task_exec_schedules_first_when_given_an_interval() {
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "scheduled".into() });
+        t.push_stream(vec![Response::TaskResult { run: TaskRun {
+            id: "1".into(), skill_name: "disk-usage".into(), status: "success".into(),
+            output: "done".into(), started_at: "t0".into(), finished_at: "t1".into(),
+        }}]);
+        assert!(cmd_task_exec(&t, "disk-usage", Some("daily")).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::TaskSchedule { .. }));
+        assert!(matches!(t.sent()[1], Request::TaskExec { .. }));
+    }
+
+    #[tokio::test]
+    async fn cmd_task_unschedule_error_path() {
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "not scheduled".into() });
+        assert!(cmd_task_unschedule(&t, "disk-usage").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_task_schedules_happy_path() {
+        let t = FakeTransport::new();
+        t.push(Response::SchedulesList { schedules: vec![] });
+        assert!(cmd_task_schedules(&t).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cmd_runs_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::RunsList { runs: vec![] });
+        assert!(cmd_runs(&t, Some("disk-usage"), 10).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::RunsList { .. }));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "bad".into() });
+        assert!(cmd_runs(&t, None, 10).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_config_list_get_set_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::ConfigEntries { entries: vec![] });
+        assert!(cmd_config_list(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::ConfigValue { key: "mimir.model".into(), value: "gpt-4o".into() });
+        assert!(cmd_config_get(&t, "mimir.model").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "set".into() });
+        assert!(cmd_config_set(&t, "mimir.model", "gpt-4o").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "unknown key".into() });
+        assert!(cmd_config_get(&t, "nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_memory_crud_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::MemoryList { memories: vec![] });
+        assert!(cmd_memory_list(&t, Some("fact")).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::MemoryList { memories: vec![] });
+        assert!(cmd_memory_search(&t, "postgres").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "saved".into() });
+        assert!(cmd_memory_save(&t, "fact", "runs Ubuntu").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "updated".into() });
+        assert!(cmd_memory_update(&t, "id1", "new").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "deleted".into() });
+        assert!(cmd_memory_delete(&t, "id1").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "not found".into() });
+        assert!(cmd_memory_delete(&t, "missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_memory_export_import_info_reflect() {
+        let t = FakeTransport::new();
+        t.push(Response::MemoryExport { path: "/tmp/out.db".into() });
+        assert!(cmd_memory_export(&t, "/tmp/out.db").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "exists".into() });
+        assert!(cmd_memory_import(&t, "/tmp/out.db", false).await.is_err());
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "imported".into() });
+        assert!(cmd_memory_import(&t, "/tmp/out.db", true).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::MemoryInfo {
+            identity_id: "id1".into(), name: "regin".into(), host: "host1".into(),
+            schema_version: "3".into(), memory_count: 4, created_at: "now".into(),
+        });
+        assert!(cmd_memory_info(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::ReflectStats { episodes: 1, reinforced: 0, created: 1, decayed: 0 });
+        assert!(cmd_memory_reflect(&t).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cmd_task_create_happy_no_edit() {
+        let t = FakeTransport::new();
+        t.push(Response::SkillCreated { path: "/skills/x/skill.md".into(), shadows_system: false });
+        assert!(cmd_task_create(&t, "x", None, false, false, false).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "exists".into() });
+        assert!(cmd_task_create(&t, "x", None, false, false, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_context_show_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Context { repo_key: Some("/repo".into()), content: Some("notes".into()) });
+        assert!(cmd_context_show(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "db locked".into() });
+        assert!(cmd_context_show(&t).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_ok_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "done".into() });
+        assert!(cmd_ok(&t, Request::DesiredCheck).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "boom".into() });
+        assert!(cmd_ok(&t, Request::DesiredCheck).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_incidents_changes_hypotheses_problems_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Incidents { incidents: vec![] });
+        assert!(cmd_incidents(&t, Request::IncidentList { status: None }).await.is_ok());
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "e".into() });
+        assert!(cmd_incidents(&t, Request::IncidentList { status: None }).await.is_err());
+
+        let t = FakeTransport::new();
+        t.push(Response::Changes { changes: vec![] });
+        assert!(cmd_changes(&t, Request::ChangeList).await.is_ok());
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "e".into() });
+        assert!(cmd_changes(&t, Request::ChangeList).await.is_err());
+
+        let t = FakeTransport::new();
+        t.push(Response::Hypotheses { hypotheses: vec![] });
+        assert!(cmd_hypotheses(&t, Request::ProblemHypothesisList { problem_id: "p1".into() }).await.is_ok());
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "e".into() });
+        assert!(cmd_hypotheses(&t, Request::ProblemHypothesisList { problem_id: "p1".into() }).await.is_err());
+
+        let t = FakeTransport::new();
+        t.push(Response::Problems { problems: vec![] });
+        assert!(cmd_problems(&t, Request::ProblemList { status: None }).await.is_ok());
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "e".into() });
+        assert!(cmd_problems(&t, Request::ProblemList { status: None }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_desired_list_show_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::DesiredListResp { items: vec![] });
+        assert!(cmd_desired_list(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::DesiredDetail { state: Box::new(regin_core::desired::DesiredState {
+            domain: "disk".into(), intent: "".into(), assertions: vec![],
+            recurrence_threshold: None, cadence: None,
+            source: regin_core::desired::DesiredSource::System, path: "/x".into(),
+        })});
+        assert!(cmd_desired_show(&t, "disk").await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "no such domain".into() });
+        assert!(cmd_desired_show(&t, "missing").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_mode_posture_greeting_audit_checks_filters_metrics() {
+        let t = FakeTransport::new();
+        t.push(Response::ModeInfo { mode: "standalone".into(), configured: false, last_ok: None, failures: 0 });
+        assert!(cmd_mode(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::PostureInfo {
+            posture: "conservative".into(), allow_auto: false,
+            change_successes: 0, change_failures: 0, change_success_rate: 0.0, promotion_error_rate: 0.0,
+        });
+        assert!(cmd_posture(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::GreetingResp { greeting: Box::new(regin_core::greeting::Greeting {
+            mode: "standalone".into(), open_incidents: 0, open_problems: 0,
+            pending_changes: vec![], decision_problems: vec![],
+        })});
+        assert!(cmd_greeting(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::AuditResult { findings: vec![], trimmed: false, opened: 0 });
+        assert!(cmd_audit(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::DerivedChecks { checks: vec![] });
+        assert!(cmd_checks(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Filters { rules: vec![] });
+        assert!(cmd_filters_list(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Metrics {
+            summary: Box::new(regin_core::kpi::KpiSummary {
+                since: "now".into(), incidents_opened: 0, incidents_resolved: 0, open_incidents: 0,
+                time_in_deviation_secs: 0, mttr_secs: None, recurring_problems: 0,
+                remediations_auto: 0, remediations_approved: 0, remediations_escalated: 0,
+                automation_ratio: 0.0, autonomy_ratio: 0.0, cost_llm_usd: 0.0, cost_avoided_usd: 0.0,
+                notice_filter_saved: 0, promotions: 0, promotion_errors: 0, promotion_error_rate: 0.0,
+                change_successes: 0, change_failures: 0, change_success_rate: 0.0,
+            }),
+            objective: regin_core::kpi::Objective { reliability: 1.0, reliability_floor: 0.95, meets_floor: true, cost_llm_usd: 0.0 },
+        });
+        assert!(cmd_metrics(&t, Some(30)).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "e".into() });
+        assert!(cmd_mode(&t).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_chat_opens_a_conversation_and_exits_cleanly_on_stdin_eof() {
+        // cargo test runs with no interactive stdin, so the very first
+        // `lines.next()` inside cmd_chat's loop returns None (EOF) and it
+        // exits — this exercises the ChatNew + GreetingQuery setup logic
+        // without needing a live terminal.
+        let t = FakeTransport::new();
+        t.push(Response::ChatNew { conversation_id: "c1".into() });
+        t.push(Response::GreetingResp { greeting: Box::new(regin_core::greeting::Greeting {
+            mode: "standalone".into(), open_incidents: 0, open_problems: 0,
+            pending_changes: vec![], decision_problems: vec![],
+        })});
+        assert!(cmd_chat(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::ChatNew));
+        assert!(matches!(t.sent()[1], Request::GreetingQuery));
+    }
+
+    #[tokio::test]
+    async fn cmd_chat_propagates_chat_new_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "daemon down".into() });
+        assert!(cmd_chat(&t).await.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Streaming glue (print_chat_event) — logic-only assertions via the
+    // pure apply_chat_event it delegates to are covered in render.rs;
+    // this confirms the wiring compiles and folds state the same way.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn print_chat_event_folds_stream_chunks_into_full_text() {
+        let mut full = String::new();
+        let mut conv_id = String::new();
+        print_chat_event(&Response::StreamChunk { token: "hi".into() }, &mut full, &mut conv_id);
+        print_chat_event(&Response::StreamDone { conversation_id: "c9".into() }, &mut full, &mut conv_id);
+        assert_eq!(full, "hi");
+        assert_eq!(conv_id, "c9");
     }
 }

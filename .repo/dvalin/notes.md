@@ -407,3 +407,39 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Still pending at IMPLEMENTATION time (not planning gaps): update profile.md §7 to
   deb/rpm/apk (FEAT-053); the milestone is large (~29 FEATs incl. release readiness) —
   split remains an option if desired.
+
+### 2026-07-12 — FEAT-070: CLI transport seam + render/logic split (0.6.0 coverage)
+- **FEAT-070 implemented and moved to done/.** New `regin-cli/src/transport.rs`:
+  a `Transport` trait (`request` for single round-trips, `request_stream` for
+  multi-event exchanges with a live per-event callback) with `SocketTransport`
+  (the real Unix-socket implementation — `connect_daemon`/`ensure_daemon`/
+  `send_req`/`read_resp` and the daemon-auto-start plumbing all moved here
+  verbatim) and a `#[cfg(test)] FakeTransport` (canned replies, records sent
+  `Request`s). New `regin-cli/src/render.rs`: ~30 pure `Response -> String`
+  render functions (task/memory/ITIL/desired/metrics/audit/etc. listings) plus
+  streaming-event helpers (`apply_chat_event`, `render_tool_call`,
+  `render_tool_result`, `render_task_result`).
+- All ~40 daemon-calling `cmd_*` functions in `main.rs` now take `&impl
+  Transport` and call a render fn instead of printing inline. `cmd_chat` and
+  `cmd_task_exec` (the two streaming/interactive commands) route through
+  `request_stream`'s callback so production output is still live
+  (event-by-event) while `FakeTransport` can replay a canned sequence in
+  tests. Local-only commands (bus/persona/deputy/skill-install, no daemon
+  round-trip) were left as-is.
+- **Deliberate simplification:** dropped the old per-segment ANSI colouring
+  inside render fns in favour of plain `String` output (colour is now applied
+  as a single wrap around the whole rendered block at the call site) — makes
+  every render fn a trivial, comparable `String` in tests. Documented in the
+  PR; not expected to be missed (the CLI is still coloured, just less
+  granularly).
+- 64 new tests (66 total in `regin-cli`, up from 2): every render fn has a
+  unit test, every daemon-calling `cmd_*` is exercised via `FakeTransport`
+  (happy path + an error `Response`), and a `Cli::try_parse_from` sweep covers
+  the full command/subcommand/flag surface plus a required-arg-rejection
+  check. Full workspace (`cargo build/test/clippy --workspace`) stays green;
+  `regin-cli` itself is clippy-clean.
+- No `cargo-llvm-cov` available in this sandbox to print an exact percentage —
+  precise measurement + the `COVERAGE_MIN` gate ramp is FEAT-075's job once
+  072–074 land too.
+- Sets up FEAT-071 (injectable `LlmClient`) next, then the decision-plane
+  FEATs (028→030→029→032→031), per the milestone's suggested delivery order.
