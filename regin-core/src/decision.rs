@@ -141,15 +141,29 @@ pub enum SoulVerdict {
     Veto,
 }
 
+/// The full result of one Soul vote: the resolved verdict (post-threshold,
+/// what [`run_deliberate`] acts on) plus the raw vote detail (what FEAT-032
+/// captures for deliberation calibration).
+#[derive(Debug, Clone)]
+pub struct SoulEvaluation {
+    /// Resolved verdict — `Approve` only once confidence has cleared the
+    /// threshold; see [`resolve_verdict`].
+    pub verdict: SoulVerdict,
+    /// One-line reaction — fed back to the Mind on `Revise`, recorded as the
+    /// escalation reason on `Veto`.
+    pub reaction: String,
+    pub confidence: f64,
+    /// The verdict as the Soul actually cast it, before threshold resolution.
+    pub raw_verdict: RawSoulVerdict,
+}
+
 /// Votes on a [`Plan`]'s acceptability. An LLM call (the real [`LlmSoulGate`],
 /// FEAT-029) or a network hiccup can fail, so this is fallible; a fallible
 /// vote propagates as an error out of [`run_deliberate`] rather than being
 /// silently treated as a verdict.
 #[async_trait]
 pub trait SoulGate: Send + Sync {
-    /// The verdict plus a one-line reaction — fed back to the Mind on
-    /// `Revise`, recorded as the escalation reason on `Veto`.
-    async fn evaluate(&self, plan: &Plan) -> Result<(SoulVerdict, String)>;
+    async fn evaluate(&self, plan: &Plan) -> Result<SoulEvaluation>;
 }
 
 /// Stub gate: always approves. Useful for wiring/testing the pipeline itself
@@ -158,8 +172,13 @@ pub struct PassthroughSoulGate;
 
 #[async_trait]
 impl SoulGate for PassthroughSoulGate {
-    async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
-        Ok((SoulVerdict::Approve, "stub Soul gate: auto-approved".to_string()))
+    async fn evaluate(&self, _plan: &Plan) -> Result<SoulEvaluation> {
+        Ok(SoulEvaluation {
+            verdict: SoulVerdict::Approve,
+            reaction: "stub Soul gate: auto-approved".to_string(),
+            confidence: 1.0,
+            raw_verdict: RawSoulVerdict::Approve,
+        })
     }
 }
 
@@ -188,9 +207,16 @@ pub struct SoulVote {
     pub gut_reaction: String,
 }
 
-/// Where cast votes go (FEAT-032 supplies the real durable sink — an
-/// `identity.db`-backed recorder — this trait is the seam). [`NullVoteRecorder`]
-/// is a stub, same pattern as [`PassthroughSoulGate`].
+/// Where cast votes go — fine-grained, one call per round (including
+/// `revise` rounds a deliberation never acts on), for vote calibration.
+/// Distinct from [`DeliberationSink`] (FEAT-032): that writes **one**
+/// decision-level record per *completed* deliberation (plan + final vote +
+/// disposition + outcome) for consolidation/principle-derivation, not a
+/// round-by-round log. [`NullVoteRecorder`] is a stub, same pattern as
+/// [`PassthroughSoulGate`] — nothing in this codebase gives `VoteRecorder`
+/// a durable backing store yet; that's left for whoever wants per-round
+/// calibration data specifically (deliberation-level capture, the more
+/// obviously useful signal, is what FEAT-032 actually builds).
 pub trait VoteRecorder: Send + Sync {
     fn record(&self, vote: &SoulVote);
 }
@@ -268,7 +294,7 @@ pub struct LlmSoulGate<'a> {
 
 #[async_trait]
 impl<'a> SoulGate for LlmSoulGate<'a> {
-    async fn evaluate(&self, plan: &Plan) -> Result<(SoulVerdict, String)> {
+    async fn evaluate(&self, plan: &Plan) -> Result<SoulEvaluation> {
         let messages = vec![
             ChatMessage::system(SOUL_SYSTEM_PROMPT),
             ChatMessage::user(soul_user_prompt(&plan.intent_summary, &self.grounding)),
@@ -285,7 +311,7 @@ impl<'a> SoulGate for LlmSoulGate<'a> {
         self.recorder.record(&vote);
 
         let verdict = resolve_verdict(raw.verdict, raw.confidence, self.confidence_threshold);
-        Ok((verdict, raw.gut_reaction))
+        Ok(SoulEvaluation { verdict, reaction: raw.gut_reaction, confidence: raw.confidence, raw_verdict: raw.verdict })
     }
 }
 
@@ -307,31 +333,183 @@ pub enum DeliberateOutcome {
     DeniedAndEscalated { reason: String },
 }
 
+// ---------------------------------------------------------------------------
+// Deliberation capture (FEAT-032)
+// ---------------------------------------------------------------------------
+
+/// How a completed deliberation was disposed of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Disposition {
+    /// The Soul approved; the executor ran the plan.
+    Executed,
+    /// The Soul vetoed.
+    Denied,
+    /// `max_rounds` was exhausted without approval.
+    Escalated,
+}
+
+/// The eventual real-world result of an executed plan — back-filled once
+/// known (acceptance criterion 2), separately from decision-time capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    Success,
+    Failure,
+    RolledBack,
+}
+
+/// One completed deliberation: the plan, the Soul's decisive vote, the
+/// disposition, and (once known) the outcome. Serialized into an
+/// `identity.db` episode's `detail` column (`kind = "deliberation"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliberationRecord {
+    pub plan_id: String,
+    pub intent_summary: String,
+    pub steps: Vec<String>,
+    pub confidence: f64,
+    pub verdict: RawSoulVerdict,
+    pub gut_reaction: String,
+    pub disposition: Disposition,
+    #[serde(default)]
+    pub outcome: Option<Outcome>,
+    /// The linked ITIL change/incident id, once an outcome is back-filled.
+    #[serde(default)]
+    pub outcome_ref_id: Option<String>,
+}
+
+/// Where completed deliberations go. [`NullDeliberationSink`] discards them
+/// (used where capture isn't wired up); [`IdentityDbSink`] is the real,
+/// `identity.db`-backed implementation.
+pub trait DeliberationSink: Send + Sync {
+    /// Write one deliberation record, returning an id an outcome observer
+    /// can later use with [`deliberation_backfill_outcome`].
+    fn capture(&self, record: &DeliberationRecord) -> Result<String>;
+}
+
+pub struct NullDeliberationSink;
+
+impl DeliberationSink for NullDeliberationSink {
+    fn capture(&self, _record: &DeliberationRecord) -> Result<String> {
+        Ok(String::new())
+    }
+}
+
+/// The real capture sink: writes a `kind = "deliberation"` episode to
+/// `identity.db`. Owns an `Arc<Mutex<Connection>>` (not a bare reference) so
+/// it satisfies `Send + Sync` and can be held across the `.await` points in
+/// [`run_deliberate`] — the same shape `regind::AppState` already uses for
+/// its database handles.
+pub struct IdentityDbSink {
+    conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>,
+}
+
+impl IdentityDbSink {
+    pub fn new(conn: std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) -> Self {
+        Self { conn }
+    }
+}
+
+impl DeliberationSink for IdentityDbSink {
+    fn capture(&self, record: &DeliberationRecord) -> Result<String> {
+        let conn = self.conn.lock().map_err(|_| anyhow!("identity.db mutex poisoned"))?;
+        let detail = serde_json::to_string(record)?;
+        let episode = crate::identity_db::episode_record(
+            &conn,
+            "deliberation",
+            Some(&record.plan_id),
+            &record.intent_summary,
+            Some(&detail),
+        )?;
+        Ok(episode.id)
+    }
+}
+
+/// Back-fill a captured deliberation's outcome once known (acceptance
+/// criterion 2) — e.g. from an executor-completion hook or a subsequent
+/// ITIL incident/change linkage. The decision loop itself never calls this;
+/// it's for whoever observes the real-world result later. Returns `Err` on
+/// a missing/malformed episode — unlike decision-time capture (best-effort,
+/// non-fatal by design), a back-fill call is already off the decision path,
+/// so the caller can decide how to handle failure (retry, log, ignore).
+pub fn deliberation_backfill_outcome(
+    conn: &rusqlite::Connection,
+    episode_id: &str,
+    outcome: Outcome,
+    outcome_ref_id: Option<&str>,
+) -> Result<()> {
+    let detail = crate::identity_db::episode_detail(conn, episode_id)?
+        .ok_or_else(|| anyhow!("no episode {episode_id}"))?;
+    let mut record: DeliberationRecord = serde_json::from_str(&detail)
+        .map_err(|e| anyhow!("episode {episode_id} detail is not a DeliberationRecord: {e}"))?;
+    record.outcome = Some(outcome);
+    record.outcome_ref_id = outcome_ref_id.map(str::to_string);
+    let updated = serde_json::to_string(&record)?;
+    crate::identity_db::episode_set_detail(conn, episode_id, &updated)
+}
+
+/// Deliberation episodes, newest first — what the consolidation loop
+/// (FEAT-024/FEAT-031) reads (acceptance criterion 4).
+pub fn deliberation_episodes(conn: &rusqlite::Connection, limit: usize) -> Result<Vec<crate::types::Episode>> {
+    crate::identity_db::episodes_by_kind(conn, "deliberation", limit)
+}
+
+/// Capture a completed deliberation, logging (not propagating) a failure —
+/// acceptance criterion 3: capture must never block or crash the decision
+/// loop.
+fn capture_best_effort(sink: &dyn DeliberationSink, plan: &Plan, eval: &SoulEvaluation, disposition: Disposition) {
+    let record = DeliberationRecord {
+        plan_id: plan.id.clone(),
+        intent_summary: plan.intent_summary.clone(),
+        steps: plan.steps.clone(),
+        confidence: eval.confidence,
+        verdict: eval.raw_verdict,
+        gut_reaction: eval.reaction.clone(),
+        disposition,
+        outcome: None,
+        outcome_ref_id: None,
+    };
+    if let Err(e) = sink.capture(&record) {
+        tracing::warn!("deliberation capture failed (non-fatal): {e:#}");
+    }
+}
+
 /// Run the deliberate pipeline: the Mind plans read-only, the Soul gates the
 /// plan, and only an approved plan reaches the executor. `Revise` feeds the
 /// Soul's reaction back to the Mind for up to `max_rounds` (minimum 1); a
-/// `Veto` or exhausted rounds default-denies.
+/// `Veto` or exhausted rounds default-denies. Exactly one deliberation is
+/// captured via `sink` per call, once the outcome is known (acceptance
+/// criterion 1) — never once per round.
 pub async fn run_deliberate(
     planner: &dyn Planner,
     soul: &dyn SoulGate,
     executor: &mut dyn Executor,
     max_rounds: u32,
+    sink: &dyn DeliberationSink,
 ) -> Result<DeliberateOutcome> {
     let mut feedback: Option<String> = None;
+    let mut last_round: Option<(Plan, SoulEvaluation)> = None;
     for _round in 0..max_rounds.max(1) {
         let plan = planner.plan(feedback.as_deref()).await?;
-        match soul.evaluate(&plan).await? {
-            (SoulVerdict::Approve, _) => {
+        let eval = soul.evaluate(&plan).await?;
+        match eval.verdict {
+            SoulVerdict::Approve => {
                 executor.execute(&plan);
+                capture_best_effort(sink, &plan, &eval, Disposition::Executed);
                 return Ok(DeliberateOutcome::Executed);
             }
-            (SoulVerdict::Veto, reason) => {
-                return Ok(DeliberateOutcome::DeniedAndEscalated { reason });
+            SoulVerdict::Veto => {
+                capture_best_effort(sink, &plan, &eval, Disposition::Denied);
+                return Ok(DeliberateOutcome::DeniedAndEscalated { reason: eval.reaction });
             }
-            (SoulVerdict::Revise, reason) => {
-                feedback = Some(reason);
+            SoulVerdict::Revise => {
+                feedback = Some(eval.reaction.clone());
+                last_round = Some((plan, eval));
             }
         }
+    }
+    if let Some((plan, eval)) = last_round {
+        capture_best_effort(sink, &plan, &eval, Disposition::Escalated);
     }
     Ok(DeliberateOutcome::DeniedAndEscalated {
         reason: format!("max_rounds ({max_rounds}) reached without Soul approval"),
@@ -430,8 +608,13 @@ mod tests {
     struct FixedVerdictSoul(SoulVerdict);
     #[async_trait]
     impl SoulGate for FixedVerdictSoul {
-        async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
-            Ok((self.0, "canned verdict".to_string()))
+        async fn evaluate(&self, _plan: &Plan) -> Result<SoulEvaluation> {
+            let raw_verdict = match self.0 {
+                SoulVerdict::Approve => RawSoulVerdict::Approve,
+                SoulVerdict::Revise => RawSoulVerdict::Revise,
+                SoulVerdict::Veto => RawSoulVerdict::Veto,
+            };
+            Ok(SoulEvaluation { verdict: self.0, reaction: "canned verdict".to_string(), confidence: 0.9, raw_verdict })
         }
     }
 
@@ -453,7 +636,7 @@ mod tests {
         let soul = FixedVerdictSoul(SoulVerdict::Approve);
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &soul, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert_eq!(outcome, DeliberateOutcome::Executed);
         assert_eq!(executor.executed.lock().unwrap().len(), 1, "executed exactly once");
         assert_eq!(planner.calls.load(Ordering::SeqCst), 1, "one planning round, no re-plan needed");
@@ -467,7 +650,7 @@ mod tests {
         let soul = FixedVerdictSoul(SoulVerdict::Veto);
         let mut executor = SpyExecutor::default();
 
-        run_deliberate(&planner, &soul, &mut executor, 3).await.unwrap();
+        run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert!(executor.executed.lock().unwrap().is_empty(), "zero tool executions from planning alone");
     }
 
@@ -477,7 +660,7 @@ mod tests {
         let soul = FixedVerdictSoul(SoulVerdict::Veto);
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &soul, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         match outcome {
             DeliberateOutcome::DeniedAndEscalated { reason } => assert_eq!(reason, "canned verdict"),
             other => panic!("expected DeniedAndEscalated, got {other:?}"),
@@ -491,7 +674,7 @@ mod tests {
         let soul = FixedVerdictSoul(SoulVerdict::Revise); // never approves
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &soul, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert!(matches!(outcome, DeliberateOutcome::DeniedAndEscalated { .. }));
         assert_eq!(planner.calls.load(Ordering::SeqCst), 3, "max_rounds honoured — exactly 3 planning attempts");
         assert!(executor.executed.lock().unwrap().is_empty());
@@ -513,11 +696,11 @@ mod tests {
         struct RevisesOnceSoul(AtomicU32);
         #[async_trait]
         impl SoulGate for RevisesOnceSoul {
-            async fn evaluate(&self, _plan: &Plan) -> Result<(SoulVerdict, String)> {
+            async fn evaluate(&self, _plan: &Plan) -> Result<SoulEvaluation> {
                 Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
-                    (SoulVerdict::Revise, "narrow the blast radius".to_string())
+                    SoulEvaluation { verdict: SoulVerdict::Revise, reaction: "narrow the blast radius".to_string(), confidence: 0.5, raw_verdict: RawSoulVerdict::Revise }
                 } else {
-                    (SoulVerdict::Approve, "ok now".to_string())
+                    SoulEvaluation { verdict: SoulVerdict::Approve, reaction: "ok now".to_string(), confidence: 0.9, raw_verdict: RawSoulVerdict::Approve }
                 })
             }
         }
@@ -526,7 +709,7 @@ mod tests {
         let soul = RevisesOnceSoul(AtomicU32::new(0));
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &soul, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert_eq!(outcome, DeliberateOutcome::Executed);
         let seen = planner.seen.lock().unwrap();
         assert_eq!(seen.as_slice(), [None, Some("narrow the blast radius".to_string())]);
@@ -534,7 +717,7 @@ mod tests {
 
     #[tokio::test]
     async fn passthrough_soul_gate_always_approves() {
-        let (verdict, _) = PassthroughSoulGate.evaluate(&Plan::default()).await.unwrap();
+        let verdict = PassthroughSoulGate.evaluate(&Plan::default()).await.unwrap().verdict;
         assert_eq!(verdict, SoulVerdict::Approve);
     }
 
@@ -620,7 +803,7 @@ mod tests {
         let llm = SpyLlm::new(r#"{"confidence": 0.85, "gut_reaction": "solid", "verdict": "approve"}"#);
         let recorder = SpyRecorder::default();
         let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
-        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        let verdict = gate.evaluate(&plan_with_reasoning()).await.unwrap().verdict;
         assert_eq!(verdict, SoulVerdict::Approve);
     }
 
@@ -630,7 +813,7 @@ mod tests {
         let llm = SpyLlm::new(r#"{"confidence": 0.4, "gut_reaction": "not sure", "verdict": "approve"}"#);
         let recorder = SpyRecorder::default();
         let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
-        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        let verdict = gate.evaluate(&plan_with_reasoning()).await.unwrap().verdict;
         assert_eq!(verdict, SoulVerdict::Revise);
     }
 
@@ -640,7 +823,8 @@ mod tests {
         let llm = SpyLlm::new(r#"{"confidence": 0.99, "gut_reaction": "no", "verdict": "veto"}"#);
         let recorder = SpyRecorder::default();
         let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
-        let (verdict, reason) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        let eval = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        let (verdict, reason) = (eval.verdict, eval.reaction);
         assert_eq!(verdict, SoulVerdict::Veto);
         assert_eq!(reason, "no");
     }
@@ -654,7 +838,7 @@ mod tests {
         let planner = FixedPlanner::new();
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &gate, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &gate, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         match outcome {
             DeliberateOutcome::DeniedAndEscalated { reason } => assert_eq!(reason, "against stewardship"),
             other => panic!("expected DeniedAndEscalated, got {other:?}"),
@@ -684,7 +868,7 @@ mod tests {
         let planner = FixedPlanner::new();
         let mut executor = SpyExecutor::default();
 
-        let outcome = run_deliberate(&planner, &gate, &mut executor, 3).await.unwrap();
+        let outcome = run_deliberate(&planner, &gate, &mut executor, 3, &NullDeliberationSink).await.unwrap();
         assert!(matches!(outcome, DeliberateOutcome::DeniedAndEscalated { .. }));
         assert_eq!(planner.calls.load(Ordering::SeqCst), 3);
         assert_eq!(recorder.votes.lock().unwrap().len(), 3, "every round's vote was captured");
@@ -711,7 +895,7 @@ mod tests {
         let llm = SpyLlm::new("Sure, here you go:\n{\"confidence\": 0.8, \"gut_reaction\": \"ok\", \"verdict\": \"approve\"}\nHope that helps!");
         let recorder = SpyRecorder::default();
         let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
-        let (verdict, _) = gate.evaluate(&plan_with_reasoning()).await.unwrap();
+        let verdict = gate.evaluate(&plan_with_reasoning()).await.unwrap().verdict;
         assert_eq!(verdict, SoulVerdict::Approve);
     }
 
@@ -721,6 +905,171 @@ mod tests {
         let recorder = SpyRecorder::default();
         let gate = LlmSoulGate { llm: &llm, grounding: vec![], confidence_threshold: 0.7, recorder: &recorder };
         assert!(gate.evaluate(&plan_with_reasoning()).await.is_err());
+    }
+
+    // --- Deliberation capture (FEAT-032) ---
+
+    fn identity_conn() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::identity_db::init_identity_schema(&c).unwrap();
+        c
+    }
+
+    fn identity_sink() -> (IdentityDbSink, std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>) {
+        let conn = std::sync::Arc::new(std::sync::Mutex::new(identity_conn()));
+        (IdentityDbSink::new(conn.clone()), conn)
+    }
+
+    #[tokio::test]
+    async fn approved_deliberation_writes_exactly_one_episode() {
+        // acceptance criterion 1
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Approve);
+        let mut executor = SpyExecutor::default();
+
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        let episodes = deliberation_episodes(&conn.lock().unwrap(), 10).unwrap();
+        assert_eq!(episodes.len(), 1);
+        let record: DeliberationRecord = serde_json::from_str(episodes[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(record.disposition, Disposition::Executed);
+        assert_eq!(record.plan_id, "plan-0");
+        assert!(!record.steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_multi_round_deliberation_still_writes_exactly_one_episode() {
+        // acceptance criterion 1 — revise rounds don't each get their own episode
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = RevisesOnceSoulPublic::default();
+        let mut executor = SpyExecutor::default();
+
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        assert_eq!(deliberation_episodes(&conn.lock().unwrap(), 10).unwrap().len(), 1);
+    }
+
+    /// Like the private `RevisesOnceSoul` in the FEAT-029 section, but reusable
+    /// across this section's tests without fighting borrow scoping.
+    #[derive(Default)]
+    struct RevisesOnceSoulPublic(AtomicU32);
+    #[async_trait]
+    impl SoulGate for RevisesOnceSoulPublic {
+        async fn evaluate(&self, _plan: &Plan) -> Result<SoulEvaluation> {
+            Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                SoulEvaluation { verdict: SoulVerdict::Revise, reaction: "reconsider".to_string(), confidence: 0.5, raw_verdict: RawSoulVerdict::Revise }
+            } else {
+                SoulEvaluation { verdict: SoulVerdict::Approve, reaction: "ok".to_string(), confidence: 0.9, raw_verdict: RawSoulVerdict::Approve }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn vetoed_deliberation_captures_denied_disposition() {
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Veto);
+        let mut executor = SpyExecutor::default();
+
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        let episodes = deliberation_episodes(&conn.lock().unwrap(), 10).unwrap();
+        let record: DeliberationRecord = serde_json::from_str(episodes[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(record.disposition, Disposition::Denied);
+    }
+
+    #[tokio::test]
+    async fn max_rounds_exhaustion_captures_escalated_disposition() {
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Revise); // never approves
+        let mut executor = SpyExecutor::default();
+
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        let episodes = deliberation_episodes(&conn.lock().unwrap(), 10).unwrap();
+        assert_eq!(episodes.len(), 1, "still exactly one episode, using the last round");
+        let record: DeliberationRecord = serde_json::from_str(episodes[0].detail.as_ref().unwrap()).unwrap();
+        assert_eq!(record.disposition, Disposition::Escalated);
+    }
+
+    #[tokio::test]
+    async fn outcome_is_back_filled_after_execution() {
+        // acceptance criterion 2
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Approve);
+        let mut executor = SpyExecutor::default();
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        let episode_id = {
+            let c = conn.lock().unwrap();
+            deliberation_episodes(&c, 10).unwrap()[0].id.clone()
+        };
+
+        {
+            let c = conn.lock().unwrap();
+            deliberation_backfill_outcome(&c, &episode_id, Outcome::Success, Some("change-42")).unwrap();
+        }
+
+        let c = conn.lock().unwrap();
+        let detail = crate::identity_db::episode_detail(&c, &episode_id).unwrap().unwrap();
+        let record: DeliberationRecord = serde_json::from_str(&detail).unwrap();
+        assert_eq!(record.outcome, Some(Outcome::Success));
+        assert_eq!(record.outcome_ref_id.as_deref(), Some("change-42"));
+        // the original decision-time fields survive the back-fill
+        assert_eq!(record.disposition, Disposition::Executed);
+    }
+
+    #[tokio::test]
+    async fn backfill_on_an_unknown_episode_errors() {
+        let conn = identity_conn();
+        assert!(deliberation_backfill_outcome(&conn, "no-such-episode", Outcome::Failure, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn capture_failure_is_logged_and_never_blocks_the_decision_loop() {
+        // acceptance criterion 3
+        struct FailingSink;
+        impl DeliberationSink for FailingSink {
+            fn capture(&self, _record: &DeliberationRecord) -> Result<String> {
+                Err(anyhow!("simulated identity.db failure"))
+            }
+        }
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Approve);
+        let mut executor = SpyExecutor::default();
+
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &FailingSink).await.unwrap();
+        assert_eq!(outcome, DeliberateOutcome::Executed, "the decision loop completes despite the capture failure");
+        assert_eq!(executor.executed.lock().unwrap().len(), 1, "execution still happened");
+    }
+
+    #[tokio::test]
+    async fn consolidation_can_query_deliberation_episodes_by_kind() {
+        // acceptance criterion 4
+        let (sink, conn) = identity_sink();
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Approve);
+        let mut executor = SpyExecutor::default();
+        run_deliberate(&planner, &soul, &mut executor, 3, &sink).await.unwrap();
+
+        // the exact query FEAT-031's consolidation loop would use
+        let c = conn.lock().unwrap();
+        let episodes = crate::identity_db::episodes_by_kind(&c, "deliberation", 50).unwrap();
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].kind, "deliberation");
+    }
+
+    #[tokio::test]
+    async fn null_sink_discards_silently() {
+        let planner = FixedPlanner::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Approve);
+        let mut executor = SpyExecutor::default();
+        let outcome = run_deliberate(&planner, &soul, &mut executor, 3, &NullDeliberationSink).await.unwrap();
+        assert_eq!(outcome, DeliberateOutcome::Executed);
     }
 
     // --- Act mode unchanged (acceptance criterion 5) ---

@@ -1196,6 +1196,36 @@ pub fn episode_prune(conn: &Connection, before: &str) -> Result<usize> {
     Ok(n)
 }
 
+/// Episodes of a given `kind` (any state), newest first — e.g. `kind =
+/// "deliberation"` for FEAT-032's capture/consolidation queries.
+pub fn episodes_by_kind(conn: &Connection, kind: &str, limit: usize) -> Result<Vec<Episode>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, ref_id, summary, detail, created_at, state
+         FROM episodes WHERE kind = ?1 ORDER BY created_at DESC, rowid DESC LIMIT ?2",
+    )?;
+    let rows = stmt
+        .query_map(params![kind, limit as i64], row_to_episode)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The `detail` column of one episode, if it exists.
+pub fn episode_detail(conn: &Connection, id: &str) -> Result<Option<String>> {
+    conn.query_row("SELECT detail FROM episodes WHERE id = ?1", params![id], |r| r.get(0))
+        .optional()
+        .map_err(Into::into)
+}
+
+/// Overwrite one episode's `detail` column — used to back-fill a
+/// deliberation's outcome once known (FEAT-032).
+pub fn episode_set_detail(conn: &Connection, id: &str, detail: &str) -> Result<()> {
+    let n = conn.execute("UPDATE episodes SET detail = ?1 WHERE id = ?2", params![detail, id])?;
+    if n == 0 {
+        return Err(anyhow!("no episode {id}"));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Session + transcript accessors (FEAT-023)
 // ---------------------------------------------------------------------------

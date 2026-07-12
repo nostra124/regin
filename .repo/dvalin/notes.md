@@ -634,3 +634,57 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-032 (deliberation capture — the real `VoteRecorder`), then
   FEAT-031 (principle derivation & ratification), per the milestone's
   suggested order.
+
+### 2026-07-12 — FEAT-032: Deliberation capture (0.6.0 decision plane)
+- **FEAT-032 implemented and moved to done/.** Landed in `decision.rs` and
+  `identity_db.rs` — turns FEAT-028's `run_deliberate` and FEAT-029's Soul
+  vote into durable `deliberation` episodes, closing the capture-and-learn
+  loop DISC-018 Q4 calls for.
+- **`DeliberationSink` trait + `NullDeliberationSink`/`IdentityDbSink`** —
+  same "define the seam, stub the sink, then a real impl" pattern used
+  throughout this milestone. `IdentityDbSink` wraps `Arc<Mutex<Connection>>`
+  (owned, not borrowed) so it satisfies `Send + Sync` despite
+  `rusqlite::Connection` not being `Sync` on its own — mirrors `AppState`'s
+  own locking pattern in `regind`. `capture()` writes one `identity_db`
+  episode (kind = `"deliberation"`, `ref_id` = plan id, `detail` = JSON
+  `DeliberationRecord`).
+- **Exactly one episode per completed deliberation, not one per revise
+  round.** `run_deliberate` now tracks `last_round: Option<(Plan,
+  SoulEvaluation)>` across the loop and calls a single
+  `capture_best_effort()` at each of its three exit points (Approve, Veto,
+  max-rounds exhaustion) — verified directly with a multi-round test
+  (`RevisesOnceSoul`) asserting the episode count stays at 1 even after a
+  revise round runs first.
+- **`Disposition` (`Executed`/`Denied`/`Escalated`) and `Outcome`
+  (`Success`/`Failure`/`RolledBack`)** — disposition is set at capture time
+  from which loop-exit branch fired; outcome starts `None` and is
+  back-filled later via `deliberation_backfill_outcome()`, which reads the
+  episode's JSON detail, patches in `outcome`/`outcome_ref_id`, and writes it
+  back — errors if the episode id doesn't exist (no silent no-op).
+- **Fail-safe capture**: `capture_best_effort()` logs (`tracing::warn!`) and
+  swallows any `DeliberationSink::capture` error rather than propagating it
+  — a `FailingSink` test double confirms `run_deliberate` still returns the
+  correct `DeliberateOutcome` even when every capture call errors.
+- **Consolidation query path**: added `identity_db::episodes_by_kind` (plus
+  `episode_detail`/`episode_set_detail` helpers) and a thin
+  `decision::deliberation_episodes()` wrapper so FEAT-024's Curator (and,
+  later, FEAT-031's principle derivation) can pull `deliberation` episodes
+  without reaching into `identity_db` internals directly.
+- 9 new tests (regin-core 283→292 across the two touched files), covering
+  all 5 acceptance criteria: exactly-one-episode capture (single-round and
+  multi-round), disposition correctness for all three dispositions, outcome
+  back-fill (success path + unknown-episode error path), capture-failure
+  non-blocking, and kind-scoped querying. `SoulGate::evaluate`'s return type
+  changed from a `(SoulVerdict, String)` tuple to a `SoulEvaluation` struct
+  (`verdict`, `reaction`, `confidence`, `raw_verdict`) so `capture_best_effort`
+  has the full vote to record, not just the resolved verdict — updated all
+  existing test doubles and call sites accordingly. Full workspace
+  build/test/clippy stays green (292 regin-core tests, 0 new clippy warnings
+  — the 24 pre-existing warnings on this branch are all in unrelated code).
+- Like FEAT-028/029, capture is exercised entirely through `run_deliberate`
+  in tests — no caller in `regind`'s live chat loop constructs a
+  `DeliberationSink` yet; that live-loop wiring remains future work, not a
+  gap in this ticket's scope.
+- Next: FEAT-031 (principle derivation & ratification) — now has both
+  FEAT-024's consolidation pipeline and FEAT-032's queryable `deliberation`
+  episodes to derive principles from.
