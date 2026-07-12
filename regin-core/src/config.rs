@@ -42,6 +42,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("push.min_severity", "critical", "Minimum severity to actively push (FEAT-044)"),
     ("push.min_interval_secs", "300", "Minimum seconds between active pushes (rate limit)"),
     ("regind.heartbeat", "", "Last scheduler tick (RFC3339); a stale value signals a stalled loop (FEAT-048)"),
+    ("decision.default_mode", "act", "Default decision mode when no Persona override applies: act|deliberate (FEAT-028)"),
+    ("decision.deliberate.max_rounds", "3", "Plan/re-plan rounds before deliberate mode default-denies + escalates (FEAT-028)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/

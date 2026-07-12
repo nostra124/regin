@@ -491,3 +491,48 @@ toolchain**. Read it at the start of every session; append to it at the end.
   tests). Full workspace build/test/clippy stays green.
 - Next: the decision-plane FEATs, starting with FEAT-028 (dual-mode agent
   loop), per the milestone's suggested order.
+
+### 2026-07-12 — FEAT-028: Dual-mode agent loop (act vs deliberate) (0.6.0 decision plane)
+- **FEAT-028 implemented and moved to done/.** New `regin-core/src/decision.rs`
+  — pure-ish engine, same pattern as `remediation.rs`/`safelane.rs` (both of
+  which are *also* not wired into `regind`'s live loop yet — confirmed by
+  grep, zero call sites in `regind/src/main.rs`). This ticket follows suit
+  deliberately: **not wired into `agentic_chat`**. Reasoning captured in the
+  module doc comment so it isn't mistaken for an oversight — wiring a
+  stub-that-always-approves `SoulGate` into the live chat loop would add a
+  new production code path for zero behavioural benefit until FEAT-029 lands
+  the real gate. `act` mode (today's `chat_turn` path) is therefore unchanged
+  *by construction*, satisfying acceptance criterion 5 without a regression
+  test against `agentic_chat` itself.
+- **Mode selection:** `ContemplatedAction { reversible, destructive,
+  outward_facing, urgent }` + a pluggable `RiskClassifier` trait.
+  `DefaultRiskClassifier` mirrors DISC-009's blast-radius/reversibility
+  judgement (irreversible/destructive/outward → deliberate; urgency
+  overrides to act). `select_mode()` lets a `Persona.default_mode` override
+  (new optional field, `"act"`|`"deliberate"`, validated) win outright over
+  the classifier.
+- **Deliberate pipeline:** `Planner` (async, produces a read-only `Plan` —
+  `intent_summary`/`steps`/`intended_tool_calls`, zero side effects) → 
+  `SoulGate` (`Approve`/`Revise`/`Veto` + one-line reaction) →
+  `Executor` (only reached on `Approve`). `run_deliberate()` loops
+  plan→gate up to `max_rounds` (config: `decision.deliberate.max_rounds`,
+  default 3; `decision.default_mode`, default `act`), feeding `Revise`'s
+  reaction back into the next planning round, and returns
+  `DeniedAndEscalated { reason }` on `Veto` or exhausted rounds — the actual
+  bus/dvalin escalation I/O (FEAT-015) is the *caller's* job when this gets
+  wired up; this module signals it, doesn't perform it.
+- `PassthroughSoulGate` (always approves) is the explicit stand-in for
+  FEAT-029 — lets FEAT-028 land and be fully tested without a forward
+  dependency on the ticket that hasn't been built yet.
+- 14 new tests (regin-core 243→257): mode selection with both the real
+  classifier and a `FakeClassifier` (acceptance criterion 1), a spy executor
+  proving zero executions during planning/veto and exactly-one on approval
+  (criteria 2–3), `max_rounds` + persona-override enforcement (criterion 4),
+  a `Revise`-feedback round-trip test, and the `Persona.default_mode`
+  field's own round-trip/validation tests.
+- Full workspace build/test/clippy stays green (fixed one new
+  `collapsible_if` clippy lint in `persona.rs`'s validation — everything else
+  was pre-existing, untouched).
+- Next: FEAT-030 (Soul configurator + value catalog), per the milestone's
+  suggested order — lands before FEAT-029 so the real Soul gate has a value
+  catalog to vote from when it's built.

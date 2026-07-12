@@ -4,6 +4,7 @@ pub mod bus;
 pub mod chair;
 pub mod config;
 pub mod context;
+pub mod decision;
 pub mod deputy;
 pub mod desired;
 pub mod evaluate;

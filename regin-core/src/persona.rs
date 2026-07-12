@@ -26,6 +26,10 @@ pub struct Persona {
     /// (all tools allowed) — the standalone default.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Per-Persona decision-mode override (`"act"` | `"deliberate"`, FEAT-028 /
+    /// DISC-018). Unset = no override; the risk classifier decides.
+    #[serde(default)]
+    pub default_mode: Option<String>,
 }
 
 impl Persona {
@@ -55,6 +59,11 @@ impl Persona {
             if !ALL_TOOLS.contains(&t.as_str()) {
                 anyhow::bail!("persona {:?}: unknown tool {t:?} (known: {ALL_TOOLS:?})", self.role);
             }
+        }
+        if let Some(m) = &self.default_mode
+            && m != "act" && m != "deliberate"
+        {
+            anyhow::bail!("persona {:?}: default_mode must be \"act\" or \"deliberate\", got {m:?}", self.role);
         }
         Ok(())
     }
@@ -113,5 +122,14 @@ mod tests {
     fn validation_rejects_empty_role_and_unknown_tool() {
         assert!(Persona::from_toml("role = \"\"\n").is_err());
         assert!(Persona::from_toml("role = \"x\"\ntools = [\"telepathy\"]\n").is_err());
+    }
+
+    #[test]
+    fn default_mode_is_optional_and_validated() {
+        let p = Persona::from_toml("role = \"x\"\n").unwrap();
+        assert_eq!(p.default_mode, None);
+        let p = Persona::from_toml("role = \"x\"\ndefault_mode = \"deliberate\"\n").unwrap();
+        assert_eq!(p.default_mode.as_deref(), Some("deliberate"));
+        assert!(Persona::from_toml("role = \"x\"\ndefault_mode = \"whenever\"\n").is_err());
     }
 }
