@@ -20,6 +20,14 @@ pub enum Request {
     #[serde(rename = "ping")]
     Ping,
 
+    /// The user's answer to a `Response::PermissionRequest` sent earlier on
+    /// this same daemon (FEAT-080, acceptance criterion 4). Sent as its own
+    /// request — typically over a fresh connection opened just for this
+    /// reply — rather than inline on the streaming connection, so no
+    /// existing streaming command needs to also read from its socket.
+    #[serde(rename = "permission_response")]
+    PermissionResponse { request_id: String, allow: bool },
+
     #[serde(rename = "skill_list")]
     SkillList { cwd: Option<String> },
 
@@ -328,6 +336,12 @@ pub enum Response {
     /// Tool execution result.
     #[serde(rename = "tool_result")]
     ToolResultEvent { name: String, success: bool, output: String },
+
+    /// A tool's permission level resolved to `ask` (FEAT-080, criterion 4):
+    /// the daemon has paused execution and is waiting for a
+    /// `Request::PermissionResponse` carrying this `request_id`.
+    #[serde(rename = "permission_request")]
+    PermissionRequest { request_id: String, tool: String, detail: String },
 
     /// Stream/agentic loop finished.
     #[serde(rename = "stream_done")]

@@ -50,6 +50,19 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("lsp.debounce_ms", "500", "Minimum interval between automatic diagnostics runs for the same file (FEAT-078)"),
     ("lsp.idle_timeout_secs", "300", "Idle time before a spawned language server process is recycled (FEAT-078)"),
     ("task.max_concurrency", "3", "Maximum subagents running concurrently via the `task` tool (FEAT-079)"),
+    ("permission.bash", "allow", "Permission level for bash when no permission.bash.patterns rule matches: allow|ask|deny (FEAT-080)"),
+    ("permission.bash.patterns", "[]", "JSON array of {pattern, level} glob rules for bash commands, last match wins (FEAT-080)"),
+    ("permission.read_file", "allow", "Permission level for read_file: allow|ask|deny (FEAT-080)"),
+    ("permission.write_file", "allow", "Permission level for write_file: allow|ask|deny (FEAT-080)"),
+    ("permission.edit_file", "allow", "Permission level for edit_file: allow|ask|deny (FEAT-080)"),
+    ("permission.apply_patch", "allow", "Permission level for apply_patch: allow|ask|deny (FEAT-080)"),
+    ("permission.undo", "allow", "Permission level for undo: allow|ask|deny (FEAT-080)"),
+    ("permission.undo_list", "allow", "Permission level for undo_list: allow|ask|deny (FEAT-080)"),
+    ("permission.glob", "allow", "Permission level for glob: allow|ask|deny (FEAT-080)"),
+    ("permission.grep", "allow", "Permission level for grep: allow|ask|deny (FEAT-080)"),
+    ("permission.web_search", "allow", "Permission level for web_search: allow|ask|deny (FEAT-080)"),
+    ("permission.diagnostics", "allow", "Permission level for diagnostics: allow|ask|deny (FEAT-080)"),
+    ("permission.task", "allow", "Permission level for task (subagent delegation): allow|ask|deny (FEAT-080)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
