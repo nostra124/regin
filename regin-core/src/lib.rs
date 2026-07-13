@@ -47,6 +47,7 @@ pub mod soul;
 pub mod tools;
 pub mod two_tier;
 pub mod types;
+pub mod undo;
 pub mod worker;
 
 /// Test-only synchronization for tests that mutate XDG_* env vars (FEAT-075).

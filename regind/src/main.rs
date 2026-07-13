@@ -14,6 +14,7 @@ use regin_core::{
     reflect, repo, schedule, skills, soul,
     tools,
     types::ChatMessage,
+    undo,
 };
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -29,6 +30,9 @@ struct AppState {
     /// this instead of constructing a `MimirClient` from live config. `None`
     /// in production.
     llm_override: Option<Arc<dyn LlmClient>>,
+    /// Ephemeral edit history for the `undo`/`undo_list` tools (FEAT-085).
+    /// In-memory only, by design — lost on daemon restart.
+    undo: Mutex<undo::UndoStore>,
 }
 
 unsafe impl Send for AppState {}
@@ -114,7 +118,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
     info!("Listening on {}", socket_path.display());
 
-    let state = Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: None });
+    let state = Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: None, undo: Mutex::new(undo::UndoStore::new()) });
 
     let sched_state = Arc::clone(&state);
     tokio::spawn(async move { schedule_checker(sched_state).await });
@@ -266,7 +270,7 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
                         arguments: call.function.arguments.clone(),
                     }).await?;
 
-                    let result = tools::execute_tool_gated(call, cwd, persona.as_ref()).await;
+                    let result = tools::execute_tool_with_undo(call, cwd, persona.as_ref(), &state.undo).await;
 
                     send(w, &Response::ToolResultEvent {
                         name: result.name.clone(),
@@ -1301,7 +1305,7 @@ mod dispatch_tests {
         db::init_schema(&conn).unwrap();
         let identity_conn = rusqlite::Connection::open_in_memory().unwrap();
         identity_db::init_identity_schema(&identity_conn).unwrap();
-        Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: llm })
+        Arc::new(AppState { db: Mutex::new(conn), identity_db: Mutex::new(identity_conn), llm_override: llm, undo: Mutex::new(undo::UndoStore::new()) })
     }
 
     /// Drive the real dispatch over an in-memory duplex and collect responses.
