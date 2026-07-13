@@ -23,23 +23,23 @@ in 0.8.0 are orthogonal to objectives/planning, though they may converge later.
 
 ### Track A — Coding agent (DISC-021)
 
-| ID | Title | Complexity | From |
-|----|-------|-----------|------|
-| FEAT-077 | Code-aware search tools (glob + grep) | M | DISC-021 |
-| FEAT-078 | LSP diagnostics feedback loop | L | DISC-021 |
-| FEAT-079 | Multi-agent orchestration (subagent Task tool) | L | DISC-021 |
-| FEAT-080 | Granular tool permissions (allow/ask/deny) | M | DISC-021 |
-| FEAT-081 | MCP client protocol (local + remote) | L | DISC-021 |
-| FEAT-082 | Plugin system (event-driven hooks) | L | DISC-021 |
-| FEAT-083 | Multi-provider model abstraction | L | DISC-021 |
-| FEAT-084 | External references (local dirs + git repos) | S | DISC-021 |
-| FEAT-085 | Edit tool polish (apply_patch, undo/redo) | S | DISC-021 |
+| ID | Title | Complexity | From | Status |
+|----|-------|-----------|------|--------|
+| FEAT-077 | Code-aware search tools (glob + grep) | M | DISC-021 | done |
+| FEAT-078 | LSP diagnostics feedback loop | L | DISC-021 | open |
+| FEAT-079 | Multi-agent orchestration (subagent Task tool) | L | DISC-021 | open |
+| FEAT-080 | Granular tool permissions (allow/ask/deny) | M | DISC-021 | open |
+| FEAT-081 | MCP client protocol (local + remote) | L | DISC-021 | open |
+| FEAT-082 | Plugin system (event-driven hooks) | L | DISC-021 | open |
+| FEAT-083 | Multi-provider model abstraction | L | DISC-021 | open |
+| FEAT-084 | External references (local dirs + git repos) | S | DISC-021 | open |
+| FEAT-085 | Edit tool polish (apply_patch, undo/redo) | S | DISC-021 | open |
 
 ### Track B — Web UI (DISC-022)
 
-| ID | Title | Complexity | From |
-|----|-------|-----------|------|
-| FEAT-087 | Web UI server (embedded HTTP, PAM auth, mobile-first SPA) | M | DISC-022 |
+| ID | Title | Complexity | From | Status |
+|----|-------|-----------|------|--------|
+| FEAT-087 | Web UI server (embedded HTTP, PAM auth, mobile-first SPA) | M | DISC-022 | open |
 
 ## Suggested delivery order
 

@@ -1645,3 +1645,53 @@ Implementation section:
   test completion" instruction). Next up per the roadmap: MILESTONE-0.8.0
   (coding agent + web UI plane, FEAT-077..085 + FEAT-087), independent of
   0.7.0.
+
+### 2026-07-13 — FEAT-077: Code-aware search tools (glob + grep) (0.8.0 coding agent plane — MILESTONE OPENED)
+
+- **MILESTONE-0.8.0 opened** — independent of 0.7.0 (doesn't depend on
+  objectives/planning); turns regin into a full-stack coding agent
+  (DISC-021) plus a web UI plane (DISC-022). Starting Track A's suggested
+  "foundation" pairing (FEAT-077 + FEAT-085); doing FEAT-077 first.
+- Adds `glob`/`grep` to `tools.rs` as dedicated, `.gitignore`-aware search
+  tools, backed by the `ignore`/`globset`/`regex` crates (new workspace
+  dependencies — the same crate family ripgrep itself is built from,
+  rather than hand-rolling gitignore parsing or glob matching).
+- **No `protocol.rs` changes needed** — unlike the 0.7.0 CLI verbs
+  (goal/objective), tool calls already flow through a fully generic path
+  (`tools::tool_definitions_for` + `tools::execute_tool_gated`, dispatched
+  from `regind`'s chat loop via `ChatSend`). Adding a `ToolDef` +
+  an `execute_tool` match arm was the entire integration surface —
+  acceptance criterion 4's "registered in daemon dispatch... handled in
+  the chat loop" was already true by construction once the tool existed.
+- `persona::ALL_TOOLS` gained `"glob"`/`"grep"` so a persona.toml can
+  explicitly scope a role to just the search tools (or exclude them)
+  the same way it already can for `bash`/`read_file`/etc.
+- **`.gitignore` is honoured regardless of whether the target directory is
+  an actual git repo** — `ignore::WalkBuilder`'s default (`require_git =
+  true`) only applies `.gitignore` inside a real `.git` repo, which is
+  narrower than what a code-search tool should do (a working copy before
+  `git init`, or a vendored subtree, still has meaningful `.gitignore`
+  rules); explicitly set `require_git(false)` via a small shared
+  `code_search_walker` helper both tools call. Caught this by writing the
+  gitignore test first and watching it fail against the real (non-git)
+  temp directory the test used — not something I'd have predicted from
+  reading `ignore`'s docs alone.
+- `grep`'s output includes one line of context on each side of a match
+  (acceptance criterion 2's "surrounding line context") and caps at 200
+  matches per call with a truncation notice — a runaway pattern against a
+  large tree shouldn't flood the agent's context window.
+- Error cases (acceptance criterion 5) are structured, non-panicking
+  `(String, bool)` returns matching every other `exec_*` fn's convention:
+  empty pattern, invalid regex/glob, non-existent path, invalid `include`
+  filter.
+- 6 new `tools::` tests (glob: matches+recency+gitignore, empty/invalid/
+  missing-path errors; grep: matches+context+include+gitignore, no-
+  matches/invalid-regex/invalid-include/missing-path errors, truncation
+  at the match cap) plus 1 new `persona::` test confirming a persona can
+  be scoped to just `glob`/`grep`. Full workspace build/test/clippy stays
+  green (481 regin-core tests, up from 475; zero new clippy warnings —
+  the one `tools.rs` collapsible-if hit is the same pre-existing
+  `exec_write_file` warning from before this ticket, just at a shifted
+  line number).
+- Next: FEAT-085 (edit tool polish — `apply_patch`, undo/redo), the other
+  half of Track A's "foundation" pairing, independent of FEAT-077.
