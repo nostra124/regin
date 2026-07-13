@@ -210,6 +210,66 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "apply_patch".into(),
+                description: "Precise file edits: write a new file, apply a unified diff to an existing one, or delete a file.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "tool": {
+                            "type": "string",
+                            "enum": ["write", "edit", "delete"],
+                            "description": "write = create/overwrite path with patch as its content; edit = apply patch (a unified diff) to path; delete = remove path"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        },
+                        "patch": {
+                            "type": "string",
+                            "description": "For write: the new file content. For edit: a unified diff (--- a/... / +++ b/... / @@ hunks). Unused for delete."
+                        }
+                    },
+                    "required": ["tool", "path"]
+                }),
+            },
+        },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "undo".into(),
+                description: "Revert the most recent edit (write_file/edit_file/apply_patch) to a file. Ephemeral — lost on daemon restart, not a git operation.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to revert"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+        },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "undo_list".into(),
+                description: "List recent edits available to undo (file path, timestamp, which tool made the edit).".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum entries to return (optional, defaults to 20)"
+                        }
+                    },
+                    "required": []
+                }),
+            },
+        },
     ]
 }
 
@@ -234,6 +294,70 @@ pub async fn execute_tool_gated(
     execute_tool(call, default_cwd).await
 }
 
+/// Wraps [`execute_tool_gated`] with ephemeral undo history (FEAT-085):
+/// snapshots the affected file's on-disk content before `write_file`/
+/// `edit_file`/`apply_patch` runs (acceptance criterion 2), and intercepts
+/// `undo`/`undo_list` directly (acceptance criterion 3) — they read/mutate
+/// the [`crate::undo::UndoStore`], so they can't go through the stateless
+/// [`execute_tool`] dispatch the way every other tool does.
+pub async fn execute_tool_with_undo(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    persona: Option<&crate::persona::Persona>,
+    undo: &std::sync::Mutex<crate::undo::UndoStore>,
+) -> ToolResult {
+    match call.function.name.as_str() {
+        "undo" => return exec_undo(call, undo),
+        "undo_list" => return exec_undo_list(call, undo),
+        "write_file" | "edit_file" | "apply_patch" => {
+            let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+            if let Some(path) = args["path"].as_str().filter(|p| !p.is_empty()) {
+                let previous = std::fs::read_to_string(path).ok();
+                undo.lock().unwrap().snapshot(path, &call.function.name, previous);
+            }
+        }
+        _ => {}
+    }
+    execute_tool_gated(call, default_cwd, persona).await
+}
+
+fn exec_undo(call: &ToolCall, undo: &std::sync::Mutex<crate::undo::UndoStore>) -> ToolResult {
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+    let path = args["path"].as_str().unwrap_or("");
+    let (output, success) = if path.is_empty() {
+        ("No path provided".to_string(), false)
+    } else {
+        match undo.lock().unwrap().undo(path) {
+            Some(Some(content)) => match std::fs::write(path, &content) {
+                Ok(()) => (format!("Reverted {path}"), true),
+                Err(e) => (format!("Failed to restore {path}: {e}"), false),
+            },
+            Some(None) => match std::fs::remove_file(path) {
+                Ok(()) => (format!("Reverted {path} (deleted — it did not exist before this edit)"), true),
+                Err(e) => (format!("Failed to delete {path}: {e}"), false),
+            },
+            None => (format!("No edit history for {path}"), false),
+        }
+    };
+    ToolResult { tool_call_id: call.id.clone(), name: "undo".into(), output, success }
+}
+
+fn exec_undo_list(call: &ToolCall, undo: &std::sync::Mutex<crate::undo::UndoStore>) -> ToolResult {
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+    let limit = args["limit"].as_u64().unwrap_or(20) as usize;
+    let records = undo.lock().unwrap().list_recent(limit);
+    let output = if records.is_empty() {
+        "No recent edits".to_string()
+    } else {
+        records
+            .iter()
+            .map(|r| format!("{}  {}  {}", r.timestamp.to_rfc3339(), r.description, r.path))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    ToolResult { tool_call_id: call.id.clone(), name: "undo_list".into(), output, success: true }
+}
+
 /// Execute a tool call and return the result.
 pub async fn execute_tool(call: &ToolCall, default_cwd: Option<&str>) -> ToolResult {
     let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
@@ -247,6 +371,9 @@ pub async fn execute_tool(call: &ToolCall, default_cwd: Option<&str>) -> ToolRes
         "web_search" => exec_web_search(&args).await,
         "glob" => exec_glob(&args, default_cwd),
         "grep" => exec_grep(&args, default_cwd),
+        "apply_patch" => exec_apply_patch(&args),
+        // "undo"/"undo_list" need an `UndoStore` and are handled by
+        // `execute_tool_with_undo`, not this stateless dispatch.
         other => (format!("Unknown tool: {other}"), false),
     };
 
@@ -347,6 +474,48 @@ fn exec_edit_file(args: &Value) -> (String, bool) {
     match std::fs::write(path, &updated) {
         Ok(()) => (format!("Edited {path}"), true),
         Err(e) => (format!("Error writing {path}: {e}"), false),
+    }
+}
+
+/// `write`/`edit`/`delete` a file via `apply_patch` (FEAT-085, acceptance
+/// criterion 1). `edit` applies `patch` as a unified diff via `diffy` —
+/// reusing an established diff-application crate rather than hand-rolling
+/// hunk parsing.
+fn exec_apply_patch(args: &Value) -> (String, bool) {
+    let tool = args["tool"].as_str().unwrap_or("");
+    let path = args["path"].as_str().unwrap_or("");
+    let patch = args["patch"].as_str().unwrap_or("");
+    if path.is_empty() {
+        return ("No path provided".into(), false);
+    }
+    match tool {
+        "write" => match std::fs::write(path, patch) {
+            Ok(()) => (format!("Wrote {} bytes to {path}", patch.len()), true),
+            Err(e) => (format!("Error writing {path}: {e}"), false),
+        },
+        "edit" => {
+            let original = match std::fs::read_to_string(path) {
+                Ok(c) => c,
+                Err(e) => return (format!("Error reading {path}: {e}"), false),
+            };
+            let parsed = match diffy::Patch::from_str(patch) {
+                Ok(p) => p,
+                Err(e) => return (format!("Malformed patch: {e}"), false),
+            };
+            let patched = match diffy::apply(&original, &parsed) {
+                Ok(s) => s,
+                Err(e) => return (format!("Failed to apply patch to {path}: {e}"), false),
+            };
+            match std::fs::write(path, &patched) {
+                Ok(()) => (format!("Patched {path}"), true),
+                Err(e) => (format!("Error writing {path}: {e}"), false),
+            }
+        }
+        "delete" => match std::fs::remove_file(path) {
+            Ok(()) => (format!("Deleted {path}"), true),
+            Err(e) => (format!("Error deleting {path}: {e}"), false),
+        },
+        other => (format!("Unknown apply_patch tool {other:?} (use write|edit|delete)"), false),
     }
 }
 
@@ -769,6 +938,184 @@ mod exec_tests {
         let r = execute_tool(&call("grep", json!({"pattern": "needle", "path": dir.to_str().unwrap()})), None).await;
         assert!(r.success);
         assert!(r.output.contains("truncated"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_write_creates_a_file() {
+        // acceptance criterion 1: write
+        let dir = tmp();
+        let path = dir.join("new.txt");
+        let p = path.to_str().unwrap();
+
+        let r = execute_tool(&call("apply_patch", json!({"tool": "write", "path": p, "patch": "hello world"})), None).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_edit_applies_a_unified_diff() {
+        // acceptance criterion 1: edit
+        let dir = tmp();
+        let path = dir.join("f.txt");
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+
+        let patch = "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2 modified\n line3\n";
+        let r = execute_tool(&call("apply_patch", json!({"tool": "edit", "path": p, "patch": patch})), None).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "line1\nline2 modified\nline3\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_edit_rejects_a_malformed_patch() {
+        // acceptance criterion 5: malformed patch rejection
+        let dir = tmp();
+        let path = dir.join("f.txt");
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "line1\n").unwrap();
+
+        let r = execute_tool(&call("apply_patch", json!({"tool": "edit", "path": p, "patch": "@@ not a real hunk header @@\nbroken\n"})), None).await;
+        assert!(!r.success);
+        assert!(r.output.contains("Malformed patch"), "{}", r.output);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_delete_removes_the_file() {
+        // acceptance criterion 1: delete
+        let dir = tmp();
+        let path = dir.join("gone.txt");
+        std::fs::write(&path, "bye").unwrap();
+        let p = path.to_str().unwrap();
+
+        let r = execute_tool(&call("apply_patch", json!({"tool": "delete", "path": p})), None).await;
+        assert!(r.success, "{}", r.output);
+        assert!(!path.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_unknown_tool_and_missing_path() {
+        let r = execute_tool(&call("apply_patch", json!({"tool": "teleport", "path": "x"})), None).await;
+        assert!(!r.success);
+        assert!(r.output.contains("Unknown apply_patch tool"));
+
+        let r = execute_tool(&call("apply_patch", json!({"tool": "write"})), None).await;
+        assert!(!r.success);
+        assert!(r.output.contains("No path"));
+    }
+
+    #[tokio::test]
+    async fn undo_reverts_the_most_recent_edit() {
+        // acceptance criteria 2 and 3: snapshot before edit, undo reverts it
+        let dir = tmp();
+        let path = dir.join("f.txt");
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "original").unwrap();
+
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let write = execute_tool_with_undo(&call("write_file", json!({"path": p, "content": "changed"})), None, None, &store).await;
+        assert!(write.success, "{}", write.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed");
+
+        let undo = execute_tool_with_undo(&call("undo", json!({"path": p})), None, None, &store).await;
+        assert!(undo.success, "{}", undo.output);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn undo_of_a_newly_created_file_deletes_it() {
+        let dir = tmp();
+        let path = dir.join("brand-new.txt");
+        let p = path.to_str().unwrap();
+
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let write = execute_tool_with_undo(&call("write_file", json!({"path": p, "content": "hi"})), None, None, &store).await;
+        assert!(write.success);
+        assert!(path.exists());
+
+        let undo = execute_tool_with_undo(&call("undo", json!({"path": p})), None, None, &store).await;
+        assert!(undo.success, "{}", undo.output);
+        assert!(!path.exists(), "undoing a create deletes the file");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn undo_with_no_history_and_no_path_are_reported() {
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let r = execute_tool_with_undo(&call("undo", json!({"path": "/never/touched"})), None, None, &store).await;
+        assert!(!r.success);
+        assert!(r.output.contains("No edit history"));
+
+        let r = execute_tool_with_undo(&call("undo", json!({})), None, None, &store).await;
+        assert!(!r.success);
+        assert!(r.output.contains("No path"));
+    }
+
+    #[tokio::test]
+    async fn undo_list_shows_recent_edits_and_respects_limit() {
+        let dir = tmp();
+        let a = dir.join("a.txt");
+        let b = dir.join("b.txt");
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+
+        execute_tool_with_undo(&call("write_file", json!({"path": a.to_str().unwrap(), "content": "1"})), None, None, &store).await;
+        execute_tool_with_undo(&call("write_file", json!({"path": b.to_str().unwrap(), "content": "2"})), None, None, &store).await;
+
+        let list = execute_tool_with_undo(&call("undo_list", json!({})), None, None, &store).await;
+        assert!(list.success);
+        assert!(list.output.contains("a.txt"));
+        assert!(list.output.contains("b.txt"));
+
+        let limited = execute_tool_with_undo(&call("undo_list", json!({"limit": 1})), None, None, &store).await;
+        assert!(limited.success);
+        assert_eq!(limited.output.lines().count(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn undo_list_on_an_empty_store_says_so() {
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let r = execute_tool_with_undo(&call("undo_list", json!({})), None, None, &store).await;
+        assert!(r.success);
+        assert!(r.output.contains("No recent edits"));
+    }
+
+    #[tokio::test]
+    async fn snapshot_buffer_eviction_is_visible_through_the_tool_layer() {
+        // acceptance criterion 5: snapshot buffer eviction, exercised via
+        // execute_tool_with_undo rather than undo::UndoStore directly.
+        let dir = tmp();
+        let path = dir.join("hot.txt");
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "v0").unwrap();
+
+        let store = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        for i in 1..=60 {
+            execute_tool_with_undo(&call("write_file", json!({"path": p, "content": format!("v{i}")})), None, None, &store).await;
+        }
+        // 61 states existed (v0..v60); only the last 50 edits are undoable.
+        let mut undone = 0;
+        loop {
+            let r = execute_tool_with_undo(&call("undo", json!({"path": p})), None, None, &store).await;
+            if !r.success {
+                break;
+            }
+            undone += 1;
+        }
+        assert_eq!(undone, 50);
 
         std::fs::remove_dir_all(&dir).ok();
     }

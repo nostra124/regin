@@ -11,7 +11,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The tools regin can hold a ceiling over (mirrors `tools::execute_tool`).
-pub const ALL_TOOLS: &[&str] = &["bash", "read_file", "write_file", "edit_file", "web_search", "glob", "grep"];
+pub const ALL_TOOLS: &[&str] = &[
+    "bash", "read_file", "write_file", "edit_file", "web_search", "glob", "grep", "apply_patch", "undo", "undo_list",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Persona {

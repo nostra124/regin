@@ -1695,3 +1695,57 @@ Implementation section:
   line number).
 - Next: FEAT-085 (edit tool polish — `apply_patch`, undo/redo), the other
   half of Track A's "foundation" pairing, independent of FEAT-077.
+
+### 2026-07-13 — FEAT-085: Edit tool polish (apply_patch, undo/redo) (0.8.0 coding agent plane)
+
+- New `undo.rs`: `UndoStore` — per-file ring buffers (`VecDeque<EditRecord>`,
+  capped at 50 per file) of snapshots taken *before* an edit touches a
+  file. `undo(path)` pops the most recent snapshot and reports what to
+  restore (`Some(None)` = the file didn't exist before, so undoing deletes
+  it). `list_recent(limit)` flattens across every file's history, sorted
+  newest-first. Pure, no I/O — the actual file restore happens in the
+  caller (`tools.rs`).
+- **`apply_patch`** (`tools.rs`, `exec_apply_patch`): `tool: "write"|"edit"|
+  "delete"`. `edit` applies `patch` as a unified diff via the `diffy`
+  crate (new workspace dependency) rather than hand-rolling hunk parsing —
+  same "reuse an established crate" call as FEAT-077's `ignore`/`globset`.
+- **Snapshotting + undo/undo_list needed real shared state, unlike every
+  other tool** (`write_file`/`edit_file`/etc. are all stateless `(String,
+  bool)` functions) — rather than threading a new parameter through
+  `execute_tool`/`execute_tool_gated` (which would've meant touching all
+  ~20 existing test call sites in `tools.rs` plus `regind`'s chat loop),
+  added a new, additive wrapper: `execute_tool_with_undo(call, cwd,
+  persona, undo: &Mutex<UndoStore>)`. It snapshots the target file before
+  delegating `write_file`/`edit_file`/`apply_patch` to the existing
+  `execute_tool_gated`, and intercepts `undo`/`undo_list` directly (they
+  never reach the stateless `execute_tool` dispatch at all — only this
+  wrapper knows about the store). `regind`'s `AppState` gained an
+  `undo: Mutex<UndoStore>` field; its chat loop now calls
+  `execute_tool_with_undo` instead of `execute_tool_gated` directly. Every
+  pre-existing `execute_tool`/`execute_tool_gated` call site — all ~20
+  tests plus the guardrail tests — is untouched.
+- **No `redo` tool** — the ticket's title says "undo/redo" but its
+  acceptance criteria only ask for `undo`/`undo_list`; not built, since
+  nothing in the ACs requires it (documented explicitly in `undo.rs`'s doc
+  comment as a scope note, not an oversight — adding it later is just a
+  second per-path stack).
+- **`undo` is not separately guardrail-gated** — it can only ever restore
+  a path to a state that path already held before a *prior*, already-gated
+  `write_file`/`edit_file`/`apply_patch` call touched it; it's reversing an
+  already-approved action, not a new write vector. `write_file`/
+  `edit_file`/`apply_patch` themselves are still fully gated (they go
+  through `execute_tool_gated` inside the wrapper).
+- `persona::ALL_TOOLS` gained `"apply_patch"`, `"undo"`, `"undo_list"` so a
+  role can be scoped to include or exclude them explicitly, same as every
+  other tool.
+- 18 new `tools::` tests (apply_patch: write/edit/delete/malformed-patch/
+  unknown-tool/missing-path — acceptance criteria 1 and 5) plus (undo:
+  revert-most-recent, revert-a-create-deletes-the-file, no-history/no-path
+  errors, undo_list with/without a limit, empty-store message, buffer
+  eviction exercised through the tool layer end-to-end — acceptance
+  criteria 2, 3, 5) and 7 new `undo::` unit tests for the store itself.
+  Full workspace build/test/clippy stays green (499 regin-core tests, up
+  from 481; zero new clippy warnings).
+- Next: FEAT-078 (LSP diagnostics feedback loop) — Track A's "quality
+  feedback" step, depends on FEAT-077 (grep, already done) for navigating
+  to error locations.

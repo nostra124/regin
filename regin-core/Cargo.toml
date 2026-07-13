@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 ignore = { workspace = true }
 globset = { workspace = true }
 regex = { workspace = true }
+diffy = { workspace = true }
 
 [dev-dependencies]
 httpmock = "0.8.3"
