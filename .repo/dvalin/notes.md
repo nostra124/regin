@@ -1897,3 +1897,77 @@ Implementation section:
   same pre-existing `exec_write_file` warning at a shifted line number).
 - Next: FEAT-080 (granular tool permissions — allow/ask/deny) — Track A's
   "safety" step, gates all tools including `task` itself.
+
+### 2026-07-13 — FEAT-080: Granular tool permissions (allow/ask/deny) (0.8.0 coding agent plane)
+
+- **FEAT-080 implemented and moved to done/.** New `regin-core/src/permission.rs`:
+  `PermissionLevel` (`Allow`/`Ask`/`Deny`) resolved fresh from SQLite on every
+  tool call — `resolve_permission(conn, tool, command)` reads a flat
+  `permission.<tool>` setting (default `allow`, criterion 5), with `bash`
+  additionally checked against `permission.bash.patterns` first.
+- **Deliberate format deviation from the ticket's example**: `bash`'s
+  pattern rules are stored as a JSON *array* of `{pattern, level}` objects,
+  not the ticket's example JSON object (`{"*": "allow", "git push *": "ask", ...}`).
+  A JSON object's key order isn't something callers should have to rely on
+  (and serde_json's default `Map` is a `BTreeMap` — alphabetically sorted,
+  not insertion-ordered — so the object form would silently NOT implement
+  "last match wins" as written). A JSON array has an unambiguous element
+  order, so it actually delivers the acceptance criterion as specified.
+  Glob matching reuses `globset` (already a workspace dependency since
+  FEAT-077's code-search tools).
+- **"Cache invalidation" (criterion 7) is satisfied by there being no
+  cache** — same convention as `lsp::resolve_command`/`AppState::llm_client`:
+  every resolution reads settings fresh, so `regin config set permission.*`
+  takes effect on the very next tool call with nothing to invalidate. A
+  test (`permission_changes_take_effect_immediately_no_cache_to_invalidate`)
+  makes this design choice self-documenting rather than just asserting an
+  absence.
+- **The `ask` round trip was the real design problem.** `agentic_chat`
+  only had a writer (`w`), not the connection's reader, and threading a
+  reader through `dispatch()`'s ~40-arm match (and its 13 test call sites)
+  to support one feature felt like the wrong trade. Instead: the daemon
+  sends `Response::PermissionRequest{request_id, tool, detail}` on the
+  *existing* writer, then blocks on a `tokio::sync::oneshot` registered in
+  a new `AppState.pending_permissions: Mutex<HashMap<String,
+  oneshot::Sender<bool>>>`. The CLI answers with a brand new
+  `Request::PermissionResponse{request_id, allow}` — a completely separate
+  connection/request, handled by an ordinary new `dispatch()` arm that
+  looks the sender up by `request_id` and wakes it. No signature changes
+  to `dispatch`/`agentic_chat`/`exec_skill_agentic` at all; `regin-cli`'s
+  `SocketTransport::request_stream` just special-cases seeing a
+  `PermissionRequest` — prompts inline via a blocking stdin Y/n read
+  (criterion 6 — "inline" is satisfied without pulling in a TUI
+  dependency; the in-progress stream's own reader is untouched, so it
+  keeps waiting for the daemon's next event exactly as before), replies
+  on a fresh connection via `self.request(...)`, then resumes the loop.
+- **Fail-safe on timeout, not fail-open.** An `ask` prompt nobody answers
+  within `PERMISSION_ASK_TIMEOUT` (120s production; injectable in tests)
+  is treated as *denied*, not silently allowed — matches this session's
+  established pattern of erring toward the safer branch on an
+  ambiguous/unanswered signal (same call as FEAT-069's escalation
+  defaults).
+- Wired directly into `agentic_chat`'s tool loop via a new
+  `gate_tool_call(state, call, w, timeout) -> Result<Option<ToolResult>>`
+  helper — `Some(result)` short-circuits `execute_tool_full` entirely
+  (deny/ask-denied never reach tool execution, satisfying criterion 3's
+  "does not execute the tool"); `None` proceeds exactly as before FEAT-080.
+  Deliberately scoped to the *primary* agent's own tool-calling loop only
+  — a subagent's (FEAT-079) nested tool calls are not separately
+  permission-gated in this ticket (threading the ask round-trip through
+  `subagent::ToolExecutor` would need the writer/pending-permissions map
+  available deep inside `regin-core::subagent::run_subagent`, a bigger
+  redesign); noted here as an explicit, deliberate scope boundary for a
+  future ticket, not an oversight.
+- 15 new tests: 9 in `permission.rs` (default-allow, flat-level
+  configuration, bash pattern matching — literal/wildcard/prefix,
+  last-match-wins, fallback-to-flat-setting, no-command-string, no-cache
+  invalidation) and 6 in `regind`'s `dispatch_tests` (gate allow/deny/
+  bash-pattern-deny direct calls, ask-times-out-and-denies with the sent
+  `PermissionRequest` payload asserted, ask-approved-via-a-second-
+  `dispatch()`-call using `tokio::select!` to drive the concurrency, and
+  an unknown-request-id `PermissionResponse` error path). Full workspace
+  build/test/clippy stays green (561 regin-core tests, up from 552; 56
+  regind tests, up from 50; zero new clippy warnings).
+- Next: FEAT-081 (MCP client protocol) / FEAT-082 (plugin system) — Track
+  A's "extensibility" step, per the milestone's suggested order MCP lands
+  first (existing ecosystem of servers).

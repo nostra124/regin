@@ -8,6 +8,7 @@ use regin_core::{
     opskill,
     greeting,
     mode,
+    permission,
     posture,
     promotion,
     protocol::{Request, Response},
@@ -19,6 +20,7 @@ use regin_core::{
     undo,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -44,6 +46,15 @@ struct AppState {
     /// `task.max_concurrency`). Sized once at construction from that
     /// setting's value — see `subagent::TaskLimiter`'s doc comment.
     task_limiter: subagent::TaskLimiter,
+    /// Rendezvous for in-flight `ask`-level permission prompts (FEAT-080,
+    /// acceptance criterion 4): `gate_tool_call` inserts a sender keyed by a
+    /// fresh `request_id` before sending `Response::PermissionRequest`, then
+    /// awaits the paired receiver. The CLI answers on a *separate*
+    /// connection with `Request::PermissionResponse { request_id, allow }`;
+    /// that dispatch arm looks the sender up here and wakes the waiter. Keyed
+    /// by request_id rather than tool name since multiple asks can be
+    /// in-flight (e.g. across concurrent subagents) at once.
+    pending_permissions: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
 }
 
 unsafe impl Send for AppState {}
@@ -141,6 +152,7 @@ async fn main() -> Result<()> {
         undo: Mutex::new(undo::UndoStore::new()),
         lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
         task_limiter: subagent::TaskLimiter::new(task_max_concurrency),
+        pending_permissions: Mutex::new(HashMap::new()),
     });
 
     let sched_state = Arc::clone(&state);
@@ -293,7 +305,11 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
                         arguments: call.function.arguments.clone(),
                     }).await?;
 
-                    let result = tools::execute_tool_full(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await;
+                    let result = if let Some(refused) = gate_tool_call(state, call, w, PERMISSION_ASK_TIMEOUT).await? {
+                        refused
+                    } else {
+                        tools::execute_tool_full(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await
+                    };
 
                     send(w, &Response::ToolResultEvent {
                         name: result.name.clone(),
@@ -320,6 +336,79 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
     }
 }
 
+/// How long an `ask`-level permission prompt waits for the user's answer
+/// before treating it as denied (fail safe — an unanswered prompt must not
+/// silently execute).
+const PERMISSION_ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Resolves `call`'s permission level (FEAT-080) and, if it isn't `allow`,
+/// returns the [`tools::ToolResult`] the caller should use *instead of*
+/// executing the tool. `Ok(None)` means proceed with execution normally.
+///
+/// `deny` refuses immediately (acceptance criterion 3). `ask` sends a
+/// `Response::PermissionRequest` on `w` and blocks on a
+/// [`tokio::sync::oneshot`] rendezvous registered in
+/// `state.pending_permissions`, woken by the `Request::PermissionResponse`
+/// dispatch arm once the CLI answers on a separate connection (criterion 4).
+/// A prompt nobody answers within `timeout` is treated as denied, not
+/// silently allowed.
+async fn gate_tool_call<W: tokio::io::AsyncWrite + Unpin>(
+    state: &Arc<AppState>,
+    call: &tools::ToolCall,
+    w: &mut W,
+    timeout: std::time::Duration,
+) -> Result<Option<tools::ToolResult>> {
+    let tool = call.function.name.clone();
+    let command = if tool == "bash" {
+        serde_json::from_str::<Value>(&call.function.arguments)
+            .ok()
+            .and_then(|v| v["command"].as_str().map(str::to_string))
+    } else {
+        None
+    };
+
+    let level = {
+        let db = state.db.lock().expect("DB poisoned");
+        permission::resolve_permission(&db, &tool, command.as_deref()).unwrap_or(permission::PermissionLevel::Allow)
+    };
+
+    match level {
+        permission::PermissionLevel::Allow => Ok(None),
+
+        permission::PermissionLevel::Deny => Ok(Some(tools::ToolResult {
+            tool_call_id: call.id.clone(),
+            name: tool.clone(),
+            output: permission::denied_message(&tool),
+            success: false,
+        })),
+
+        permission::PermissionLevel::Ask => {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state.pending_permissions.lock().expect("poisoned").insert(request_id.clone(), tx);
+
+            let detail = command.unwrap_or_else(|| call.function.arguments.clone());
+            send(w, &Response::PermissionRequest { request_id: request_id.clone(), tool: tool.clone(), detail }).await?;
+
+            let allowed = matches!(tokio::time::timeout(timeout, rx).await, Ok(Ok(true)));
+            if !allowed {
+                state.pending_permissions.lock().expect("poisoned").remove(&request_id);
+            }
+
+            if allowed {
+                Ok(None)
+            } else {
+                Ok(Some(tools::ToolResult {
+                    tool_call_id: call.id.clone(),
+                    name: tool.clone(),
+                    output: format!("Permission denied for tool {tool} (no approval within {}s).", timeout.as_secs()),
+                    success: false,
+                }))
+            }
+        }
+    }
+}
+
 async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
     req: Request,
     state: &Arc<AppState>,
@@ -327,6 +416,19 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
 ) -> Result<()> {
     match req {
         Request::Ping => send(w, &Response::Pong).await?,
+
+        Request::PermissionResponse { request_id, allow } => {
+            let sender = { state.pending_permissions.lock().expect("poisoned").remove(&request_id) };
+            match sender {
+                Some(tx) => {
+                    let _ = tx.send(allow);
+                    send(w, &Response::Ok { message: "recorded".into() }).await?;
+                }
+                None => {
+                    send(w, &Response::Error { message: format!("Unknown or expired permission request: {request_id}") }).await?;
+                }
+            }
+        }
 
         Request::SkillList { cwd } => {
             let sys = config::system_skills_dir();
@@ -1335,6 +1437,7 @@ mod dispatch_tests {
             undo: Mutex::new(undo::UndoStore::new()),
             lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
             task_limiter: subagent::TaskLimiter::new(3),
+            pending_permissions: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1491,6 +1594,110 @@ mod dispatch_tests {
         // refuses to build a client with no fingerprint set.
         let st = state();
         assert!(st.llm_client().is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-080: granular tool permissions (allow / ask / deny)
+    // -----------------------------------------------------------------
+
+    fn a_call(name: &str, args: serde_json::Value) -> tools::ToolCall {
+        tools::ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: tools::FunctionCall { name: name.into(), arguments: args.to_string() },
+        }
+    }
+
+    #[tokio::test]
+    async fn gate_allows_by_default() {
+        // acceptance criterion 5
+        let st = state();
+        let mut sink: Vec<u8> = Vec::new();
+        let r = gate_tool_call(&st, &a_call("read_file", serde_json::json!({"path": "x"})), &mut sink, std::time::Duration::from_millis(50)).await.unwrap();
+        assert!(r.is_none(), "no configured permission -> allow, execution proceeds");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_a_configured_tool_without_executing_it() {
+        // acceptance criterion 3
+        let st = state();
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "permission.write_file", "deny").unwrap(); }
+        let mut sink: Vec<u8> = Vec::new();
+        let r = gate_tool_call(&st, &a_call("write_file", serde_json::json!({"path": "x", "content": "y"})), &mut sink, std::time::Duration::from_millis(50)).await.unwrap().unwrap();
+        assert!(!r.success);
+        assert_eq!(r.output, "Tool write_file is disabled by policy.");
+    }
+
+    #[tokio::test]
+    async fn gate_denies_a_bash_command_matching_a_deny_pattern() {
+        // acceptance criterion 2
+        let st = state();
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "permission.bash.patterns", r#"[{"pattern":"rm -rf *","level":"deny"}]"#).unwrap(); }
+        let mut sink: Vec<u8> = Vec::new();
+        let r = gate_tool_call(&st, &a_call("bash", serde_json::json!({"command": "rm -rf /"})), &mut sink, std::time::Duration::from_millis(50)).await.unwrap().unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("disabled by policy"));
+    }
+
+    #[tokio::test]
+    async fn gate_ask_sends_a_permission_request_and_denies_on_timeout() {
+        // acceptance criterion 4 (fail-safe: an unanswered prompt denies)
+        let st = state();
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "permission.bash", "ask").unwrap(); }
+        let mut sink: Vec<u8> = Vec::new();
+        let r = gate_tool_call(&st, &a_call("bash", serde_json::json!({"command": "echo hi"})), &mut sink, std::time::Duration::from_millis(20)).await.unwrap().unwrap();
+        assert!(!r.success);
+        assert!(r.output.contains("Permission denied"), "{}", r.output);
+
+        let sent = String::from_utf8(sink).unwrap();
+        assert!(sent.contains("\"type\":\"permission_request\""), "{sent}");
+        assert!(sent.contains("echo hi"));
+
+        // the stale, timed-out entry must not linger
+        assert!(st.pending_permissions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn gate_ask_proceeds_when_permission_response_arrives_via_dispatch() {
+        // acceptance criterion 4, happy path — a second `dispatch()` call
+        // (as if from a fresh CLI connection) answers the pending prompt.
+        let st = state();
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "permission.bash", "ask").unwrap(); }
+        let mut sink: Vec<u8> = Vec::new();
+        let call = a_call("bash", serde_json::json!({"command": "echo hi"}));
+
+        let gate = gate_tool_call(&st, &call, &mut sink, std::time::Duration::from_secs(5));
+        tokio::pin!(gate);
+
+        // Poll the gate once so it registers the pending permission and
+        // sends the PermissionRequest, then answer it, then let it finish.
+        let answered = tokio::select! {
+            biased;
+            result = &mut gate => panic!("gate resolved before being answered: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                let request_id = {
+                    let pending = st.pending_permissions.lock().unwrap();
+                    pending.keys().next().cloned().expect("gate should have registered a pending permission by now")
+                };
+                let mut ack: Vec<u8> = Vec::new();
+                dispatch(Request::PermissionResponse { request_id, allow: true }, &st, &mut ack).await.unwrap();
+                true
+            }
+        };
+        assert!(answered);
+
+        let r = gate.await.unwrap();
+        assert!(r.is_none(), "approved -> execution proceeds normally");
+        assert!(st.pending_permissions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn permission_response_for_an_unknown_request_id_errors() {
+        let st = state();
+        let mut sink: Vec<u8> = Vec::new();
+        dispatch(Request::PermissionResponse { request_id: "no-such-id".into(), allow: true }, &st, &mut sink).await.unwrap();
+        let sent = String::from_utf8(sink).unwrap();
+        assert!(sent.contains("Unknown or expired permission request"), "{sent}");
     }
 
     // -----------------------------------------------------------------

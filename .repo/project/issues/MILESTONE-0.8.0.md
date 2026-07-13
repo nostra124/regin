@@ -28,7 +28,7 @@ in 0.8.0 are orthogonal to objectives/planning, though they may converge later.
 | FEAT-077 | Code-aware search tools (glob + grep) | M | DISC-021 | done |
 | FEAT-078 | LSP diagnostics feedback loop | L | DISC-021 | done |
 | FEAT-079 | Multi-agent orchestration (subagent Task tool) | L | DISC-021 | done |
-| FEAT-080 | Granular tool permissions (allow/ask/deny) | M | DISC-021 | open |
+| FEAT-080 | Granular tool permissions (allow/ask/deny) | M | DISC-021 | done |
 | FEAT-081 | MCP client protocol (local + remote) | L | DISC-021 | open |
 | FEAT-082 | Plugin system (event-driven hooks) | L | DISC-021 | open |
 | FEAT-083 | Multi-provider model abstraction | L | DISC-021 | open |

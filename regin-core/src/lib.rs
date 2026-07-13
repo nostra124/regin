@@ -27,6 +27,7 @@ pub mod lsp;
 pub mod mode;
 pub mod objective;
 pub mod opskill;
+pub mod permission;
 pub mod persona;
 pub mod planning;
 pub mod posture;

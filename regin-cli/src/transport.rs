@@ -55,6 +55,20 @@ impl Transport for SocketTransport {
         loop {
             let resp = read_resp(&mut r).await?;
             on_event(&resp);
+            // FEAT-080: an `ask`-level permission request pauses the daemon's
+            // tool loop mid-stream. Answer it inline (a simple Y/n prompt —
+            // acceptance criterion 6's "without breaking the streaming chat
+            // display" just means not tearing down the in-progress stream,
+            // which a plain synchronous stdin prompt satisfies without
+            // pulling in a TUI dependency) over a *separate* connection, so
+            // this stream's own reader keeps waiting for the daemon's next
+            // event exactly as before. Not treated as terminal.
+            if let Response::PermissionRequest { request_id, tool, detail } = &resp {
+                let allow = prompt_permission(tool, detail);
+                let _ = self.request(&Request::PermissionResponse { request_id: request_id.clone(), allow }).await;
+                out.push(resp);
+                continue;
+            }
             let done = is_terminal(&resp);
             out.push(resp);
             if done {
@@ -63,6 +77,20 @@ impl Transport for SocketTransport {
         }
         Ok(out)
     }
+}
+
+/// Blocking inline Y/n prompt for an `ask`-level permission request
+/// (acceptance criterion 6). Defaults to deny on EOF/read error/anything
+/// other than an explicit "y" — an ambiguous answer must not silently allow.
+fn prompt_permission(tool: &str, detail: &str) -> bool {
+    use std::io::Write;
+    print!("\n[permission] allow '{tool}' — {detail}? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return false;
+    }
+    matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
 // ---------------------------------------------------------------------------
