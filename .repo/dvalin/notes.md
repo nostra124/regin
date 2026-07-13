@@ -1479,3 +1479,57 @@ toolchain**. Read it at the start of every session; append to it at the end.
   drive `execute_task`/`run_control_loop` from (`task.completed`/
   `task.failed`/deadline ticks), continuing into the milestone's "control"
   phase alongside FEAT-069.
+
+### 2026-07-13 — FEAT-067: Event bus + triggers (0.7.0 intent & planning plane)
+
+- New `event_bus.rs`: `Event{ kind, payload }` + well-known kind constants
+  (`incident.created`, `objective.breached`, `deviation.detected`,
+  `goal.created`, `schedule.tick`, `task.completed`, `task.failed`).
+  `EventBus::publish` runs every registered `Trigger` bound to a matching
+  kind (with an optional payload predicate); `EventBus::ingest` maps an
+  inbound `bus::BusMessage` into an `Event` first.
+- **External ingestion reuses this crate's existing structured-body
+  convention rather than inventing a new envelope** — `escalation.rs`/
+  `chair.rs`/`foreman.rs`/`planning.rs` already tag their structured bus
+  bodies with a JSON `"kind"` field; `event_from_bus_message` just reads
+  that same field straight off an inbound message and uses the whole body
+  as the event payload. `KIND_UNSTRUCTURED` messages and structured bodies
+  without a `"kind"` field are `Ok(None)` — not every bus message is an
+  event, and that isn't an error (acceptance criterion 2).
+- **Event->task dependency satisfaction is unconditional on the event
+  having fired, not on a trigger being registered for it or succeeding**
+  (acceptance criterion 1): `EventBus::publish` records the kind into an
+  `EventLedger` *before* running any triggers, and
+  `event_dependencies_satisfied(task, ledger)` just checks every one of
+  `Task::depends_on_events` is in the ledger. A task can declare a
+  dependency on an event nobody has bound a trigger to yet and it still
+  gets satisfied the moment that event fires — proven directly with a
+  test (`satisfaction_does_not_depend_on_any_trigger_being_registered`).
+- **Fail-safe by construction (acceptance criterion 3)**: `publish` loops
+  over matching triggers with `match ... { Ok(()) => ..., Err(e) => log +
+  record, }` — one action's error is captured in `PublishReport::errors`
+  and never stops the loop, so a later trigger for the same event (or the
+  ledger record that already happened before the loop started) is
+  unaffected. Verified with two triggers on one kind, one erroring, one
+  succeeding, and separately that a failing trigger still lets the ledger
+  record the event.
+- **`TriggerAction` is deliberately abstract** (`async fn fire(&self,
+  event: &Event) -> Result<()>`) — this module doesn't reach into
+  `task_network`/`task_executor`'s concrete types to "instantiate a plan";
+  a caller supplies whatever action that means for them, mirroring
+  `task_executor::ActionRunner`'s injectable-trait shape. Tests use a spy
+  action standing in for "start a plan."
+- 15 new tests (2 fixed as clippy hits during review — a `Condition` type
+  alias for the boxed predicate, and a collapsible if-let): publish
+  invokes/skips triggers by kind, a payload condition gates firing, N
+  triggers on one kind all fire, event->task satisfaction (single dep,
+  multi-dep requiring all, satisfaction without any registered trigger),
+  `event_from_bus_message` mapping a structured body / ignoring
+  unstructured / ignoring a missing `"kind"` / ignoring malformed JSON,
+  `ingest` publishing a derived event and firing a bound trigger /
+  returning `None` for a non-event message, and the two fail-safe tests
+  above. Full workspace build/test/clippy stays green (454 regin-core
+  tests, up from 439; zero new clippy warnings after the two fixes).
+- Next: FEAT-068 (soul gate for intent) and FEAT-069 (authorship,
+  prioritization & source-routed escalation) — the milestone's final
+  "control" phase, closing MILESTONE-0.7.0.

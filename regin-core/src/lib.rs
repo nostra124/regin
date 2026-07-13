@@ -11,6 +11,7 @@ pub mod desired;
 pub mod evaluate;
 pub mod filters;
 pub mod escalation;
+pub mod event_bus;
 pub mod foreman;
 pub mod goal;
 pub mod greeting;
