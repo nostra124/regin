@@ -36,6 +36,7 @@ pub mod repo;
 pub mod safelane;
 pub mod schedule;
 pub mod skillpkg;
+pub mod task_executor;
 pub mod task_network;
 pub mod skills;
 pub mod soul;
