@@ -9,6 +9,11 @@
 //! On bus recovery the parked items are **re-validated** ([`revalidate_parked`]):
 //! anything whose incident has self-resolved is closed and dropped, and the rest
 //! are turned into approval requests (FEAT-042) for the supervisor.
+//!
+//! **FEAT-069 extension**: the greeting also surfaces parked intent
+//! escalations (`escalation_routing::pending_escalations` — human/regin-
+//! sourced red goals, FEAT-066/069) as further action items, and
+//! [`intent_rag_summary`] gives `regin metrics` the same RAG counts.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -16,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::approval::{self, ApprovalRequest};
 use crate::db;
+use crate::escalation_routing;
+use crate::goal;
+use crate::objective;
 
 /// One actionable item shown at login.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,12 +44,16 @@ pub struct Greeting {
     pub pending_changes: Vec<ActionItem>,
     /// Open problems needing a human decision.
     pub decision_problems: Vec<ActionItem>,
+    /// Endangered goals escalated by the planning control loop and parked
+    /// for review (FEAT-066/069) — human- and regin-sourced escalations;
+    /// dvalin-sourced ones go straight over the bus and aren't parked here.
+    pub intent_escalations: Vec<ActionItem>,
 }
 
 impl Greeting {
     /// Whether anything needs the operator's attention.
     pub fn has_actions(&self) -> bool {
-        !self.pending_changes.is_empty() || !self.decision_problems.is_empty()
+        !self.pending_changes.is_empty() || !self.decision_problems.is_empty() || !self.intent_escalations.is_empty()
     }
 
     /// The one-line health summary.
@@ -77,13 +89,53 @@ pub fn build(conn: &Connection, mode: &str) -> Result<Greeting> {
         .map(|p| ActionItem { kind: "problem".into(), id: p.id, title: p.title })
         .collect();
 
+    let intent_escalations = escalation_routing::pending_escalations(conn)?
+        .into_iter()
+        .map(|e| ActionItem { kind: "intent_escalation".into(), id: e.goal_id, title: e.reason })
+        .collect();
+
     Ok(Greeting {
         mode: mode.to_string(),
         open_incidents,
         open_problems,
         pending_changes,
         decision_problems,
+        intent_escalations,
     })
+}
+
+/// RAG counts across every stored goal and objective — what `regin metrics`
+/// (and the greeting) surface for the intent plane (acceptance criterion 3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentRagSummary {
+    pub goals_green: usize,
+    pub goals_amber: usize,
+    pub goals_red: usize,
+    pub objectives_green: usize,
+    pub objectives_amber: usize,
+    pub objectives_red: usize,
+}
+
+fn bump(summary: &mut usize, amber: &mut usize, red: &mut usize, rag: &str) {
+    match rag {
+        "green" => *summary += 1,
+        "amber" => *amber += 1,
+        "red" => *red += 1,
+        _ => {}
+    }
+}
+
+/// Compute [`IntentRagSummary`] from the current `goals`/`objectives`
+/// tables.
+pub fn intent_rag_summary(conn: &Connection) -> Result<IntentRagSummary> {
+    let mut s = IntentRagSummary::default();
+    for g in goal::goal_list(conn, None)? {
+        bump(&mut s.goals_green, &mut s.goals_amber, &mut s.goals_red, &g.rag);
+    }
+    for o in objective::objective_list(conn)? {
+        bump(&mut s.objectives_green, &mut s.objectives_amber, &mut s.objectives_red, &o.rag);
+    }
+    Ok(s)
 }
 
 /// Re-validate parked approval items on bus recovery: a pending change whose
@@ -147,6 +199,43 @@ mod tests {
         assert!(!g.has_actions());
         assert_eq!(g.open_incidents, 0);
         assert_eq!(g.health_line(), "mode=org | 0 open incident(s), 0 open problem(s)");
+    }
+
+    #[test]
+    fn greeting_surfaces_parked_intent_escalations() {
+        // acceptance criterion 3
+        let c = conn();
+        let esc = crate::control_loop::PlanningEscalation {
+            goal_id: "goal-1".into(),
+            source: "human".into(),
+            reason: "tasks still failing after mitigate/replan: t1".into(),
+            remedies: crate::control_loop::standard_remedies(),
+        };
+        escalation_routing::park_escalation(&c, &esc).unwrap();
+
+        let g = build(&c, "standalone").unwrap();
+        assert!(g.has_actions());
+        assert_eq!(g.intent_escalations.len(), 1);
+        assert_eq!(g.intent_escalations[0].id, "goal-1");
+        assert_eq!(g.intent_escalations[0].kind, "intent_escalation");
+    }
+
+    #[test]
+    fn intent_rag_summary_counts_goals_and_objectives_by_rag() {
+        let c = conn();
+        let deadline = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let g1 = goal::goal_create(&c, "d", "t", &deadline, vec![], 1, "human").unwrap();
+        goal::goal_activate(&c, &g1.id).unwrap();
+        let _g2 = goal::goal_create(&c, "d2", "t2", &deadline, vec![], 2, "human").unwrap(); // stays green (proposed)
+
+        objective::objective_create(
+            &c, "t", "d", "m", "sum", 30, "le", &crate::desired::AssertValue::Num(1.0), 1, "human",
+        ).unwrap();
+
+        let summary = intent_rag_summary(&c).unwrap();
+        assert_eq!(summary.goals_green, 2, "both goals start green");
+        assert_eq!(summary.goals_red, 0);
+        assert_eq!(summary.objectives_green, 1, "untested objectives start green");
     }
 
     #[test]

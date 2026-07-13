@@ -1,13 +1,15 @@
-//! Soul gate for intent (FEAT-068 / DISC-019).
+//! Soul gate for intent (FEAT-068, extended by FEAT-069 / DISC-019).
 //!
 //! Routes the identity plane's Soul gate (FEAT-029: `decision::SoulGate`)
 //! through the three checkpoints DISC-019 calls for, reusing existing
 //! mechanism at each rather than building a parallel gate:
 //!
-//! 1. **Goals** — [`goal_create_gated`] asks "does this intent fit our
-//!    values?" before a goal is ever persisted (`goal::goal_create`).
-//!    Previously `goal_create` had no Soul checkpoint at all; this is the
-//!    one genuinely new gate this ticket adds.
+//! 1. **Goals & objectives** — [`goal_create_gated`] /
+//!    [`objective_create_gated`] ask "does this intent fit our values?"
+//!    before an intent is ever persisted (`goal::goal_create` /
+//!    `objective::objective_create`). Neither create fn had a Soul
+//!    checkpoint at all before FEAT-068/069; this is the authorship
+//!    approval-gate FEAT-069's acceptance criterion 1 asks for.
 //! 2. **Plans** — [`gate_plan`] wraps `task_network::plan_and_gate`
 //!    (FEAT-063, already Soul-gated) and adds deliberation capture on top,
 //!    so a plan's acceptance/rejection is recorded the same way a goal's
@@ -38,7 +40,9 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::decision::{DeliberationRecord, DeliberationSink, Disposition, Plan as SoulPlan, SoulEvaluation, SoulGate, SoulVerdict};
+use crate::desired::AssertValue;
 use crate::goal::{self, Goal, SuccessCriterion};
+use crate::objective::{self, Objective};
 use crate::task_network::{self, PlannedNetwork, TaskPlanner};
 
 /// The result of a Soul-gated intent checkpoint.
@@ -112,6 +116,40 @@ pub async fn goal_create_gated(
     Ok(GateOutcome::Approved(goal))
 }
 
+/// Checkpoint 1, objective flavour (FEAT-069 acceptance criterion 1):
+/// `objective::objective_create` had no Soul checkpoint either — the same
+/// gap `goal_create_gated` closed for goals.
+#[allow(clippy::too_many_arguments)]
+pub async fn objective_create_gated(
+    conn: &Connection,
+    title: &str,
+    description: &str,
+    metric: &str,
+    aggregate: &str,
+    window_days: i64,
+    op: &str,
+    value: &AssertValue,
+    priority: i64,
+    source: &str,
+    soul: &dyn SoulGate,
+    sink: &dyn DeliberationSink,
+) -> Result<GateOutcome<Objective>> {
+    let plan_id = uuid::Uuid::new_v4().to_string();
+    let intent_summary = format!("New objective: {title:?} ({description:?})");
+    let plan = SoulPlan { id: plan_id.clone(), intent_summary: intent_summary.clone(), steps: vec![], intended_tool_calls: vec![] };
+
+    let eval = soul.evaluate(&plan).await?;
+    let disposition = if eval.verdict == SoulVerdict::Approve { Disposition::Executed } else { Disposition::Denied };
+    capture_deliberation(sink, &plan_id, &intent_summary, &[], &eval, disposition);
+
+    if eval.verdict != SoulVerdict::Approve {
+        return Ok(GateOutcome::Rejected { reason: eval.reaction });
+    }
+
+    let objective = objective::objective_create(conn, title, description, metric, aggregate, window_days, op, value, priority, source)?;
+    Ok(GateOutcome::Approved(objective))
+}
+
 /// Checkpoint 2: plan a goal into a task network via `task_network::
 /// plan_and_gate` (FEAT-063, already Soul-gated) and additionally capture
 /// the deliberation (acceptance criterion 1's "plan activation" half) —
@@ -138,7 +176,6 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::decision::{PassthroughSoulGate, RawSoulVerdict};
-    use crate::desired::AssertValue;
     use crate::task_executor::{self, ActionRunner, TaskAction, TaskOutcome};
     use crate::task_network::{Task, TaskNetwork};
     use async_trait::async_trait;
@@ -269,6 +306,37 @@ mod tests {
         let outcome = goal_create_gated(&c, "d", "t", &future_deadline(30), vec![], 1, "human", &PassthroughSoulGate, &FailingSink).await.unwrap();
         assert!(outcome.approved(), "best-effort capture failure doesn't block the gate");
         assert_eq!(goal::goal_list(&c, None).unwrap().len(), 1);
+    }
+
+    // --- checkpoint 1, objective flavour (FEAT-069 acceptance criterion 1) --
+
+    #[tokio::test]
+    async fn objective_create_gated_creates_the_objective_when_the_soul_approves() {
+        let c = conn();
+        let sink = SpySink::new();
+        let outcome = objective_create_gated(
+            &c, "t", "d", "m", "sum", 30, "le", &AssertValue::Num(1.0), 1, "human", &PassthroughSoulGate, &sink,
+        ).await.unwrap();
+        assert!(outcome.approved());
+        assert_eq!(objective::objective_list(&c).unwrap().len(), 1);
+        assert_eq!(sink.records.lock().unwrap()[0].disposition, Disposition::Executed);
+    }
+
+    #[tokio::test]
+    async fn objective_create_gated_blocks_creation_and_records_the_reason_when_the_soul_rejects() {
+        let c = conn();
+        let sink = SpySink::new();
+        let soul = FixedVerdictSoul(SoulVerdict::Veto);
+        let outcome = objective_create_gated(
+            &c, "t", "d", "m", "sum", 30, "le", &AssertValue::Num(1.0), 1, "human", &soul, &sink,
+        ).await.unwrap();
+
+        match outcome {
+            GateOutcome::Rejected { reason } => assert_eq!(reason, "test double verdict"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        assert_eq!(objective::objective_list(&c).unwrap().len(), 0, "a rejected objective is never persisted");
+        assert_eq!(sink.records.lock().unwrap()[0].disposition, Disposition::Denied);
     }
 
     // --- checkpoint 2: plan activation ----------------------------------

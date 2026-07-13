@@ -1587,3 +1587,61 @@ toolchain**. Read it at the start of every session; append to it at the end.
   454; zero new clippy warnings).
 - Next: FEAT-069 (authorship, prioritization & source-routed escalation)
   — the final ticket in MILESTONE-0.7.0; once done, the milestone closes.
+
+### 2026-07-13 — FEAT-069: Authorship, prioritization & source-routed escalation (0.7.0 CLOSED)
+
+Final ticket of MILESTONE-0.7.0. Four parts, matching the ticket's own
+Implementation section:
+
+- **Authorship**: `objective_create_gated` added to `intent_gate.rs`,
+  mirroring FEAT-068's `goal_create_gated` — `objective::objective_create`
+  had no Soul checkpoint either; both intents now go through the same
+  values-gated create path before persistence.
+- **Prioritization**: already true by construction (FEAT-062's
+  `arbitrate_conflicts` and FEAT-064's cost-budget check already key off
+  `priority`) — nothing new to build, just confirmed.
+- **Source-routed escalation**: new `escalation_routing.rs` implements
+  `control_loop::EscalationSink` (left injectable by FEAT-066 specifically
+  for this ticket) for real: dvalin -> the bus (injectable `DvalinBusSink`,
+  the real impl wraps `bus::BusClient::send`); human -> a critical push
+  attempt (injectable `CriticalPushSink`) that's *never* the only channel —
+  it's always *also* parked, so a push failure (or no push channel
+  configured — `NoPush`, matching FEAT-044's default-off posture) never
+  loses the escalation; regin -> parked only, no external channel of its
+  own. **Parking reuses the existing generic episodic-memory table**
+  (`kind = "intent_escalation"`) rather than a new schema — same store
+  `pending_changes`/`decision_problems` already come from.
+- **Surfacing**: `greeting::Greeting` gained `intent_escalations` (parked
+  escalations, human/regin-sourced) and a new `greeting::intent_rag_summary`
+  (RAG counts across every goal + objective) feeds both `regin metrics`
+  (`Response::Metrics` gained `intent_rag`) and the greeting. **CLI verbs**:
+  `regin objective list|show` and `regin goal list|show` — full
+  protocol.rs/regind-dispatch/regin-cli-command/render.rs wiring, following
+  the exact `Incident`-command shape FEAT-070 established. **Deliberately
+  scoped to list/show, not create** — objective/goal creation goes through
+  the Soul-gated `intent_gate` functions, which need a `SoulGate` instance
+  the daemon doesn't have configured yet (no ticket has wired a live Soul
+  into `regind`'s `AppState`); CLI-driven creation is deferred to whichever
+  future ticket first wires the daemon's live Soul/executor loop, the same
+  "no live-loop wiring" boundary every 0.7.0 ticket has drawn consistently.
+- One incidental schema note: `Response::ObjectiveDetail`/`GoalDetail` box
+  their payload (`Box<StandingObjective>`/`Box<Goal>`) — clippy's
+  large-enum-variant lint caught the `Response` enum growing lopsided
+  once these joined the many already-boxed variants
+  (`Metrics{summary: Box<...>}`, `GreetingResp{greeting: Box<...>}`); fixed
+  by following that existing convention rather than leaving it unboxed.
+- 6 new `escalation_routing::` tests, 2 new `intent_gate::` tests
+  (objective creation approve/reject), 2 new `greeting::` tests (parked
+  escalations surfaced, RAG summary counts), plus CLI-layer coverage:
+  4 new `render::` tests, 2 new `cmd_*` tests in regin-cli, 2 new
+  dispatch tests in regind. Full workspace build/test/clippy stays green
+  (475 regin-core / 84 regin-cli unit + 2 integration / 50 regind / 5
+  operator-skills-package tests; zero new clippy warnings after boxing the
+  two Response detail variants).
+- **MILESTONE-0.7.0 is now closed** — all 10 FEATs (060–069) done. See the
+  milestone doc's closure note for the one deliberately-deferred exit
+  criterion (100% test coverage — reasonable-but-not-exhaustive tests were
+  used throughout per the user's mid-milestone "implement features, defer
+  test completion" instruction). Next up per the roadmap: MILESTONE-0.8.0
+  (coding agent + web UI plane, FEAT-077..085 + FEAT-087), independent of
+  0.7.0.
