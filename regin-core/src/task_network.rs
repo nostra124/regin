@@ -147,14 +147,16 @@ impl PlannedNetwork {
 /// Plan a goal into a task network, validate it as a DAG, and submit it to
 /// the Soul gate before it may become active (acceptance criterion 3). An
 /// invalid DAG errors before ever reaching the Soul — a network that can't
-/// execute isn't worth a vote. The caller decides what to do with a
-/// non-approved [`PlannedNetwork`] (revise-and-retry is FEAT-066's job).
+/// execute isn't worth a vote. `revision_feedback` is threaded straight to
+/// [`TaskPlanner::plan`] — `None` for a first pass, `Some(...)` when
+/// FEAT-066's control loop calls this again to replan from a task failure.
 pub async fn plan_and_gate(
     goal: &Goal,
+    revision_feedback: Option<&str>,
     planner: &dyn TaskPlanner,
     soul: &dyn SoulGate,
 ) -> Result<PlannedNetwork> {
-    let network = planner.plan(goal, None).await?;
+    let network = planner.plan(goal, revision_feedback).await?;
     validate_dag(&network.tasks)?;
 
     let steps: Vec<String> = network.tasks.iter().map(|t| t.title.clone()).collect();
@@ -306,7 +308,7 @@ mod tests {
         // acceptance criterion 3
         let network = a_network(vec![a_task("a", &[])]);
         let planner = FakePlanner(network.clone());
-        let planned = plan_and_gate(&a_goal(), &planner, &PassthroughSoulGate).await.unwrap();
+        let planned = plan_and_gate(&a_goal(), None, &planner, &PassthroughSoulGate).await.unwrap();
         assert!(planned.approved());
         assert_eq!(planned.network, network);
     }
@@ -315,7 +317,7 @@ mod tests {
     async fn plan_and_gate_reports_not_approved_when_the_soul_vetoes() {
         let network = a_network(vec![a_task("a", &[])]);
         let planner = FakePlanner(network);
-        let planned = plan_and_gate(&a_goal(), &planner, &AlwaysVetoSoul).await.unwrap();
+        let planned = plan_and_gate(&a_goal(), None, &planner, &AlwaysVetoSoul).await.unwrap();
         assert!(!planned.approved());
         assert_eq!(planned.soul.verdict, SoulVerdict::Veto);
     }
@@ -324,7 +326,7 @@ mod tests {
     async fn plan_and_gate_rejects_a_cyclic_network_before_reaching_the_soul() {
         let network = a_network(vec![a_task("a", &["a"])]);
         let planner = FakePlanner(network);
-        assert!(plan_and_gate(&a_goal(), &planner, &AlwaysVetoSoul).await.is_err());
+        assert!(plan_and_gate(&a_goal(), None, &planner, &AlwaysVetoSoul).await.is_err());
     }
 
     #[tokio::test]
@@ -332,8 +334,17 @@ mod tests {
         let network = a_network(vec![a_task("a", &[])]);
         let goal = a_goal();
         let spy = SpyPlanner { network, calls: Mutex::new(vec![]) };
-        plan_and_gate(&goal, &spy, &PassthroughSoulGate).await.unwrap();
+        plan_and_gate(&goal, None, &spy, &PassthroughSoulGate).await.unwrap();
         assert_eq!(spy.calls.lock().unwrap().as_slice(), &[(goal.id.clone(), None)]);
+    }
+
+    #[tokio::test]
+    async fn plan_and_gate_forwards_revision_feedback_on_a_replan() {
+        let network = a_network(vec![a_task("a", &[])]);
+        let goal = a_goal();
+        let spy = SpyPlanner { network, calls: Mutex::new(vec![]) };
+        plan_and_gate(&goal, Some("task a failed"), &spy, &PassthroughSoulGate).await.unwrap();
+        assert_eq!(spy.calls.lock().unwrap().as_slice(), &[(goal.id.clone(), Some("task a failed".to_string()))]);
     }
 
     #[tokio::test]
@@ -341,7 +352,7 @@ mod tests {
         let network = a_network(vec![a_task("a", &[])]);
         let expected = network.derived_criteria.clone();
         let planner = FakePlanner(network);
-        let planned = plan_and_gate(&a_goal(), &planner, &PassthroughSoulGate).await.unwrap();
+        let planned = plan_and_gate(&a_goal(), None, &planner, &PassthroughSoulGate).await.unwrap();
         assert_eq!(planned.network.derived_criteria, expected);
         assert!(!planned.network.derived_criteria.is_empty());
     }

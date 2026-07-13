@@ -1418,3 +1418,64 @@ toolchain**. Read it at the start of every session; append to it at the end.
   FEAT-066 is what actually drives failed tasks into mitigate/replan/RAG/
   escalate, closing the loop this ticket's `TaskOutcome::Failed` feeds
   into.
+
+### 2026-07-13 — FEAT-066: Planning control loop (0.7.0 intent & planning plane)
+
+- New `control_loop.rs`: `run_control_loop(goal, schedule_base,
+  failed_task_ids, planner, soul, mitigator, escalation_sink)` — mitigate
+  each failed task in place first; anything still failing after that
+  triggers a whole-network replan; RAG is recomputed from the outcome; a
+  still-red result escalates.
+- **RAG is a function of the schedule's structural feasibility *and* this
+  round's recovery history, not schedule shape alone** (acceptance
+  criterion 1): 🔴 red if infeasible or a failure survived mitigate+replan;
+  🟡 amber if feasible with nothing still failing but mitigation/replanning
+  was needed to get there this round; 🟢 green if feasible with nothing to
+  recover from. This is what makes "a recovered plan returns to
+  green/yellow, not red" (acceptance criterion 2) true by construction —
+  `compute_rag` takes `still_failed`/`recovered_this_round` as explicit
+  inputs rather than trying to infer history from the schedule alone.
+- **`plan_and_gate` (FEAT-063) now takes `revision_feedback: Option<&str>`**
+  — its own doc comment already promised this ("a future replanning loop,
+  FEAT-066, can regenerate the network from current state... without a new
+  trait"); this ticket is that promise redeemed. All of FEAT-063's own
+  call sites updated to pass `None` for a first pass; the replan path here
+  passes `Some("tasks failed and could not be mitigated: ...")`.
+- **Reuses `task_executor::TaskExecutionReport`** as `Mitigator`'s return
+  shape — a mitigation attempt is itself just another task execution
+  (retry / alternative path), so its outcome is reported the same way a
+  first attempt would be, no separate "mitigation result" type.
+- **`PlanningEscalation` is deliberately NOT `escalation::Escalation`**
+  (FEAT-015's ITIL problem->dvalin bug/feat bridge) — the ticket is explicit
+  that task failure "is a planning-domain loop... never an ITIL incident."
+  A parallel, smaller type carries `goal_id`/`source`
+  (`objective::IntentSource`)/`reason`/the three DISC-019 remedies
+  (`ProvideResources`/`AdjustIntent`/`Replan`, always offered together via
+  `standard_remedies()`). `EscalationSink` is injectable — FEAT-069 wires
+  the actual source-routed channel; this ticket proves the escalation
+  fires with the right payload against a spy.
+- **Scoped to goals only** — an objective's RAG already comes from
+  FEAT-060's `check_objectives` (a KPI-breach loop); objectives aren't
+  decomposed into task networks, so there's nothing for this loop to
+  mitigate or replan on their behalf.
+- **No persistence, no live-loop wiring** — same deliberate scoping as
+  every other 0.7.0 model/plan ticket so far; `run_control_loop` returns a
+  `ControlLoopReport` value, it doesn't write the goal's RAG back to the
+  `goals` table itself.
+- 10 new tests: `compute_rag` across all three colors on known fixtures
+  (feasible+no-recovery -> green, feasible+recovered -> amber,
+  infeasible -> red regardless of recovery, still-failing -> red —
+  acceptance criterion 1); a mitigated task recovering to amber without
+  ever replanning; an unmitigatable task triggering a replan that recovers
+  (acceptance criterion 2); a vetoed replan leaving the task failing,
+  going red, and escalating with the exact goal id/source/three remedies
+  (acceptance criterion 3); an infeasible schedule with zero failed tasks
+  still escalating (feasibility alone is enough); a fully healthy pass
+  never escalating; and an unknown failed-task id erroring rather than
+  silently no-opping. Full workspace build/test/clippy stays green (439
+  regin-core tests, up from 428; zero new clippy warnings).
+- Next: FEAT-067 (event bus + triggers) — the "execute" phase (FEAT-065 +
+  FEAT-066) is done; FEAT-067 gives the daemon loop something to actually
+  drive `execute_task`/`run_control_loop` from (`task.completed`/
+  `task.failed`/deadline ticks), continuing into the milestone's "control"
+  phase alongside FEAT-069.
