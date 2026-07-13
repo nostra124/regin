@@ -1276,3 +1276,79 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-064 (RCPSP scheduler) — schedules a `TaskNetwork`'s tasks
   (CPM forward/backward pass, slack, critical path, resource feasibility),
   the second half of the milestone's "plan & schedule" phase.
+
+### 2026-07-13 — FEAT-064: RCPSP scheduler (0.7.0 intent & planning plane)
+
+- New `rcpsp.rs`: schedules a `task_network::TaskNetwork` in two stages —
+  a classic **CPM forward/backward pass** (precedence-only earliest/latest
+  start/finish, slack, critical path = zero-slack tasks) followed by a
+  **resource-constrained serial schedule** that places each task, in
+  topological order, at the earliest time its precedence, date window, and
+  resource demands all clear simultaneously.
+- **Two resource categories**, both surfaced through
+  `Task::resource_demands` (no new field on `Task`, reusing FEAT-063's
+  schema as-is): named keys are **renewable** — capacity applies to tasks
+  active *simultaneously*, freed the instant one finishes (a maintenance
+  window, exclusive service access, ...) — except the reserved `"cost"`
+  key, which is **non-renewable**: the sum of every task's cost demand
+  across the *entire* network is checked against `cost_budget` once, not a
+  simultaneous-use check. `"concurrency"` is a third reserved name, never
+  declared by a task directly — every task implicitly demands 1 unit of it,
+  capacity = `ScheduleInput::max_concurrency`; a task declaring
+  `"concurrency"` itself is treated as a config error (`schedule` errors
+  outright, not just an infeasibility issue).
+- **Reuses `task_network::validate_dag`** for the cycle check rather than
+  re-validating — `schedule()`'s first line is that call. Event->task
+  dependencies stay out of CPM for the same reason FEAT-063 excluded them
+  from DAG cycle detection: an event isn't a fixed point in a time-based
+  schedule.
+- **`due` and `deadline` are folded into one "finish-by" cap** (the tighter
+  of the two) on the backward pass, rather than modeling the full
+  five-way planned/earliest/latest/due/deadline distinction DISC-019
+  sketches — the "planned" time *is* this scheduler's own output, and a
+  due/deadline severity split doesn't change what's structurally feasible.
+  Documented as a deliberate simplification in the module doc comment.
+- **Never errors on infeasibility** (acceptance criterion 3) — a negative-
+  slack task, an over-capacity resource, a blown cost budget, or a
+  schedule that finishes past the project deadline all append a
+  human-readable string to `ScheduleReport::issues` and clear
+  `feasible`, rather than propagating as an `Err`. `schedule()` only
+  errors on a structural input problem (a cycle, the reserved-resource
+  misuse above, an unparseable date string) — the same "infeasible plans
+  are data, broken inputs are bugs" split FEAT-060/061 already draw
+  between a stored breach and a rejected create.
+- **Resource placement uses event-point checking, not per-minute
+  scanning**: `earliest_feasible_start` only re-checks feasibility at the
+  distinct start/finish instants of already-placed tasks that overlap a
+  candidate window — correct and fast regardless of task duration (a
+  multi-day task doesn't cost thousands of per-minute checks). A
+  structural impossibility (a task's own demand exceeds capacity, no
+  matter when it runs) is detected up front and surfaced immediately
+  rather than looping forever hunting for a fit that can't exist.
+- **Deliberately excludes RAG computation** — the ticket's own title
+  mentions RAG, but the milestone doc attributes nuanced (green/amber/red)
+  RAG to FEAT-066's control loop (`objective::Rag` today only distinguishes
+  green/red — see FEAT-060's doc comment); `ScheduleReport::feasible` +
+  `issues` is the deterministic signal FEAT-066 will map to RAG, not a
+  RAG value computed here.
+- 15 new tests: a 4-task diamond network's ES/EF/LS/LF/slack/critical-path
+  on a known fixture (acceptance criterion 1), a single-task network,
+  earliest_start window pushing the forward pass out, deadline+latest_start
+  capping the backward pass, concurrency=1 serializing two independent
+  tasks, a named resource capacity deferring a conflicting task, a named
+  resource with enough capacity allowing full parallelism, a task
+  demanding more than total capacity reported infeasible (acceptance
+  criterion 2), declaring the reserved `"concurrency"` resource is an
+  error, a too-tight deadline reported infeasible via negative slack, a
+  feasible deadline reporting no issues, an over-budget plan reported
+  infeasible, a within-budget plan reporting no cost issue, a cyclic
+  network rejected outright, and resource+deadline infeasibility reported
+  together (acceptance criterion 3). Full workspace build/test/clippy
+  stays green (416 regin-core tests, up from 401; zero new clippy
+  warnings after fixing two lint hits of my own — a doc-comment line
+  starting "1) ..." misparsed as a markdown list item, and a `len() >= 1`
+  simplified to `!is_empty()`).
+- Next: FEAT-065 (task executor) — the "plan & schedule" phase (FEAT-063 +
+  FEAT-064) is done; FEAT-065 starts the "execute" phase, running a
+  scheduled task network's tasks via polymorphic actions with
+  quality-criteria verification.
