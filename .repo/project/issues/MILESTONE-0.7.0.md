@@ -38,7 +38,7 @@ bus (linkable to dvalin) triggers event→task/plan flows.
 | ID | Title | From | Status |
 |----|-------|------|--------|
 | FEAT-060 | Objective model (to-be-state over KPIs + time windows) | DISC-019 | done |
-| FEAT-061 | Goal model + store (target/deadline/derived criteria/lifecycle) | DISC-019 | open |
+| FEAT-061 | Goal model + store (target/deadline/derived criteria/lifecycle) | DISC-019 | done |
 | FEAT-062 | Intent dependency & conflict graph (supports/conflicts) | DISC-019 | open |
 | FEAT-063 | Planner: goal → task network | DISC-019 | open |
 | FEAT-064 | RCPSP scheduler (CPM + resources, slack/critical path, RAG) | DISC-019 | open |
