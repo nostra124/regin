@@ -11,6 +11,7 @@ pub mod evaluate;
 pub mod filters;
 pub mod escalation;
 pub mod foreman;
+pub mod goal;
 pub mod greeting;
 pub mod guardrail;
 pub mod db;

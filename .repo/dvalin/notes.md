@@ -1110,3 +1110,63 @@ toolchain**. Read it at the start of every session; append to it at the end.
   new clippy warnings).
 - Next: FEAT-061 (goal model + store) per the milestone's suggested order —
   reuses this ticket's `IntentSource`/`Rag` vocabulary for goals.
+
+### 2026-07-12 — FEAT-061: Goal model + store (0.7.0 intent & planning plane)
+- **FEAT-061 implemented and moved to done/.** New `regin-core/src/goal.rs`:
+  a dated goal (description + target + deadline) with success criteria
+  **derived at planning time** — measurable-preferred (a structural
+  assertion, same `key`/`op`/`value` shape as `desired::Assertion`, checked
+  against a caller-supplied observation map) with an LLM-judged fallback
+  for fuzzy criteria (measurable-preferred / LLM-fallback rule, DISC-019).
+  Lifecycle: `proposed -> active -> achieved | failed | abandoned`.
+- **Reuses FEAT-060's shared intent vocabulary**: `priority`/`source`/`rag`
+  are the same `objective::IntentSource`/`objective::Rag` types (as
+  anticipated in FEAT-060's own notes entry) — one shared "who owns this
+  intent, how urgent, how healthy" concept across objectives and goals,
+  not two parallel ones.
+- **`GoalJudge` trait (async, injectable)** mirrors the established
+  `SoulGate`/`DeviationJudge` seam pattern: fuzzy criteria are judged via
+  `dyn GoalJudge`, with a `FixedGoalJudge(bool)` test double — acceptance
+  criterion 2's "injectable in tests" satisfied the same way FEAT-028/029
+  kept the Soul gate swappable, no new pattern invented.
+- **Missing-observation semantics deliberately differ from
+  `evaluate::evaluate()`'s.** `evaluate()` (instantaneous to-be-state
+  deviation detection) *skips* a key with no observed value — no data means
+  nothing to complain about yet. Goal achievement inverts that: a missing
+  key means *not achieved* (unconfirmed success is not success). Same
+  `evaluate::satisfies()` pure function reused either way; only the
+  around-it interpretation differs. Documented explicitly in
+  `all_criteria_hold`'s doc comment so it doesn't read as an inconsistency
+  with FEAT-060/desired.rs's convention.
+- **Deadline-past + criteria-holding still resolves to Achieved, not
+  Failed** — achievement is checked first, unconditionally; the deadline
+  check only runs if criteria don't hold. A goal that becomes true exactly
+  at (or fractionally after) its deadline still counts as achieved, matching
+  the plain-English reading of "achieve X by date D" (unit-tested
+  explicitly: `evaluate_goal_prefers_achievement_over_failure_right_at_the_deadline`).
+- **`evaluate_goal` only acts on `active` goals** — proposed/terminal goals
+  return `GoalOutcome::NotActive` untouched. Activation (`proposed ->
+  active`) and abandonment (any non-terminal -> `abandoned`) are separate,
+  deliberate, non-idempotent transitions — `evaluate_goal` itself never
+  produces `abandoned`, only a human/regin decision does (matches
+  DISC-019's "no per-task human approval, but the source owns
+  feasibility/abandonment" framing).
+- **`now: DateTime<Utc>` is caller-supplied throughout** (acceptance
+  criterion 3's fake-clock requirement) — `evaluate_goal` never reads wall
+  time itself for the deadline check.
+- **No CLI/dispatch/protocol wiring** — same deliberate scoping as
+  FEAT-060; FEAT-069 owns CLI verbs, FEAT-066 owns wiring `evaluate_goal`
+  into a live loop.
+- 14 new tests: create/get/list round-trip, reject-unknown-source,
+  activate/abandon lifecycle transitions (including the "already terminal,
+  can't abandon" and "already active, can't re-activate" error paths),
+  achieves-when-measurable-holds, stays-active-when-unmet,
+  missing-observation-never-achieves, auto-fails-past-deadline-with-a-fake-
+  clock, achievement-wins-at-the-deadline, fuzzy-criterion-uses-the-
+  injected-judge (both directions), mixed measurable+judged criteria (all
+  must hold), and status-filtered listing. Full workspace build/test/clippy
+  stays green (381 regin-core + 79 regin-cli unit + 2 regin-cli integration
+  + 49 regind + 5 operator-skills-package tests; zero new clippy warnings).
+- Next: FEAT-062 (intent dependency & conflict graph) per the milestone's
+  suggested order — relates objectives and goals to each other
+  (`supports`/`conflicts_with`).

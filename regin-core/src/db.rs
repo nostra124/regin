@@ -198,6 +198,20 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             rag TEXT NOT NULL DEFAULT 'green',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS goals (
+            id TEXT PRIMARY KEY,
+            description TEXT NOT NULL,
+            target TEXT NOT NULL,
+            deadline TEXT NOT NULL,
+            criteria_json TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            rag TEXT NOT NULL DEFAULT 'green',
+            status TEXT NOT NULL DEFAULT 'proposed',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );",
     )
     .context("Failed to create database tables")?;
