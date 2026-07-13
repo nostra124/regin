@@ -1,6 +1,10 @@
 //! Tool definitions and execution for the regin agent.
 //!
-//! Tools: bash, read_file, write_file, edit_file, web_search
+//! Tools: bash, read_file, write_file, edit_file, web_search, glob, grep
+//! (FEAT-077 / DISC-021: `glob`/`grep` are dedicated, `.gitignore`-aware code
+//! search tools backed by the `ignore`/`globset`/`regex` crates — the same
+//! crate family ripgrep itself is built from — so the agent no longer has to
+//! shell out to `find`/`grep` through `bash`.)
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -160,6 +164,52 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "glob".into(),
+                description: "Find files by name pattern (e.g. \"**/*.rs\"). Respects .gitignore. Returns matching paths, most recently modified first.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern to match file paths against (e.g. \"src/**/*.rs\", \"*.md\")"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search under (optional, defaults to caller cwd)"
+                        }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+        },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "grep".into(),
+                description: "Search file contents with a regex. Respects .gitignore. Returns file:line and one line of context on each side of every match.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regular expression to search for"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search under (optional, defaults to caller cwd)"
+                        },
+                        "include": {
+                            "type": "string",
+                            "description": "Glob filter for which files to search (optional, e.g. \"*.rs\")"
+                        }
+                    },
+                    "required": ["pattern"]
+                }),
+            },
+        },
     ]
 }
 
@@ -195,6 +245,8 @@ pub async fn execute_tool(call: &ToolCall, default_cwd: Option<&str>) -> ToolRes
         "write_file" => exec_write_file(&args),
         "edit_file" => exec_edit_file(&args),
         "web_search" => exec_web_search(&args).await,
+        "glob" => exec_glob(&args, default_cwd),
+        "grep" => exec_grep(&args, default_cwd),
         other => (format!("Unknown tool: {other}"), false),
     };
 
@@ -296,6 +348,129 @@ fn exec_edit_file(args: &Value) -> (String, bool) {
         Ok(()) => (format!("Edited {path}"), true),
         Err(e) => (format!("Error writing {path}: {e}"), false),
     }
+}
+
+/// Cap on grep matches returned in one call — a runaway pattern against a
+/// huge tree shouldn't flood the agent's context.
+const MAX_GREP_MATCHES: usize = 200;
+
+/// A `.gitignore`-aware directory walker for `glob`/`grep`. `require_git(false)`
+/// so `.gitignore` is honoured even outside an actual git repo (e.g. a working
+/// copy before `git init`) — `ignore`'s default only applies `.gitignore` rules
+/// inside a real repo, which is narrower than what a code-search tool wants.
+fn code_search_walker(base: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(base).require_git(false).build()
+}
+
+fn exec_glob(args: &Value, default_cwd: Option<&str>) -> (String, bool) {
+    let pattern = args["pattern"].as_str().unwrap_or("");
+    if pattern.is_empty() {
+        return ("No pattern provided".into(), false);
+    }
+    let base = args["path"].as_str().or(default_cwd).unwrap_or(".");
+    let base_path = Path::new(base);
+    if !base_path.exists() {
+        return (format!("Path not found: {base}"), false);
+    }
+    let matcher = match globset::Glob::new(pattern) {
+        Ok(g) => g.compile_matcher(),
+        Err(e) => return (format!("Invalid glob pattern {pattern:?}: {e}"), false),
+    };
+
+    let mut matches: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
+    for entry in code_search_walker(base_path) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let rel = entry.path().strip_prefix(base_path).unwrap_or(entry.path());
+        if !matcher.is_match(rel) {
+            continue;
+        }
+        let modified = entry.metadata().ok().and_then(|m| m.modified().ok()).unwrap_or(std::time::UNIX_EPOCH);
+        matches.push((entry.into_path(), modified));
+    }
+
+    if matches.is_empty() {
+        return ("No files matched".into(), true);
+    }
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    let output = matches.into_iter().map(|(p, _)| p.display().to_string()).collect::<Vec<_>>().join("\n");
+    (output, true)
+}
+
+fn exec_grep(args: &Value, default_cwd: Option<&str>) -> (String, bool) {
+    let pattern = args["pattern"].as_str().unwrap_or("");
+    if pattern.is_empty() {
+        return ("No pattern provided".into(), false);
+    }
+    let base = args["path"].as_str().or(default_cwd).unwrap_or(".");
+    let base_path = Path::new(base);
+    if !base_path.exists() {
+        return (format!("Path not found: {base}"), false);
+    }
+    let re = match regex::Regex::new(pattern) {
+        Ok(r) => r,
+        Err(e) => return (format!("Invalid regex {pattern:?}: {e}"), false),
+    };
+    let include_matcher = match args["include"].as_str() {
+        Some(inc) if !inc.is_empty() => match globset::Glob::new(inc) {
+            Ok(g) => Some(g.compile_matcher()),
+            Err(e) => return (format!("Invalid include pattern {inc:?}: {e}"), false),
+        },
+        _ => None,
+    };
+
+    let mut out = String::new();
+    let mut hits = 0usize;
+    'walk: for entry in code_search_walker(base_path) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if let Some(m) = &include_matcher {
+            let rel = entry.path().strip_prefix(base_path).unwrap_or(entry.path());
+            if !m.is_match(rel) {
+                continue;
+            }
+        }
+        // A read error here is almost always a binary file — skip it rather
+        // than surfacing noise for every non-UTF8 asset in the tree.
+        let content = match std::fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !re.is_match(line) {
+                continue;
+            }
+            hits += 1;
+            if hits > MAX_GREP_MATCHES {
+                out += "... (truncated — more matches exist, narrow the pattern or path)\n";
+                break 'walk;
+            }
+            out += &format!("{}:{}:\n", entry.path().display(), i + 1);
+            if i > 0 {
+                out += &format!("  {}\n", lines[i - 1]);
+            }
+            out += &format!("> {line}\n");
+            if let Some(after) = lines.get(i + 1) {
+                out += &format!("  {after}\n");
+            }
+        }
+    }
+
+    if hits == 0 {
+        return ("No matches found".into(), true);
+    }
+    (out, true)
 }
 
 async fn exec_web_search(args: &Value) -> (String, bool) {
@@ -486,6 +661,114 @@ mod exec_tests {
 
         let miss = execute_tool(&call("read_file", json!({"path": dir.join("nope").to_str().unwrap()})), None).await;
         assert!(!miss.success);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn glob_finds_matches_sorted_by_recency_and_respects_gitignore() {
+        // acceptance criteria 1 and 6
+        let dir = tmp();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "fn a() {}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.join("src/b.rs"), "fn b() {}").unwrap();
+        std::fs::write(dir.join("src/c.txt"), "not rust").unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.join("src/ignored.rs"), "fn ignored() {}").unwrap();
+
+        let r = execute_tool(&call("glob", json!({"pattern": "**/*.rs", "path": dir.to_str().unwrap()})), None).await;
+        assert!(r.success, "{}", r.output);
+        assert!(r.output.contains("a.rs"));
+        assert!(r.output.contains("b.rs"));
+        assert!(!r.output.contains("c.txt"));
+        assert!(!r.output.contains("ignored.rs"), "gitignore respected: {}", r.output);
+        // most recently modified first
+        let b_pos = r.output.find("b.rs").unwrap();
+        let a_pos = r.output.find("a.rs").unwrap();
+        assert!(b_pos < a_pos, "b.rs (newer) should sort before a.rs (older): {}", r.output);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn glob_reports_empty_and_invalid_pattern_and_missing_path() {
+        let dir = tmp();
+        let empty = execute_tool(&call("glob", json!({"pattern": "*.nope", "path": dir.to_str().unwrap()})), None).await;
+        assert!(empty.success);
+        assert!(empty.output.contains("No files matched"));
+
+        let bad = execute_tool(&call("glob", json!({"pattern": "["})), None).await;
+        assert!(!bad.success);
+        assert!(bad.output.contains("Invalid glob pattern"));
+
+        let missing = execute_tool(&call("glob", json!({"pattern": "*", "path": "/no/such/dir"})), None).await;
+        assert!(!missing.success);
+        assert!(missing.output.contains("Path not found"));
+
+        let no_pattern = execute_tool(&call("glob", json!({})), None).await;
+        assert!(!no_pattern.success);
+        assert!(no_pattern.output.contains("No pattern"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_finds_matches_with_context_and_respects_include_and_gitignore() {
+        // acceptance criteria 2 and 6
+        let dir = tmp();
+        std::fs::write(dir.join("main.rs"), "line one\nfn target() {}\nline three\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "target mentioned here too\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "skip.rs\n").unwrap();
+        std::fs::write(dir.join("skip.rs"), "fn target() {}\n").unwrap();
+
+        let r = execute_tool(&call("grep", json!({"pattern": "target", "path": dir.to_str().unwrap(), "include": "*.rs"})), None).await;
+        assert!(r.success, "{}", r.output);
+        assert!(r.output.contains("main.rs:2:"));
+        assert!(r.output.contains("line one"), "context before: {}", r.output);
+        assert!(r.output.contains("line three"), "context after: {}", r.output);
+        assert!(!r.output.contains("notes.txt"), "include filter respected");
+        assert!(!r.output.contains("skip.rs"), "gitignore respected: {}", r.output);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_reports_no_matches_and_invalid_regex_and_include() {
+        let dir = tmp();
+        std::fs::write(dir.join("f.txt"), "hello world\n").unwrap();
+
+        let none = execute_tool(&call("grep", json!({"pattern": "nowhere", "path": dir.to_str().unwrap()})), None).await;
+        assert!(none.success);
+        assert!(none.output.contains("No matches found"));
+
+        let bad_regex = execute_tool(&call("grep", json!({"pattern": "(unclosed"})), None).await;
+        assert!(!bad_regex.success);
+        assert!(bad_regex.output.contains("Invalid regex"));
+
+        let bad_include = execute_tool(&call("grep", json!({"pattern": "hello", "path": dir.to_str().unwrap(), "include": "["})), None).await;
+        assert!(!bad_include.success);
+        assert!(bad_include.output.contains("Invalid include pattern"));
+
+        let missing = execute_tool(&call("grep", json!({"pattern": "x", "path": "/no/such/dir"})), None).await;
+        assert!(!missing.success);
+        assert!(missing.output.contains("Path not found"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn grep_truncates_past_the_match_cap() {
+        let dir = tmp();
+        let mut content = String::new();
+        for i in 0..(MAX_GREP_MATCHES + 20) {
+            content += &format!("needle {i}\n");
+        }
+        std::fs::write(dir.join("big.txt"), content).unwrap();
+
+        let r = execute_tool(&call("grep", json!({"pattern": "needle", "path": dir.to_str().unwrap()})), None).await;
+        assert!(r.success);
+        assert!(r.output.contains("truncated"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

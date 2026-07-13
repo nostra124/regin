@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// The tools regin can hold a ceiling over (mirrors `tools::execute_tool`).
-pub const ALL_TOOLS: &[&str] = &["bash", "read_file", "write_file", "edit_file", "web_search"];
+pub const ALL_TOOLS: &[&str] = &["bash", "read_file", "write_file", "edit_file", "web_search", "glob", "grep"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Persona {
@@ -126,6 +126,15 @@ mod tests {
     fn validation_rejects_empty_role_and_unknown_tool() {
         assert!(Persona::from_toml("role = \"\"\n").is_err());
         assert!(Persona::from_toml("role = \"x\"\ntools = [\"telepathy\"]\n").is_err());
+    }
+
+    #[test]
+    fn glob_and_grep_are_known_tools() {
+        // FEAT-077: a persona can be scoped to the code-search tools specifically.
+        let p = Persona::from_toml("role = \"searcher\"\ntools = [\"glob\", \"grep\"]\n").unwrap();
+        assert!(p.allows("glob"));
+        assert!(p.allows("grep"));
+        assert!(!p.allows("bash"), "outside this ceiling");
     }
 
     #[test]
