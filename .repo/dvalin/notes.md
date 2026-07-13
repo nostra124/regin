@@ -1749,3 +1749,79 @@ Implementation section:
 - Next: FEAT-078 (LSP diagnostics feedback loop) — Track A's "quality
   feedback" step, depends on FEAT-077 (grep, already done) for navigating
   to error locations.
+
+### 2026-07-13 — FEAT-078: LSP diagnostics feedback loop (0.8.0 coding agent plane)
+
+- **FEAT-078 implemented and moved to done/.** New `regin-core/src/lsp.rs`: a
+  lightweight LSP client over stdio (JSON-RPC 2.0 with `Content-Length`
+  framing) rather than pulling in `tower-lsp` — the agent only needs
+  `initialize`/`initialized`, `textDocument/didOpen`/`didChange`, and
+  listening for `textDocument/publishDiagnostics` notifications, so a
+  ~50-line hand-rolled framer (`encode_message`/`read_message`) covers it
+  without a heavyweight dependency.
+- `detect_language`/`default_command` cover Rust (rust-analyzer) and
+  TypeScript/JavaScript (typescript-language-server --stdio) out of the box
+  (acceptance criterion 6); `resolve_command` layers a `lsp.<language>.command`
+  setting override on top via the existing generic `db::setting_set`/
+  `setting_get` (not in the static `SETTINGS` table — same "arbitrary keys
+  allowed" convention already used elsewhere), so `regin config set
+  lsp.python.command "pylsp"` works with no code change for a new language.
+- **`rust-analyzer` is not actually usable in this sandbox** — confirmed via a
+  raw handshake probe (the `rust-analyzer` on `PATH` is a rustup proxy shim
+  with no component installed; it fails with a
+  `DistributableToolchain::recursion_error`). Decided against a real-process
+  integration test; `LspClient`/`LspSpawner` are injectable traits (mirrors
+  `TaskPlanner`/`SoulGate`/`EscalationSink` from earlier tickets) so every
+  orchestration path — debounce, pool eviction, language detection, command
+  resolution, the on-demand `diagnostics` tool, the post-edit feedback hook —
+  is covered with fakes (`FakeLspClient`/`FakeLspSpawner`). `ProcessLspClient`/
+  `ProcessLspSpawner` (the real stdio implementation) stay thin and exercised
+  only by the framing/parsing unit tests, matching the established "thin,
+  less-tested real I/O layer" precedent from `bus.rs`/`push.rs`.
+- **`rusqlite::Connection` is not `Sync`, so a function can't take
+  `&Connection` and also `.await` internally** if the caller might hold the
+  connection behind a `Mutex` (a `MutexGuard<Connection>` is not `Send`, and
+  it'd have to live across the await point). Split what was going to be one
+  `fetch_diagnostics(conn, ...)` async function into
+  `plan_diagnostics(conn: &Connection, ...) -> DiagnosticsPlan` (pure, sync,
+  reads `lsp.enabled`/debounce/command settings and returns an owned
+  decision) and `run_diagnostics_plan(ctx, plan, ...)` (async, no
+  `Connection` parameter at all, does the actual spawn/poll). Callers do
+  `let plan = { plan_diagnostics(&db.lock().unwrap(), ...) };` (guard dropped
+  at the block's end) then `await` the run phase separately. This is now the
+  pattern for any future function needing both DB access and async I/O in the
+  same call. `fetch_diagnostics` survives as a test-only convenience wrapper
+  gluing both phases together.
+- Debounce (acceptance criterion 3) and pool eviction (criterion 5) both take
+  `now: DateTime<Utc>` as an explicit parameter rather than reading
+  `Utc::now()` internally, so tests can assert exact debounce-window and
+  idle-timeout edges without sleeping — same fake-clock approach as
+  `evaluate_goal`'s `now` param from FEAT-061.
+- Wired in as a second additive wrapper, following FEAT-085's precedent:
+  `execute_tool_with_undo_and_diagnostics` sits on top of
+  `execute_tool_with_undo` without changing its signature. It intercepts the
+  new `diagnostics` tool directly (on-demand, criterion 4, bypasses
+  debounce); for `write_file`/`edit_file`/`apply_patch` it runs the normal
+  gated+undo-snapshotted execution first, and on success appends rendered
+  diagnostics to the tool result if `lsp.enabled` and debounce allow a run
+  (criterion 2). Every prior `execute_tool_with_undo`/`execute_tool_gated`
+  call site is untouched.
+- `regind`'s `AppState` gained an `lsp: lsp::LspContext` field (constructed
+  with the real `ProcessLspSpawner`, always present — LSP stays fully inert
+  until `lsp.enabled` is set, checked on every call by `plan_diagnostics`);
+  the chat loop's tool-call site now goes through
+  `execute_tool_with_undo_and_diagnostics`.
+- `persona::ALL_TOOLS` gained `"diagnostics"`.
+- 35 new tests: 27 in `lsp.rs` (framing round-trip, `publishDiagnostics`
+  parsing, language detection, command resolution incl. override, debounce
+  window edges, pool insert/get/evict_idle, `get_or_spawn_client`
+  reuse-vs-spawn, the `plan_diagnostics`/`run_diagnostics_plan` split) and 8
+  in `tools.rs` (`diagnostics` tool on/off/missing-path, post-edit
+  diagnostics appended only on success and only when enabled, non-edit tools
+  passed through undiagnosed). Full workspace build/test/clippy stays green
+  (533 regin-core tests, up from 499; zero new clippy warnings — the
+  `tools.rs` collapsible-if hit is still the same pre-existing
+  `exec_write_file` warning at a shifted line number).
+- Next: FEAT-079 (multi-agent orchestration / subagent Task tool) — Track
+  A's "orchestration" step, depends on nothing beyond the existing session
+  protocol.

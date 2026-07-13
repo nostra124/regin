@@ -46,6 +46,9 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("decision.deliberate.max_rounds", "3", "Plan/re-plan rounds before deliberate mode default-denies + escalates (FEAT-028)"),
     ("decision.deliberate.confidence_threshold", "0.7", "Minimum Soul-vote confidence for an approve to pass the gate; below this an approve is treated as revise (FEAT-029)"),
     ("decision.principles.recurrence_threshold", "3", "Minimum recurring bad-outcome deliberations before reflection proposes a candidate principle (FEAT-031)"),
+    ("lsp.enabled", "false", "Feed LSP diagnostics back after write_file/edit_file/apply_patch — opt-in (FEAT-078)"),
+    ("lsp.debounce_ms", "500", "Minimum interval between automatic diagnostics runs for the same file (FEAT-078)"),
+    ("lsp.idle_timeout_secs", "300", "Idle time before a spawned language server process is recycled (FEAT-078)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/

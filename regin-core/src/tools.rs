@@ -270,6 +270,23 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "diagnostics".into(),
+                description: "Request LSP diagnostics (compiler/linter errors and warnings) for a file on demand.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to check"
+                        }
+                    },
+                    "required": ["path"]
+                }),
+            },
+        },
     ]
 }
 
@@ -319,6 +336,71 @@ pub async fn execute_tool_with_undo(
         _ => {}
     }
     execute_tool_gated(call, default_cwd, persona).await
+}
+
+/// Wraps [`execute_tool_with_undo`] with LSP diagnostics (FEAT-078):
+/// intercepts the on-demand `diagnostics` tool directly (acceptance
+/// criterion 4), and — when a `write_file`/`edit_file`/`apply_patch` call
+/// succeeds — appends automatic (debounced) diagnostics for the affected
+/// file to the tool result (acceptance criteria 2, 3). `db` is only ever
+/// locked for the synchronous [`crate::lsp::plan_diagnostics`] step and
+/// released before any `.await` — see that function's own doc comment for
+/// why (`rusqlite::Connection` isn't `Sync`, so a lock over it can't be
+/// held across an await point).
+pub async fn execute_tool_with_undo_and_diagnostics(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    persona: Option<&crate::persona::Persona>,
+    undo: &std::sync::Mutex<crate::undo::UndoStore>,
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    lsp: &crate::lsp::LspContext,
+) -> ToolResult {
+    if call.function.name == "diagnostics" {
+        return exec_diagnostics_tool(call, default_cwd, db, lsp).await;
+    }
+
+    let mut result = execute_tool_with_undo(call, default_cwd, persona, undo).await;
+
+    if result.success && matches!(call.function.name.as_str(), "write_file" | "edit_file" | "apply_patch") {
+        let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+        if let Some(path) = args["path"].as_str().filter(|p| !p.is_empty()) {
+            let workspace_root = default_cwd.unwrap_or(".");
+            let now = chrono::Utc::now();
+            let plan = { crate::lsp::plan_diagnostics(&db.lock().unwrap(), lsp, path, now, true) };
+            if let Ok(plan) = plan
+                && let Ok(Some(diags)) = crate::lsp::run_diagnostics_plan(lsp, plan, path, workspace_root, now).await
+            {
+                result.output += &crate::lsp::render_diagnostics(path, &diags);
+            }
+        }
+    }
+
+    result
+}
+
+async fn exec_diagnostics_tool(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    lsp: &crate::lsp::LspContext,
+) -> ToolResult {
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+    let path = args["path"].as_str().unwrap_or("").to_string();
+    if path.is_empty() {
+        return ToolResult { tool_call_id: call.id.clone(), name: "diagnostics".into(), output: "No path provided".into(), success: false };
+    }
+    let workspace_root = default_cwd.unwrap_or(".").to_string();
+    let now = chrono::Utc::now();
+    let plan = { crate::lsp::plan_diagnostics(&db.lock().unwrap(), lsp, &path, now, false) };
+    let (output, success) = match plan {
+        Ok(plan) => match crate::lsp::run_diagnostics_plan(lsp, plan, &path, &workspace_root, now).await {
+            Ok(Some(diags)) => (crate::lsp::render_diagnostics(&path, &diags), true),
+            Ok(None) => ("LSP is disabled or no language server is configured for this file".to_string(), false),
+            Err(e) => (format!("Failed to fetch diagnostics for {path}: {e}"), false),
+        },
+        Err(e) => (format!("Failed to fetch diagnostics for {path}: {e}"), false),
+    };
+    ToolResult { tool_call_id: call.id.clone(), name: "diagnostics".into(), output, success }
 }
 
 fn exec_undo(call: &ToolCall, undo: &std::sync::Mutex<crate::undo::UndoStore>) -> ToolResult {
@@ -1118,6 +1200,151 @@ mod exec_tests {
         assert_eq!(undone, 50);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- FEAT-078: LSP diagnostics wrapper ---------------------------------
+
+    struct FakeLspClient(Vec<crate::lsp::Diagnostic>);
+    #[async_trait::async_trait]
+    impl crate::lsp::LspClient for FakeLspClient {
+        async fn diagnostics(&self, _path: &str) -> anyhow::Result<Vec<crate::lsp::Diagnostic>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct FakeLspSpawner(Vec<crate::lsp::Diagnostic>);
+    #[async_trait::async_trait]
+    impl crate::lsp::LspSpawner for FakeLspSpawner {
+        async fn spawn(&self, _command: &[String], _workspace_root: &str) -> anyhow::Result<std::sync::Arc<dyn crate::lsp::LspClient>> {
+            Ok(std::sync::Arc::new(FakeLspClient(self.0.clone())))
+        }
+    }
+
+    fn lsp_conn() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&c).unwrap();
+        c
+    }
+
+    fn a_diagnostic(message: &str) -> crate::lsp::Diagnostic {
+        crate::lsp::Diagnostic {
+            range: crate::lsp::Range { start: crate::lsp::Position { line: 0, character: 0 }, end: crate::lsp::Position { line: 0, character: 1 } },
+            severity: crate::lsp::Severity::Error,
+            message: message.to_string(),
+            source: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_tool_reports_disabled_when_lsp_is_off() {
+        let db = std::sync::Mutex::new(lsp_conn());
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![])));
+
+        let r = execute_tool_with_undo_and_diagnostics(&call("diagnostics", json!({"path": "src/main.rs"})), None, None, &undo, &db, &lsp).await;
+        assert!(!r.success);
+        assert!(r.output.contains("disabled"), "{}", r.output);
+    }
+
+    #[tokio::test]
+    async fn diagnostics_tool_returns_results_on_demand_when_enabled() {
+        // acceptance criterion 4
+        let c = lsp_conn();
+        crate::db::setting_set(&c, "lsp.enabled", "true").unwrap();
+        let db = std::sync::Mutex::new(c);
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![a_diagnostic("expected `;`")])));
+
+        let r = execute_tool_with_undo_and_diagnostics(&call("diagnostics", json!({"path": "src/main.rs"})), None, None, &undo, &db, &lsp).await;
+        assert!(r.success, "{}", r.output);
+        assert!(r.output.contains("expected `;`"));
+    }
+
+    #[tokio::test]
+    async fn diagnostics_tool_requires_a_path() {
+        let db = std::sync::Mutex::new(lsp_conn());
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![])));
+
+        let r = execute_tool_with_undo_and_diagnostics(&call("diagnostics", json!({})), None, None, &undo, &db, &lsp).await;
+        assert!(!r.success);
+        assert!(r.output.contains("No path"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_edit_appends_diagnostics_to_the_tool_result() {
+        // acceptance criterion 2
+        let dir = tmp();
+        let path = dir.join("main.rs");
+        let p = path.to_str().unwrap();
+        std::fs::write(&path, "fn main() {}").unwrap();
+
+        let c = lsp_conn();
+        crate::db::setting_set(&c, "lsp.enabled", "true").unwrap();
+        let db = std::sync::Mutex::new(c);
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![a_diagnostic("unused import")])));
+
+        let r = execute_tool_with_undo_and_diagnostics(
+            &call("write_file", json!({"path": p, "content": "fn main() { let x = 1; }"})),
+            None, None, &undo, &db, &lsp,
+        ).await;
+        assert!(r.success, "{}", r.output);
+        assert!(r.output.contains("unused import"), "{}", r.output);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_not_appended_when_lsp_is_disabled() {
+        let dir = tmp();
+        let path = dir.join("main.rs");
+        let p = path.to_str().unwrap();
+
+        let db = std::sync::Mutex::new(lsp_conn());
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![a_diagnostic("should not appear")])));
+
+        let r = execute_tool_with_undo_and_diagnostics(&call("write_file", json!({"path": p, "content": "x"})), None, None, &undo, &db, &lsp).await;
+        assert!(r.success);
+        assert!(!r.output.contains("should not appear"));
+        assert!(!r.output.contains("[lsp]"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_not_appended_when_the_edit_itself_failed() {
+        let db = std::sync::Mutex::new({
+            let c = lsp_conn();
+            crate::db::setting_set(&c, "lsp.enabled", "true").unwrap();
+            c
+        });
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![a_diagnostic("should not appear")])));
+
+        // edit_file on a nonexistent path fails
+        let r = execute_tool_with_undo_and_diagnostics(
+            &call("edit_file", json!({"path": "/no/such/file.rs", "old_text": "a", "new_text": "b"})),
+            None, None, &undo, &db, &lsp,
+        ).await;
+        assert!(!r.success);
+        assert!(!r.output.contains("[lsp]"));
+    }
+
+    #[tokio::test]
+    async fn non_edit_tools_pass_through_undiagnosed() {
+        let db = std::sync::Mutex::new({
+            let c = lsp_conn();
+            crate::db::setting_set(&c, "lsp.enabled", "true").unwrap();
+            c
+        });
+        let undo = std::sync::Mutex::new(crate::undo::UndoStore::new());
+        let lsp = crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![a_diagnostic("should not appear")])));
+
+        let r = execute_tool_with_undo_and_diagnostics(&call("bash", json!({"command": "echo hi"})), None, None, &undo, &db, &lsp).await;
+        assert!(r.success);
+        assert!(!r.output.contains("[lsp]"));
     }
 
     #[tokio::test]
