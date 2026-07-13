@@ -16,6 +16,7 @@ pub mod greeting;
 pub mod guardrail;
 pub mod db;
 pub mod identity_db;
+pub mod intent;
 pub mod kpi;
 pub mod llm;
 pub mod mode;
