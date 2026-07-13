@@ -1352,3 +1352,69 @@ toolchain**. Read it at the start of every session; append to it at the end.
   FEAT-064) is done; FEAT-065 starts the "execute" phase, running a
   scheduled task network's tasks via polymorphic actions with
   quality-criteria verification.
+
+### 2026-07-13 — FEAT-065: Task executor (0.7.0 intent & planning plane)
+
+- New `task_executor.rs`: `execute_task(task, action, contemplated,
+  persona, classifier, soul, judge, runner)` runs one schedule-ready task
+  through guardrail -> Soul gate -> the action itself -> quality-criteria
+  verification, returning a `TaskExecutionReport{ guardrail, soul,
+  outcome }`.
+- **`TaskAction` (`Skill`/`SubAgent`/`GuardedOp`) is supplied by the
+  caller, not added to `Task`'s own schema.** FEAT-063 scoped `Task`
+  precisely (time/inputs/outputs+quality/deps/windows/resources) with no
+  action-kind field, and FEAT-065's own wording — "chosen per task" — reads
+  as an execution-time decision, not a planning-time one. Reopening
+  `Task`'s schema for this felt like scope creep on an already-merged
+  ticket; a caller-supplied `TaskAction` alongside the task keeps FEAT-063
+  untouched.
+- **One targeted schema change was still necessary**: `Task::quality_criteria`
+  was `Vec<String>` (free text) — too weak to verify "measurable-preferred,
+  LLM fallback" against, since there'd be no structured op/value to check.
+  Changed it to `Vec<goal::SuccessCriterion>` — the exact type
+  `TaskNetwork::derived_criteria` already carries, so a task's quality
+  criteria and a goal's success criteria now share one vocabulary
+  end-to-end. Zero test breakage: every existing construction used
+  `vec![]`, which infers the new element type automatically.
+- **No parallel verifier**: `criterion_holds` mirrors `goal::
+  all_criteria_hold`'s shape (measurable via `evaluate::satisfies`,
+  missing observation = not held, judged via an injected judge) but is a
+  small local fn rather than exporting goal.rs's private helper — the two
+  are structurally identical but conceptually answer different questions
+  (goal achievement vs. task output quality); documented as a deliberate,
+  minor duplication rather than forcing a shared abstraction FEAT-061
+  never anticipated. The judge trait itself, `goal::GoalJudge`, **is**
+  reused directly — nothing about judging a fuzzy criterion is
+  goal-specific.
+- **Guardrail + Soul reuse, no parallel gates (acceptance criterion 2)**:
+  a `GuardedOp` passes `guardrail::check_tool_call` (FEAT-038) before it
+  runs — a red-line action is refused outright, verified with `rm -rf /`
+  never reaching the injected runner. Significance reuses FEAT-028's own
+  `decision::RiskClassifier`/`ContemplatedAction`/`select_mode` machinery
+  wholesale: a `Deliberate`-classified action consults `decision::SoulGate`
+  first (a veto denies before the runner ever executes); an `Act`-classified
+  one skips the Soul entirely (proven by handing a vetoing fake Soul to a
+  trivial action and asserting it still completes — the veto is never
+  consulted). FEAT-068 ("soul gate for intent") is scoped as the policy
+  deciding what counts as significant for planning-plane actions
+  specifically, not a second gate mechanism — this ticket already wires
+  the real one.
+- **`task.completed`/task-failed are today's `TaskOutcome::Completed`/
+  `Failed` return values, not literal bus events** — an actual event bus
+  doesn't exist yet (FEAT-067); emitting onto one is that ticket's job,
+  not a stub added here.
+- 12 new tests: one per action kind executing and completing (skill,
+  sub-agent, guarded op — acceptance criterion 1), a red-line guarded op
+  refused before ever reaching the runner, a significant action consulting
+  the Soul, a trivial action skipping it even with a vetoing fake Soul, a
+  Soul veto denying before the runner runs (acceptance criterion 2),
+  unmet measurable criteria failing the task, a missing observation never
+  counting as holding, a judged criterion using the injected judge in both
+  directions, mixed measurable+judged requiring all to hold, and no
+  criteria completing trivially (acceptance criterion 3). Full workspace
+  build/test/clippy stays green (428 regin-core tests, up from 416; zero
+  new clippy warnings).
+- Next: FEAT-066 (planning control loop) — the "execute" phase continues;
+  FEAT-066 is what actually drives failed tasks into mitigate/replan/RAG/
+  escalate, closing the loop this ticket's `TaskOutcome::Failed` feeds
+  into.

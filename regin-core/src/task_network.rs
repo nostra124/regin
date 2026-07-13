@@ -43,7 +43,10 @@ pub struct Task {
     pub estimated_minutes: i64,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
-    pub quality_criteria: Vec<String>,
+    /// Measurable-preferred, LLM-judged fallback — the same shape a goal's
+    /// own success criteria use ([`SuccessCriterion`]); FEAT-065's executor
+    /// verifies a task's output against these.
+    pub quality_criteria: Vec<SuccessCriterion>,
     /// task -> task dependencies, by [`Task::id`].
     pub depends_on_tasks: Vec<String>,
     /// event -> task dependencies, by event name (FEAT-067's event bus).

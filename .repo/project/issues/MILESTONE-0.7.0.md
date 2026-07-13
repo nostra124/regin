@@ -42,7 +42,7 @@ bus (linkable to dvalin) triggers event→task/plan flows.
 | FEAT-062 | Intent dependency & conflict graph (supports/conflicts) | DISC-019 | done |
 | FEAT-063 | Planner: goal → task network | DISC-019 | done |
 | FEAT-064 | RCPSP scheduler (CPM + resources, slack/critical path, RAG) | DISC-019 | done |
-| FEAT-065 | Task executor (polymorphic action + quality-criteria verify) | DISC-019 | open |
+| FEAT-065 | Task executor (polymorphic action + quality-criteria verify) | DISC-019 | done |
 | FEAT-066 | Planning control loop (mitigate→replan→RAG→escalate) | DISC-019 | open |
 | FEAT-067 | Event bus + triggers (internal + external/dvalin) | DISC-019 | open |
 | FEAT-068 | Soul gate for intent (goals/plans/significant actions) | DISC-019 | open |
