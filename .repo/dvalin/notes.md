@@ -1533,3 +1533,57 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-068 (soul gate for intent) and FEAT-069 (authorship,
   prioritization & source-routed escalation) — the milestone's final
   "control" phase, closing MILESTONE-0.7.0.
+
+### 2026-07-13 — FEAT-068: Soul gate for intent (0.7.0 intent & planning plane)
+
+- New `intent_gate.rs` routes FEAT-029's existing `decision::SoulGate`
+  through DISC-019's three checkpoints. Two of the three were already
+  gated by earlier tickets; this ticket's real new work is checkpoint 1
+  plus recording rejections for both 1 and 2:
+  1. **Goals** — `goal_create_gated` is the genuinely new gate: previously
+     `goal::goal_create` (FEAT-061) had no Soul checkpoint at all. A
+     rejected goal is never persisted (no-partial-writes, matching
+     `goal_create`'s own validation convention).
+  2. **Plans** — `gate_plan` wraps `task_network::plan_and_gate`
+     (FEAT-063, already Soul-gated as of that ticket) and adds
+     deliberation capture on top — this ticket's contribution here is the
+     audit trail, not a second gate.
+  3. **Significant actions at execution** — already fully built by
+     `task_executor::execute_task` (FEAT-065): significance decides
+     whether the Soul is consulted, and `guardrail::check_tool_call`'s
+     red-lines are independent of significance. Nothing to add; this
+     module's tests call `execute_task` directly so all three checkpoints
+     are verified from one file, matching the ticket's own framing
+     ("route through the soul gate... three checkpoints").
+- **"With the reason recorded" (acceptance criterion 1) reuses FEAT-032's
+  existing `decision::DeliberationRecord`/`DeliberationSink`** — not a new
+  audit table. Both `goal_create_gated` and `gate_plan` capture a record
+  regardless of verdict (`Disposition::Executed` on approve,
+  `Disposition::Denied` otherwise), mirroring `decision::run_deliberate`'s
+  own capture discipline via a small local `capture_deliberation` helper
+  (the private `capture_best_effort` in decision.rs isn't exported, so
+  this is a deliberate, minor duplication of that shape rather than a new
+  one). Capture is best-effort: a `FailingSink` test proves a capture
+  error never blocks the gate itself.
+- **`RawSoulVerdict::Revise` is treated as `Denied`/rejected for goal
+  creation** — there's no multi-round revise loop for a goal's free-text
+  description the way `decision::run_deliberate` has for an action `Plan`;
+  documented explicitly as a deliberate simplification, not an oversight.
+- `plan_and_gate`'s signature is untouched by this ticket — `gate_plan`
+  reconstructs its own intent-summary/steps from the returned
+  `PlannedNetwork.network` rather than threading a `DeliberationSink`
+  through `task_network::plan_and_gate` itself (already modified once this
+  milestone, for `revision_feedback` in FEAT-066); this keeps FEAT-068 a
+  thin orchestration layer over existing mechanism instead of a third
+  signature change to an already-shipped function.
+- 11 new tests: goal creation approved/rejected-with-reason/not-persisted-
+  on-reject (acceptance criterion 1), `Revise` treated as denied,
+  capture-failure-never-blocks (goal side), plan gating approved/rejected-
+  with-reason/steps-captured, capture-failure-never-blocks (plan side),
+  revision-feedback forwarded to the planner, and the three checkpoint-3
+  tests (significant consults the Soul, trivial skips it, a red-line is
+  refused regardless of significance — acceptance criterion 2). Full
+  workspace build/test/clippy stays green (465 regin-core tests, up from
+  454; zero new clippy warnings).
+- Next: FEAT-069 (authorship, prioritization & source-routed escalation)
+  — the final ticket in MILESTONE-0.7.0; once done, the milestone closes.
