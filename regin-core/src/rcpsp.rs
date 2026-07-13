@@ -45,6 +45,7 @@ const CONCURRENCY_RESOURCE: &str = "concurrency";
 const COST_RESOURCE: &str = "cost";
 
 /// Everything the scheduler needs beyond the task network itself.
+#[derive(Debug, Clone)]
 pub struct ScheduleInput {
     /// The origin all relative times (and the tasks' own date windows) are
     /// measured from.
