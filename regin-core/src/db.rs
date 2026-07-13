@@ -181,6 +181,23 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             created_at TEXT NOT NULL,
             demoted_at TEXT,
             demote_reason TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS objectives (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            aggregate TEXT NOT NULL,
+            window_days INTEGER NOT NULL,
+            op TEXT NOT NULL,
+            value_num REAL,
+            value_text TEXT,
+            priority INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            rag TEXT NOT NULL DEFAULT 'green',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
         );",
     )
     .context("Failed to create database tables")?;

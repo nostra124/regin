@@ -1049,3 +1049,64 @@ toolchain**. Read it at the start of every session; append to it at the end.
   exit criterion) has real, honest, gated numbers instead of an
   unenforceable aspiration. Next milestone work is not yet scoped in this
   session.
+
+### 2026-07-12 — FEAT-060: Objective model (0.7.0 intent & planning plane — MILESTONE OPENED)
+- **Started MILESTONE-0.7.0.** User direction after 0.6.0 closed: "I want
+  finally to have the features implemented, we will focus on test
+  completion afterwards" — proceeding through 0.7.0's tickets prioritizing
+  working features over the exhaustive per-ticket test suites 0.6.0's
+  coverage tickets built; still genuinely unit-testing each ticket (this one
+  landed 8 tests), just not chasing 100% or writing 40+ tests per ticket.
+- **FEAT-060 implemented and moved to done/.** New `regin-core/src/objective.rs`:
+  a standing objective = "maintain `metric`'s `aggregate` (sum|count) over
+  the trailing `window_days`, `op` `value`" (e.g. `cost.llm_usd` summed over
+  30 days stays `<=` $50) — the DISC-008 to-be-state (`desired.rs`)
+  generalized so a target can range over a **KPI aggregate + time window**
+  instead of only an instantaneous signal.
+- **Reused the existing observed-vs-target loop verbatim, not a parallel
+  evaluator (acceptance criterion 3).** `evaluate_objective()` computes the
+  KPI aggregate as an `AssertValue` observation and calls
+  `evaluate::satisfies()` — the exact pure function instantaneous
+  `desired.rs` assertions already use — then `check_objectives()` calls
+  `evaluate::raise_for_deviations()` (same function, keyed per-objective via
+  `"objective:{id}"` so incidents don't cross-contaminate) on a breach. Only
+  new code: `observe()` (KPI-aggregate → `AssertValue`) and the
+  create/get/list/RAG persistence. Widened `desired::AssertOp::parse` from
+  private to `pub` to reuse it here — a pure, harmless visibility change,
+  no behavior change to `desired.rs`.
+- **New `objectives` table** in `regin.db` (`db.rs`'s `init_schema`, matching
+  where ITIL/KPI tables already live — objectives are operator-plane, not
+  identity-plane). Persistence functions live in `objective.rs` itself
+  (not `db.rs`) — followed the newer per-domain-module convention
+  (`kpi.rs`, `desired.rs`, `soul.rs` all own their own CRUD) rather than the
+  older centralized-in-`db.rs` ITIL pattern.
+- **Coarse RAG only** (green/red) — FEAT-060's own scope. The nuanced amber
+  ("off-track but mitigated, not yet endangered") is explicitly FEAT-064's
+  job once the scheduler exists to judge mitigation state; documented in
+  the `Rag` enum's doc comment so it isn't mistaken for a gap.
+- **`IntentSource`/`Rag`/`KpiAggregate` are typed enums but persist as
+  validated strings** (`op`/`aggregate`/`source`/`rag` columns) — matches
+  this crate's established ITIL-record convention (`Incident.status` etc.
+  are plain `String`, not round-tripped enums) rather than introducing a
+  new pattern. Validated at `objective_create`'s boundary
+  (`AssertOp::parse`/`KpiAggregate::parse`/`IntentSource::parse` all
+  called, erroring before any row is written) so a garbage value is
+  refused at creation, not silently discovered at evaluation time.
+- **No CLI/dispatch/protocol wiring** — deliberately out of this ticket's
+  scope. The ticket text itself never mentions CLI verbs or daemon
+  dispatch (unlike FEAT-030, which explicitly wired CLI+protocol); FEAT-069
+  ("Authorship, prioritization & source-routed escalation") is the ticket
+  that explicitly owns "CLI verbs" and surfacing in `regin metrics`/the
+  login greeting. FEAT-060 is model-layer only, matching the milestone's
+  own suggested delivery order ("Model/stores" phase, step 1).
+- 8 new tests: create/get/list round-trip (priority + source persisted),
+  reject-on-invalid-op/aggregate/source (with a check that a rejected
+  create doesn't partially write), window-scoped sum (an out-of-window
+  event is excluded), count aggregate, evaluate holds-vs-breaches, and the
+  full `check_objectives` flow (raises + dedupes exactly one incident,
+  sets RAG red on breach / green when it holds). Full workspace
+  build/test/clippy stays green (367 regin-core + 79 regin-cli unit + 2
+  regin-cli integration + 49 regind + 5 operator-skills-package tests; zero
+  new clippy warnings).
+- Next: FEAT-061 (goal model + store) per the milestone's suggested order —
+  reuses this ticket's `IntentSource`/`Rag` vocabulary for goals.

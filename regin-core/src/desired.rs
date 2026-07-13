@@ -48,7 +48,7 @@ pub enum AssertOp {
 }
 
 impl AssertOp {
-    fn parse(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         Ok(match s.trim().to_lowercase().as_str() {
             "lt" | "<" => AssertOp::Lt,
             "le" | "lte" | "<=" => AssertOp::Le,
