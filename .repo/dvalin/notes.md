@@ -1222,3 +1222,57 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-063 (planner: goal → task network) — the last "model/stores"
   ticket (FEAT-062) is done; FEAT-063 starts the "plan & schedule" phase
   of the milestone's suggested delivery order.
+
+### 2026-07-13 — FEAT-063: Planner (goal → task network) (0.7.0 intent & planning plane)
+
+- New `task_network.rs`: `Task` (id, title, estimated_minutes, inputs,
+  outputs, quality_criteria, `depends_on_tasks` (task->task by id),
+  `depends_on_events` (event->task by name, FEAT-067), temporal window
+  (earliest/latest start, due, deadline), `resource_demands` (name -> f64,
+  FEAT-064)) and `TaskNetwork` (id, goal_id, tasks, `derived_criteria:
+  Vec<goal::SuccessCriterion>` — reused directly from FEAT-061, not a
+  parallel criteria type).
+- **Pure-ish engine, no database** — same shape as `decision.rs`/
+  `remediation.rs`: `TaskPlanner` is an injectable async trait (mirrors
+  `decision::Planner`, including the `revision_feedback: Option<&str>`
+  parameter so a future replanning loop, FEAT-066, can call it again from
+  current state without a new trait — no test exercises replanning itself
+  yet, that's FEAT-066's scope).
+- **`validate_dag`** (acceptance criterion 1): rejects a `depends_on_tasks`
+  reference to an unknown task id, and rejects any cycle (DFS with an
+  explicit visiting-stack check, not a crate dependency). Deliberately
+  excludes `depends_on_events` from cycle detection — an event name can
+  never resolve to a task id, so it can't participate in a cycle by
+  construction (acceptance criterion 2: both dependency kinds are
+  representable on the same `Task`, unit-tested together).
+- **Soul-gated before activation (acceptance criterion 3) — reuses
+  `decision::SoulGate`/`SoulVerdict`/`PassthroughSoulGate` directly, not a
+  new gate.** `plan_and_gate` runs the planner, validates the DAG (an
+  invalid network errors before ever reaching the Soul — nothing to vote
+  on), then builds a `decision::Plan` whose `intent_summary` is a one-line
+  goal+task-count+titles summary (matching the "Soul is deliberately
+  starved" convention from FEAT-029/decision.rs — `intended_tool_calls`
+  stays empty since a task network isn't a tool-call plan) and submits it
+  to the injected `SoulGate`. Returns `PlannedNetwork{ network, soul }`
+  with an `.approved()` helper; the caller (FEAT-066 eventually) decides
+  what to do with a non-approved network — this ticket doesn't implement
+  the revise-and-retry loop itself.
+- FEAT-068 ("soul gate for intent") is scoped as the *policy* layer on
+  top (which goals/plans get gated, how escalation routes) — not a second
+  gating mechanism; FEAT-063 already wires the real one.
+- **No persistence** — unlike FEAT-060/061, this ticket has no "store" in
+  its title and no acceptance criterion asks for one; `TaskNetwork` is a
+  value produced by `plan_and_gate` for an immediate caller. Persisting an
+  approved network is deferred to whichever later ticket first needs it
+  (FEAT-064's scheduler or FEAT-066's control loop).
+- 10 new tests: DAG accepts a chain, rejects an unknown dependency, rejects
+  a self-cycle, rejects a multi-node cycle, both dependency kinds coexist
+  on one task, `plan_and_gate` approves through `PassthroughSoulGate`,
+  reports not-approved on a vetoing fake Soul, rejects a cyclic network
+  before ever calling the Soul, forwards the goal (and `None` feedback on
+  a first pass) to the planner via a spy, and derived criteria round-trip
+  from planner to `PlannedNetwork`. Full workspace build/test/clippy stays
+  green (401 regin-core tests, up from 391; zero new clippy warnings).
+- Next: FEAT-064 (RCPSP scheduler) — schedules a `TaskNetwork`'s tasks
+  (CPM forward/backward pass, slack, critical path, resource feasibility),
+  the second half of the milestone's "plan & schedule" phase.
