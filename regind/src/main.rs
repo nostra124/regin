@@ -13,6 +13,7 @@ use regin_core::{
     protocol::{Request, Response},
     push,
     reflect, repo, schedule, skills, soul,
+    subagent,
     tools,
     types::ChatMessage,
     undo,
@@ -39,6 +40,10 @@ struct AppState {
     /// nothing is spawned until `lsp.enabled` is set (`lsp::plan_diagnostics`
     /// checks it on every call).
     lsp: lsp::LspContext,
+    /// Bounds concurrent subagents spawned via the `task` tool (FEAT-079,
+    /// `task.max_concurrency`). Sized once at construction from that
+    /// setting's value — see `subagent::TaskLimiter`'s doc comment.
+    task_limiter: subagent::TaskLimiter,
 }
 
 unsafe impl Send for AppState {}
@@ -124,12 +129,18 @@ async fn main() -> Result<()> {
         .with_context(|| format!("Failed to bind {}", socket_path.display()))?;
     info!("Listening on {}", socket_path.display());
 
+    let task_max_concurrency: usize = db::setting_get(&conn, "task.max_concurrency")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
+
     let state = Arc::new(AppState {
         db: Mutex::new(conn),
         identity_db: Mutex::new(identity_conn),
         llm_override: None,
         undo: Mutex::new(undo::UndoStore::new()),
         lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
+        task_limiter: subagent::TaskLimiter::new(task_max_concurrency),
     });
 
     let sched_state = Arc::clone(&state);
@@ -282,7 +293,7 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
                         arguments: call.function.arguments.clone(),
                     }).await?;
 
-                    let result = tools::execute_tool_with_undo_and_diagnostics(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp).await;
+                    let result = tools::execute_tool_full(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await;
 
                     send(w, &Response::ToolResultEvent {
                         name: result.name.clone(),
@@ -1323,6 +1334,7 @@ mod dispatch_tests {
             llm_override: llm,
             undo: Mutex::new(undo::UndoStore::new()),
             lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
+            task_limiter: subagent::TaskLimiter::new(3),
         })
     }
 

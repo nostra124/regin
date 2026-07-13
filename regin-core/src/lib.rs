@@ -45,6 +45,7 @@ pub mod task_executor;
 pub mod task_network;
 pub mod skills;
 pub mod soul;
+pub mod subagent;
 pub mod tools;
 pub mod two_tier;
 pub mod types;

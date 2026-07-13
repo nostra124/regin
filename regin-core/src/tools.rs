@@ -287,6 +287,31 @@ pub fn tool_definitions() -> Vec<ToolDef> {
                 }),
             },
         },
+        ToolDef {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "task".into(),
+                description: "Delegate a sub-task to a child subagent session with its own restricted tool set and conversation history. Use for parallel exploration/research/work. Returns the subagent's final report; it cannot spawn further subagents.".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Short (3-6 word) label for this delegated task"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The task instructions for the subagent"
+                        },
+                        "subagent_type": {
+                            "type": "string",
+                            "description": "Which subagent to use: explore (read-only code search), general (full tool access), scout (read-only + web_search), or a custom configured type"
+                        }
+                    },
+                    "required": ["description", "prompt", "subagent_type"]
+                }),
+            },
+        },
     ]
 }
 
@@ -401,6 +426,92 @@ async fn exec_diagnostics_tool(
         Err(e) => (format!("Failed to fetch diagnostics for {path}: {e}"), false),
     };
     ToolResult { tool_call_id: call.id.clone(), name: "diagnostics".into(), output, success }
+}
+
+/// Wraps [`execute_tool_with_undo_and_diagnostics`] with subagent
+/// orchestration (FEAT-079): intercepts the `task` tool, resolving the
+/// requested subagent type, running it to completion through
+/// [`crate::subagent::run_subagent`] (bounded by `task_limiter`'s
+/// concurrency gate), and returning its final report as the tool result.
+/// Every other tool passes straight through unchanged.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_full(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    persona: Option<&crate::persona::Persona>,
+    undo: &std::sync::Mutex<crate::undo::UndoStore>,
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    lsp: &crate::lsp::LspContext,
+    llm: &dyn crate::llm::LlmClient,
+    task_limiter: &crate::subagent::TaskLimiter,
+) -> ToolResult {
+    if call.function.name == "task" {
+        return exec_task_tool(call, default_cwd, persona, undo, db, lsp, llm, task_limiter).await;
+    }
+    execute_tool_with_undo_and_diagnostics(call, default_cwd, persona, undo, db, lsp).await
+}
+
+/// Adapts the daemon's shared tool-execution state into a
+/// [`crate::subagent::ToolExecutor`] so a subagent's own tool calls run
+/// through the exact same undo/diagnostics-wrapped path the primary agent
+/// uses — just scoped to the subagent's own (already-intersected) persona.
+struct ToolExecutorAdapter<'a> {
+    default_cwd: Option<&'a str>,
+    persona: Option<&'a crate::persona::Persona>,
+    undo: &'a std::sync::Mutex<crate::undo::UndoStore>,
+    db: &'a std::sync::Mutex<rusqlite::Connection>,
+    lsp: &'a crate::lsp::LspContext,
+}
+
+#[async_trait::async_trait]
+impl crate::subagent::ToolExecutor for ToolExecutorAdapter<'_> {
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        execute_tool_with_undo_and_diagnostics(call, self.default_cwd, self.persona, self.undo, self.db, self.lsp).await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exec_task_tool(
+    call: &ToolCall,
+    default_cwd: Option<&str>,
+    persona: Option<&crate::persona::Persona>,
+    undo: &std::sync::Mutex<crate::undo::UndoStore>,
+    db: &std::sync::Mutex<rusqlite::Connection>,
+    lsp: &crate::lsp::LspContext,
+    llm: &dyn crate::llm::LlmClient,
+    task_limiter: &crate::subagent::TaskLimiter,
+) -> ToolResult {
+    let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(json!({}));
+    let prompt = args["prompt"].as_str().unwrap_or("").to_string();
+    let subagent_type_name = args["subagent_type"].as_str().unwrap_or("").to_string();
+    if prompt.is_empty() || subagent_type_name.is_empty() {
+        return ToolResult { tool_call_id: call.id.clone(), name: "task".into(), output: "prompt and subagent_type are required".into(), success: false };
+    }
+
+    let sub = { crate::subagent::resolve_subagent_type(&db.lock().unwrap(), &subagent_type_name) };
+    let sub = match sub {
+        Ok(Some(s)) => s,
+        Ok(None) => return ToolResult { tool_call_id: call.id.clone(), name: "task".into(), output: format!("Unknown subagent type: {subagent_type_name}"), success: false },
+        Err(e) => return ToolResult { tool_call_id: call.id.clone(), name: "task".into(), output: format!("Failed to resolve subagent type: {e}"), success: false },
+    };
+
+    let tools = crate::subagent::effective_tools(&sub, persona);
+    let sub_persona = crate::persona::Persona {
+        role: sub.name.clone(),
+        title: String::new(),
+        prompt: String::new(),
+        tools,
+        default_mode: None,
+        values: Vec::new(),
+    };
+    let tool_defs = tool_definitions_for(Some(&sub_persona));
+    let executor = ToolExecutorAdapter { default_cwd, persona: Some(&sub_persona), undo, db, lsp };
+
+    let _permit = task_limiter.acquire().await;
+    match crate::subagent::run_subagent(llm, &executor, &sub, &tool_defs, &prompt).await {
+        Ok(text) => ToolResult { tool_call_id: call.id.clone(), name: "task".into(), output: text, success: true },
+        Err(e) => ToolResult { tool_call_id: call.id.clone(), name: "task".into(), output: format!("Subagent failed: {e}"), success: false },
+    }
 }
 
 fn exec_undo(call: &ToolCall, undo: &std::sync::Mutex<crate::undo::UndoStore>) -> ToolResult {
@@ -1345,6 +1456,130 @@ mod exec_tests {
         let r = execute_tool_with_undo_and_diagnostics(&call("bash", json!({"command": "echo hi"})), None, None, &undo, &db, &lsp).await;
         assert!(r.success);
         assert!(!r.output.contains("[lsp]"));
+    }
+
+    // --- FEAT-079: task tool / subagent orchestration ----------------------
+
+    fn task_ctx() -> (std::sync::Mutex<rusqlite::Connection>, std::sync::Mutex<crate::undo::UndoStore>, crate::lsp::LspContext, crate::subagent::TaskLimiter) {
+        (
+            std::sync::Mutex::new(lsp_conn()),
+            std::sync::Mutex::new(crate::undo::UndoStore::new()),
+            crate::lsp::LspContext::new(std::sync::Arc::new(FakeLspSpawner(vec![]))),
+            crate::subagent::TaskLimiter::new(3),
+        )
+    }
+
+    #[tokio::test]
+    async fn task_tool_requires_prompt_and_subagent_type() {
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        let r = execute_tool_full(&call("task", json!({"description": "x"})), None, None, &undo, &db, &lsp, &llm, &limiter).await;
+        assert!(!r.success);
+        assert!(r.output.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn task_tool_reports_an_unknown_subagent_type() {
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        let r = execute_tool_full(
+            &call("task", json!({"description": "x", "prompt": "find it", "subagent_type": "nonexistent"})),
+            None, None, &undo, &db, &lsp, &llm, &limiter,
+        ).await;
+        assert!(!r.success);
+        assert!(r.output.contains("Unknown subagent type"), "{}", r.output);
+    }
+
+    #[tokio::test]
+    async fn task_tool_runs_an_explore_subagent_to_completion() {
+        // acceptance criteria 1, 3, 5
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        llm.push_turn(crate::llm::LlmTurn::Text("found config.rs".into()));
+        let r = execute_tool_full(
+            &call("task", json!({"description": "find config loader", "prompt": "where is config loaded?", "subagent_type": "explore"})),
+            None, None, &undo, &db, &lsp, &llm, &limiter,
+        ).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(r.output, "found config.rs");
+    }
+
+    #[tokio::test]
+    async fn task_tool_runs_subagent_tool_calls_through_the_same_executor() {
+        // acceptance criterion 1: a subagent's tool calls actually execute
+        let dir = tmp();
+        let path = dir.join("note.txt");
+        std::fs::write(&path, "hello from subagent target").unwrap();
+        let p = path.to_str().unwrap().to_string();
+
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        llm.push_turn(crate::llm::LlmTurn::ToolCalls {
+            assistant_message: json!({"role": "assistant", "tool_calls": []}),
+            calls: vec![ToolCall { id: "c1".into(), call_type: "function".into(), function: FunctionCall { name: "read_file".into(), arguments: json!({"path": p}).to_string() } }],
+        });
+        llm.push_turn(crate::llm::LlmTurn::Text("done reading".into()));
+
+        let r = execute_tool_full(
+            &call("task", json!({"description": "read note", "prompt": "read the note", "subagent_type": "explore"})),
+            None, None, &undo, &db, &lsp, &llm, &limiter,
+        ).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(r.output, "done reading");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn task_tool_scopes_a_subagent_to_the_parent_persona_ceiling() {
+        // defense in depth: a "general" subagent under a persona whose own
+        // ceiling excludes write_file can't use it to escape that ceiling,
+        // even though "general"'s built-in tool list would otherwise allow it.
+        let dir = tmp();
+        let path = dir.join("escape.txt");
+        let p = path.to_str().unwrap().to_string();
+
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        llm.push_turn(crate::llm::LlmTurn::ToolCalls {
+            assistant_message: json!({"role": "assistant", "tool_calls": []}),
+            calls: vec![ToolCall { id: "c1".into(), call_type: "function".into(), function: FunctionCall { name: "write_file".into(), arguments: json!({"path": p, "content": "escaped"}).to_string() } }],
+        });
+        llm.push_turn(crate::llm::LlmTurn::Text("done".into()));
+
+        let parent = crate::persona::Persona::from_toml("role = \"reader\"\ntools = [\"read_file\", \"task\"]\n").unwrap();
+        let r = execute_tool_full(
+            &call("task", json!({"description": "escape", "prompt": "write the file", "subagent_type": "general"})),
+            None, Some(&parent), &undo, &db, &lsp, &llm, &limiter,
+        ).await;
+        assert!(r.success, "{}", r.output);
+        assert!(!path.exists(), "write_file must be refused — outside the parent persona's own ceiling");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn a_configured_custom_subagent_type_is_usable() {
+        // acceptance criterion 4
+        let (db, undo, lsp, limiter) = task_ctx();
+        { crate::db::setting_set(&db.lock().unwrap(), "agent.reviewer.tools", "read_file").unwrap(); }
+        let llm = crate::llm::FakeLlm::new();
+        llm.push_turn(crate::llm::LlmTurn::Text("reviewed".into()));
+        let r = execute_tool_full(
+            &call("task", json!({"description": "review", "prompt": "review this", "subagent_type": "reviewer"})),
+            None, None, &undo, &db, &lsp, &llm, &limiter,
+        ).await;
+        assert!(r.success, "{}", r.output);
+        assert_eq!(r.output, "reviewed");
+    }
+
+    #[tokio::test]
+    async fn non_task_tools_still_pass_through_execute_tool_full() {
+        let (db, undo, lsp, limiter) = task_ctx();
+        let llm = crate::llm::FakeLlm::new();
+        let r = execute_tool_full(&call("bash", json!({"command": "echo hi"})), None, None, &undo, &db, &lsp, &llm, &limiter).await;
+        assert!(r.success);
+        assert!(r.output.contains("hi"));
     }
 
     #[tokio::test]

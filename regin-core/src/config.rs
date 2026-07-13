@@ -49,6 +49,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("lsp.enabled", "false", "Feed LSP diagnostics back after write_file/edit_file/apply_patch — opt-in (FEAT-078)"),
     ("lsp.debounce_ms", "500", "Minimum interval between automatic diagnostics runs for the same file (FEAT-078)"),
     ("lsp.idle_timeout_secs", "300", "Idle time before a spawned language server process is recycled (FEAT-078)"),
+    ("task.max_concurrency", "3", "Maximum subagents running concurrently via the `task` tool (FEAT-079)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
