@@ -18,6 +18,7 @@ pub mod identity_db;
 pub mod kpi;
 pub mod llm;
 pub mod mode;
+pub mod objective;
 pub mod opskill;
 pub mod persona;
 pub mod planning;
