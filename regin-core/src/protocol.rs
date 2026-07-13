@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::desired::{DesiredInfo, DesiredState};
 use crate::filters::FilterRule;
 use crate::audit::Finding;
-use crate::greeting::Greeting;
+use crate::goal::Goal;
+use crate::greeting::{Greeting, IntentRagSummary};
+use crate::objective::Objective as StandingObjective;
 use crate::promotion::DerivedCheck;
 use crate::kpi::{KpiSummary, Objective};
 use crate::types::{
@@ -266,6 +268,20 @@ pub enum Request {
     /// Retire a principle — a candidate rejection or an active retirement.
     #[serde(rename = "soul_principles_reject")]
     SoulPrinciplesReject { id: String },
+
+    // --- Intent plane: objectives & goals (FEAT-069) ---
+    /// List standing objectives, priority-ordered.
+    #[serde(rename = "objective_list")]
+    ObjectiveList,
+    /// Show one objective by id.
+    #[serde(rename = "objective_show")]
+    ObjectiveShow { id: String },
+    /// List goals, optionally filtered by lifecycle status.
+    #[serde(rename = "goal_list")]
+    GoalList { status: Option<String> },
+    /// Show one goal by id.
+    #[serde(rename = "goal_show")]
+    GoalShow { id: String },
 }
 
 /// Response from daemon to CLI.
@@ -353,7 +369,7 @@ pub enum Response {
     DesiredDetail { state: Box<DesiredState> },
 
     #[serde(rename = "metrics")]
-    Metrics { summary: Box<KpiSummary>, objective: Objective },
+    Metrics { summary: Box<KpiSummary>, objective: Objective, intent_rag: IntentRagSummary },
 
     #[serde(rename = "filters")]
     Filters { rules: Vec<FilterRule> },
@@ -421,6 +437,16 @@ pub enum Response {
     SoulPrincipleRatified { principle: Principle },
     #[serde(rename = "soul_principle_rejected")]
     SoulPrincipleRejected { principle: Principle },
+
+    // --- Intent plane: objectives & goals (FEAT-069) ---
+    #[serde(rename = "objectives")]
+    Objectives { objectives: Vec<StandingObjective> },
+    #[serde(rename = "objective_detail")]
+    ObjectiveDetail { objective: Box<StandingObjective> },
+    #[serde(rename = "goals")]
+    Goals { goals: Vec<Goal> },
+    #[serde(rename = "goal_detail")]
+    GoalDetail { goal: Box<Goal> },
 }
 
 #[cfg(test)]

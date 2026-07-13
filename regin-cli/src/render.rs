@@ -13,8 +13,10 @@
 use regin_core::audit::Finding;
 use regin_core::desired::{Assertion, DesiredInfo, DesiredState};
 use regin_core::filters::FilterRule;
-use regin_core::greeting::Greeting;
+use regin_core::goal::Goal;
+use regin_core::greeting::{Greeting, IntentRagSummary};
 use regin_core::kpi::{KpiSummary, Objective};
+use regin_core::objective::Objective as StandingObjective;
 use regin_core::promotion::DerivedCheck;
 use regin_core::protocol::Response;
 use regin_core::soul::ValueEntry;
@@ -353,6 +355,12 @@ pub fn render_greeting(g: &Greeting) -> String {
             out += &format!("  {}  {}\n", sid(&a.id), a.title);
         }
     }
+    if !g.intent_escalations.is_empty() {
+        out += "goals escalated (provide resources / adjust / replan):\n";
+        for a in &g.intent_escalations {
+            out += &format!("  {}  {}\n", sid(&a.id), a.title);
+        }
+    }
     out
 }
 
@@ -371,7 +379,7 @@ pub fn render_filters(rules: &[FilterRule]) -> String {
     out
 }
 
-pub fn render_metrics(summary: &KpiSummary, objective: &Objective, days: Option<u32>) -> String {
+pub fn render_metrics(summary: &KpiSummary, objective: &Objective, days: Option<u32>, intent_rag: &IntentRagSummary) -> String {
     let verdict = if objective.meets_floor { "MEETS floor" } else { "BELOW floor" };
     format!(
         "CSI metrics — last {} days\n\n\
@@ -389,7 +397,10 @@ pub fn render_metrics(summary: &KpiSummary, objective: &Objective, days: Option<
          Cost / efficiency\n\
          \x20 LLM spend: ${:.2}   avoided: ${:.2}   notices filtered: {}\n\n\
          Learning / health\n\
-         \x20 promotions: {}   errors: {}   error rate: {:.0}%\n",
+         \x20 promotions: {}   errors: {}   error rate: {:.0}%\n\n\
+         Intent plane (RAG)\n\
+         \x20 goals:      🟢{} 🟡{} 🔴{}\n\
+         \x20 objectives: 🟢{} 🟡{} 🔴{}\n",
         days.unwrap_or(30),
         objective.reliability * 100.0,
         objective.reliability_floor * 100.0,
@@ -411,6 +422,50 @@ pub fn render_metrics(summary: &KpiSummary, objective: &Objective, days: Option<
         summary.promotions,
         summary.promotion_errors,
         summary.promotion_error_rate * 100.0,
+        intent_rag.goals_green, intent_rag.goals_amber, intent_rag.goals_red,
+        intent_rag.objectives_green, intent_rag.objectives_amber, intent_rag.objectives_red,
+    )
+}
+
+pub fn render_objectives(objectives: &[StandingObjective]) -> String {
+    if objectives.is_empty() {
+        return "No objectives.\n".to_string();
+    }
+    let mut out = String::new();
+    for o in objectives {
+        out += &format!(
+            "  {}  [{}] {} — {} {} {} {} over {}d (source: {})\n",
+            sid(&o.id), o.rag, o.title, o.metric, o.aggregate, o.op, o.value, o.window_days, o.source,
+        );
+    }
+    out
+}
+
+pub fn render_objective_detail(o: &StandingObjective) -> String {
+    format!(
+        "{}\ntitle: {}\ndescription: {}\nmetric: {} ({}) {} {}\nwindow: {}d\npriority: {}\nsource: {}\nrag: {}\ncreated: {}\nupdated: {}\n",
+        o.id, o.title, o.description, o.metric, o.aggregate, o.op, o.value, o.window_days, o.priority, o.source, o.rag, o.created_at, o.updated_at,
+    )
+}
+
+pub fn render_goals(goals: &[Goal]) -> String {
+    if goals.is_empty() {
+        return "No goals.\n".to_string();
+    }
+    let mut out = String::new();
+    for g in goals {
+        out += &format!(
+            "  {}  [{}/{}] {} — target: {} (deadline: {}, source: {})\n",
+            sid(&g.id), g.status, g.rag, g.description, g.target, g.deadline, g.source,
+        );
+    }
+    out
+}
+
+pub fn render_goal_detail(g: &Goal) -> String {
+    format!(
+        "{}\ndescription: {}\ntarget: {}\ndeadline: {}\ncriteria: {} declared\npriority: {}\nsource: {}\nstatus: {}\nrag: {}\ncreated: {}\nupdated: {}\n",
+        g.id, g.description, g.target, g.deadline, g.criteria.len(), g.priority, g.source, g.status, g.rag, g.created_at, g.updated_at,
     )
 }
 
@@ -864,6 +919,7 @@ mod tests {
             open_problems: 0,
             pending_changes: vec![],
             decision_problems: vec![],
+            intent_escalations: vec![],
         };
         let out = render_greeting(&g);
         assert_eq!(out.trim_end(), g.health_line());
@@ -907,10 +963,65 @@ mod tests {
             change_success_rate: 1.0,
         };
         let objective = Objective { reliability: 0.99, reliability_floor: 0.95, meets_floor: true, cost_llm_usd: 0.5 };
-        let out = render_metrics(&summary, &objective, Some(7));
+        let intent_rag = IntentRagSummary { goals_green: 2, goals_amber: 1, goals_red: 0, objectives_green: 3, objectives_amber: 0, objectives_red: 1 };
+        let out = render_metrics(&summary, &objective, Some(7), &intent_rag);
         assert!(out.contains("last 7 days"));
         assert!(out.contains("MEETS floor"));
         assert!(out.contains("MTTR: 1m"));
+        assert!(out.contains("🟢2"));
+        assert!(out.contains("🔴1"));
+    }
+
+    #[test]
+    fn render_objectives_lists_or_reports_empty() {
+        assert_eq!(render_objectives(&[]), "No objectives.\n");
+        let o = StandingObjective {
+            id: "obj-1".into(), title: "hold spend down".into(), description: "d".into(),
+            metric: "cost.llm_usd".into(), aggregate: "sum".into(), window_days: 30, op: "le".into(),
+            value: regin_core::desired::AssertValue::Num(50.0), priority: 1, source: "human".into(),
+            rag: "green".into(), created_at: "now".into(), updated_at: "now".into(),
+        };
+        let out = render_objectives(std::slice::from_ref(&o));
+        assert!(out.contains("hold spend down"));
+        assert!(out.contains("green"));
+
+        let detail = render_objective_detail(&o);
+        assert!(detail.contains("obj-1"));
+        assert!(detail.contains("cost.llm_usd"));
+    }
+
+    #[test]
+    fn render_goals_lists_or_reports_empty() {
+        assert_eq!(render_goals(&[]), "No goals.\n");
+        let g = Goal {
+            id: "goal-1".into(), description: "shrink disk usage".into(), target: "root under 80%".into(),
+            deadline: "2027-01-01T00:00:00Z".into(), criteria: vec![], priority: 1, source: "human".into(),
+            rag: "green".into(), status: "active".into(), created_at: "now".into(), updated_at: "now".into(),
+        };
+        let out = render_goals(std::slice::from_ref(&g));
+        assert!(out.contains("shrink disk usage"));
+        assert!(out.contains("active/green"));
+
+        let detail = render_goal_detail(&g);
+        assert!(detail.contains("goal-1"));
+        assert!(detail.contains("root under 80%"));
+    }
+
+    #[test]
+    fn render_greeting_shows_intent_escalations() {
+        let g = Greeting {
+            mode: "standalone".into(),
+            open_incidents: 0,
+            open_problems: 0,
+            pending_changes: vec![],
+            decision_problems: vec![],
+            intent_escalations: vec![regin_core::greeting::ActionItem {
+                kind: "intent_escalation".into(), id: "goal-1".into(), title: "tasks still failing".into(),
+            }],
+        };
+        let out = render_greeting(&g);
+        assert!(out.contains("escalated"));
+        assert!(out.contains("tasks still failing"));
     }
 
     #[test]

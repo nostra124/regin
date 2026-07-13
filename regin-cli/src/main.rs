@@ -179,6 +179,18 @@ enum Commands {
         action: DesiredAction,
     },
 
+    /// Manage standing objectives: "maintain X over time" (FEAT-060/069).
+    Objective {
+        #[command(subcommand)]
+        action: ObjectiveAction,
+    },
+
+    /// Manage dated goals: "achieve X by a deadline" (FEAT-061/069).
+    Goal {
+        #[command(subcommand)]
+        action: GoalAction,
+    },
+
     /// Show CSI metrics: KPIs + the cost-vs-reliability objective (FEAT-050).
     Metrics {
         /// Window in days (default 30).
@@ -616,6 +628,26 @@ enum IncidentAction {
 }
 
 #[derive(Subcommand)]
+enum ObjectiveAction {
+    /// List standing objectives, priority-ordered.
+    List,
+    /// Show one objective by id.
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
+enum GoalAction {
+    /// List goals, optionally filtered by lifecycle status.
+    List {
+        /// Filter: proposed, active, achieved, failed, abandoned
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Show one goal by id.
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
 enum ChangeAction {
     /// Record a planned change.
     Record {
@@ -802,6 +834,14 @@ async fn main() -> Result<()> {
             DesiredAction::List => cmd_desired_list(&t).await,
             DesiredAction::Show { domain } => cmd_desired_show(&t, &domain).await,
             DesiredAction::Check => cmd_ok(&t, Request::DesiredCheck).await,
+        },
+        Commands::Objective { action } => match action {
+            ObjectiveAction::List => cmd_objective_list(&t).await,
+            ObjectiveAction::Show { id } => cmd_objective_show(&t, id).await,
+        },
+        Commands::Goal { action } => match action {
+            GoalAction::List { status } => cmd_goal_list(&t, status).await,
+            GoalAction::Show { id } => cmd_goal_show(&t, id).await,
         },
         Commands::Metrics { days } => cmd_metrics(&t, days).await,
         Commands::Filters { action } => match action {
@@ -1616,7 +1656,41 @@ async fn cmd_filters_list(t: &impl Transport) -> Result<()> {
 
 async fn cmd_metrics(t: &impl Transport, days: Option<u32>) -> Result<()> {
     match t.request(&Request::Metrics { since_days: days }).await? {
-        Response::Metrics { summary, objective } => print!("{}", render_metrics(&summary, &objective, days)),
+        Response::Metrics { summary, objective, intent_rag } => print!("{}", render_metrics(&summary, &objective, days, &intent_rag)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_objective_list(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::ObjectiveList).await? {
+        Response::Objectives { objectives } => print!("{}", render_objectives(&objectives)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_objective_show(t: &impl Transport, id: String) -> Result<()> {
+    match t.request(&Request::ObjectiveShow { id }).await? {
+        Response::ObjectiveDetail { objective } => print!("{}", render_objective_detail(&objective)),
+        Response::Error { message } => return Err(anyhow!(message)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_goal_list(t: &impl Transport, status: Option<String>) -> Result<()> {
+    match t.request(&Request::GoalList { status }).await? {
+        Response::Goals { goals } => print!("{}", render_goals(&goals)),
+        other => return Err(anyhow!("Unexpected: {other:?}")),
+    }
+    Ok(())
+}
+
+async fn cmd_goal_show(t: &impl Transport, id: String) -> Result<()> {
+    match t.request(&Request::GoalShow { id }).await? {
+        Response::GoalDetail { goal } => print!("{}", render_goal_detail(&goal)),
+        Response::Error { message } => return Err(anyhow!(message)),
         other => return Err(anyhow!("Unexpected: {other:?}")),
     }
     Ok(())
@@ -2080,6 +2154,53 @@ mod tests {
         assert!(cmd_desired_show(&t, "missing").await.is_err());
     }
 
+    fn an_objective() -> regin_core::objective::Objective {
+        regin_core::objective::Objective {
+            id: "obj-1".into(), title: "t".into(), description: "d".into(), metric: "m".into(),
+            aggregate: "sum".into(), window_days: 30, op: "le".into(),
+            value: regin_core::desired::AssertValue::Num(1.0), priority: 1, source: "human".into(),
+            rag: "green".into(), created_at: "now".into(), updated_at: "now".into(),
+        }
+    }
+
+    fn a_goal() -> regin_core::goal::Goal {
+        regin_core::goal::Goal {
+            id: "goal-1".into(), description: "d".into(), target: "t".into(), deadline: "2027-01-01T00:00:00Z".into(),
+            criteria: vec![], priority: 1, source: "human".into(), rag: "green".into(), status: "active".into(),
+            created_at: "now".into(), updated_at: "now".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_objective_list_and_show_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Objectives { objectives: vec![an_objective()] });
+        assert!(cmd_objective_list(&t).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::ObjectiveDetail { objective: Box::new(an_objective()) });
+        assert!(cmd_objective_show(&t, "obj-1".into()).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "no objective x".into() });
+        assert!(cmd_objective_show(&t, "x".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_goal_list_and_show_happy_and_error() {
+        let t = FakeTransport::new();
+        t.push(Response::Goals { goals: vec![a_goal()] });
+        assert!(cmd_goal_list(&t, None).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::GoalDetail { goal: Box::new(a_goal()) });
+        assert!(cmd_goal_show(&t, "goal-1".into()).await.is_ok());
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "no goal x".into() });
+        assert!(cmd_goal_show(&t, "x".into()).await.is_err());
+    }
+
     #[tokio::test]
     async fn cmd_mode_posture_greeting_audit_checks_filters_metrics() {
         let t = FakeTransport::new();
@@ -2096,7 +2217,7 @@ mod tests {
         let t = FakeTransport::new();
         t.push(Response::GreetingResp { greeting: Box::new(regin_core::greeting::Greeting {
             mode: "standalone".into(), open_incidents: 0, open_problems: 0,
-            pending_changes: vec![], decision_problems: vec![],
+            pending_changes: vec![], decision_problems: vec![], intent_escalations: vec![],
         })});
         assert!(cmd_greeting(&t).await.is_ok());
 
@@ -2123,6 +2244,7 @@ mod tests {
                 change_successes: 0, change_failures: 0, change_success_rate: 0.0,
             }),
             objective: regin_core::kpi::Objective { reliability: 1.0, reliability_floor: 0.95, meets_floor: true, cost_llm_usd: 0.0 },
+            intent_rag: regin_core::greeting::IntentRagSummary::default(),
         });
         assert!(cmd_metrics(&t, Some(30)).await.is_ok());
 
@@ -2141,7 +2263,7 @@ mod tests {
         t.push(Response::ChatNew { conversation_id: "c1".into() });
         t.push(Response::GreetingResp { greeting: Box::new(regin_core::greeting::Greeting {
             mode: "standalone".into(), open_incidents: 0, open_problems: 0,
-            pending_changes: vec![], decision_problems: vec![],
+            pending_changes: vec![], decision_problems: vec![], intent_escalations: vec![],
         })});
         assert!(cmd_chat(&t).await.is_ok());
         assert!(matches!(t.sent()[0], Request::ChatNew));

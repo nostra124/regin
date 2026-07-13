@@ -1,7 +1,7 @@
 ---
 id: MILESTONE-0.7.0
 type: milestone
-status: planned
+status: done
 depends_on: [MILESTONE-0.6.0]
 ---
 
@@ -46,7 +46,7 @@ bus (linkable to dvalin) triggers event→task/plan flows.
 | FEAT-066 | Planning control loop (mitigate→replan→RAG→escalate) | DISC-019 | done |
 | FEAT-067 | Event bus + triggers (internal + external/dvalin) | DISC-019 | done |
 | FEAT-068 | Soul gate for intent (goals/plans/significant actions) | DISC-019 | done |
-| FEAT-069 | Authorship, prioritization & source-routed escalation | DISC-019 | open |
+| FEAT-069 | Authorship, prioritization & source-routed escalation | DISC-019 | done |
 
 ## Suggested delivery order
 
@@ -72,3 +72,17 @@ bus (linkable to dvalin) triggers event→task/plan flows.
 - The event bus triggers event→task/plan flows and ingests external (dvalin) events.
 - RAG + goal/objective progress surface in `regin metrics` and the login greeting.
 - 100% test coverage; no open design questions in any 0.7.0 FEAT (RULE-005).
+
+## Closure note (2026-07-13)
+
+All 10 FEATs done; every other exit criterion above is met. The **100% test
+coverage** bar is a known, deliberate exception: per an explicit user
+instruction partway through this milestone ("what is left on the roadmap —
+I want finally to have the features implemented, we will focus on test
+completion afterwards"), 0.7.0's tickets used *reasonable* per-ticket test
+suites (8–15 tests each, ~130 new regin-core tests total) rather than
+0.6.0's exhaustive coverage-ramp discipline (which had its own dedicated
+ticket, FEAT-075 — 0.7.0 has no analogous ticket). Closing the milestone
+without that final coverage pass is intentional, not an oversight; a
+future coverage-focused pass across 0.6.0+0.7.0 together is the natural
+next step once feature work catches up to the rest of the roadmap.

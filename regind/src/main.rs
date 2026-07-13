@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 
 use regin_core::{
-    audit, bus, config, context, db, desired, filters, identity_db, kpi,
+    audit, bus, config, context, db, desired, filters, goal, identity_db, kpi,
     llm::{LlmClient, LlmTurn, MimirClient},
+    objective,
     opskill,
     greeting,
     mode,
@@ -687,16 +688,17 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
         Request::Metrics { since_days } => {
             let days = since_days.unwrap_or(30).max(1) as i64;
             let since = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
-            let (summary, objective) = {
+            let (summary, objective, intent_rag) = {
                 let db = state.db.lock().expect("DB poisoned");
                 let floor: f64 = db::setting_get(&db, "kpi.reliability_floor")?
                     .parse()
                     .unwrap_or(0.95);
                 let summary = kpi::summary(&db, &since)?;
                 let objective = kpi::objective(&summary, floor);
-                (summary, objective)
+                let intent_rag = greeting::intent_rag_summary(&db)?;
+                (summary, objective, intent_rag)
             };
-            send(w, &Response::Metrics { summary: Box::new(summary), objective }).await?;
+            send(w, &Response::Metrics { summary: Box::new(summary), objective, intent_rag }).await?;
         }
 
         // --- Notice filters (FEAT-052) ---
@@ -891,6 +893,42 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
             match result {
                 Ok(principle) => send(w, &Response::SoulPrincipleRejected { principle }).await?,
                 Err(e) => send(w, &Response::Error { message: e.to_string() }).await?,
+            }
+        }
+
+        // --- Intent plane: objectives & goals (FEAT-069) ---
+        Request::ObjectiveList => {
+            let objectives = {
+                let db = state.db.lock().expect("DB poisoned");
+                objective::objective_list(&db)?
+            };
+            send(w, &Response::Objectives { objectives }).await?;
+        }
+        Request::ObjectiveShow { id } => {
+            let found = {
+                let db = state.db.lock().expect("DB poisoned");
+                objective::objective_get(&db, &id)?
+            };
+            match found {
+                Some(objective) => send(w, &Response::ObjectiveDetail { objective: Box::new(objective) }).await?,
+                None => send(w, &Response::Error { message: format!("no objective {id}") }).await?,
+            }
+        }
+        Request::GoalList { status } => {
+            let goals = {
+                let db = state.db.lock().expect("DB poisoned");
+                goal::goal_list(&db, status.as_deref())?
+            };
+            send(w, &Response::Goals { goals }).await?;
+        }
+        Request::GoalShow { id } => {
+            let found = {
+                let db = state.db.lock().expect("DB poisoned");
+                goal::goal_get(&db, &id)?
+            };
+            match found {
+                Some(goal) => send(w, &Response::GoalDetail { goal: Box::new(goal) }).await?,
+                None => send(w, &Response::Error { message: format!("no goal {id}") }).await?,
             }
         }
 
@@ -1313,12 +1351,39 @@ mod dispatch_tests {
         assert!(matches!(run(Request::FiltersList, &st).await.as_slice(), [Response::Filters { .. }]));
         assert!(matches!(run(Request::DesiredList, &st).await.as_slice(), [Response::DesiredListResp { .. }]));
         assert!(matches!(run(Request::ProblemList { status: None }, &st).await.as_slice(), [Response::Problems { .. }]));
+        assert!(matches!(run(Request::ObjectiveList, &st).await.as_slice(), [Response::Objectives { .. }]));
+        assert!(matches!(run(Request::GoalList { status: None }, &st).await.as_slice(), [Response::Goals { .. }]));
     }
 
     #[tokio::test]
     async fn unknown_incident_show_errors() {
         let st = state();
         let r = run(Request::IncidentShow { id: "nope".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+    }
+
+    #[tokio::test]
+    async fn objective_and_goal_show_round_trip_and_error_on_unknown_id() {
+        let st = state();
+        let obj = {
+            let db = st.db.lock().unwrap();
+            objective::objective_create(
+                &db, "t", "d", "m", "sum", 30, "le", &regin_core::desired::AssertValue::Num(1.0), 1, "human",
+            ).unwrap()
+        };
+        let r = run(Request::ObjectiveShow { id: obj.id.clone() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::ObjectiveDetail { .. }]));
+        let r = run(Request::ObjectiveShow { id: "no-such-id".into() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::Error { .. }]));
+
+        let deadline = (chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let g = {
+            let db = st.db.lock().unwrap();
+            goal::goal_create(&db, "d", "t", &deadline, vec![], 1, "human").unwrap()
+        };
+        let r = run(Request::GoalShow { id: g.id.clone() }, &st).await;
+        assert!(matches!(r.as_slice(), [Response::GoalDetail { .. }]));
+        let r = run(Request::GoalShow { id: "no-such-id".into() }, &st).await;
         assert!(matches!(r.as_slice(), [Response::Error { .. }]));
     }
 
