@@ -1825,3 +1825,75 @@ Implementation section:
 - Next: FEAT-079 (multi-agent orchestration / subagent Task tool) — Track
   A's "orchestration" step, depends on nothing beyond the existing session
   protocol.
+
+### 2026-07-13 — FEAT-079: Multi-agent orchestration (subagent Task tool) (0.8.0 coding agent plane)
+
+- **FEAT-079 implemented and moved to done/.** New `regin-core/src/subagent.rs`:
+  a `task` tool lets the primary agent delegate a sub-task to a child
+  subagent session — its own restricted tool set and conversation history,
+  run to completion, with the final report returned as the tool's output
+  (acceptance criteria 1, 5).
+- **Three built-in types** (criterion 3): `explore` (glob/grep/read_file),
+  `general` (every known tool except `task` itself), `scout`
+  (glob/grep/read_file/web_search). `resolve_subagent_type` layers an
+  `agent.<name>.tools` / `agent.<name>.prompt` setting pair on top (same
+  generic-key convention as FEAT-078's `lsp.<language>.command`), so
+  `regin config set agent.reviewer.tools "glob,grep,read_file"` defines a
+  usable custom type with zero code change (criterion 4) — a configured
+  type of the same name as a built-in overrides it outright.
+- **One level of nesting, enforced by construction, not a runtime check**
+  (criterion 2): `task` is never in `built_in_types()`'s `general` tool
+  list, and `resolve_subagent_type`/`effective_tools` both strip `task`
+  from a *configured* type's tool list too — a subagent's tool_defs simply
+  never contain `task`, so there's nothing to recurse into.
+- **`effective_tools` also intersects with the parent's own persona
+  ceiling** — defense in depth: a `general` subagent under a persona that
+  itself can't `write_file` can't be used to launder that capability
+  through delegation. Regression-tested at the `tools.rs` integration
+  level (a scoped parent persona + a `general` subagent attempting
+  `write_file` → the file is never created) as well as the pure
+  `subagent::effective_tools` unit level.
+- **`run_subagent` is generic over `LlmClient` + a new `ToolExecutor`
+  trait**, not over `regind`'s `AppState` — kept it testable with
+  `FakeLlm` + a `SpyExecutor` fake, no daemon required, same "pure-ish
+  engine, fakes for orchestration, thin real impl" split as `lsp.rs`.
+  `regind`'s actual daemon wiring is a small `ToolExecutorAdapter` in
+  `tools.rs` that calls back into `execute_tool_with_undo_and_diagnostics`
+  — so a subagent's own tool calls (writes, reads, diagnostics, undo) run
+  through the *exact* same wrapped path the primary agent uses, just
+  scoped to the subagent's already-intersected persona. Bounded by
+  `subagent::MAX_SUBAGENT_ROUNDS` (25) so a delegated task can't loop
+  forever if its prompt or tools are misconfigured.
+- **Concurrency** (criterion 6): `subagent::TaskLimiter` wraps a
+  `tokio::sync::Semaphore`, sized from `task.max_concurrency` (new
+  setting, default 3) once at `AppState` construction — like the LSP
+  pool, changing it takes a daemon restart, not a live `regin config set`.
+  Verified with a `tokio::spawn`-fan-out test tracking peak concurrent
+  holders via atomics — never exceeds the configured max.
+- Wired in as the next additive wrapper in the chain
+  (`execute_tool_gated` → `execute_tool_with_undo` →
+  `execute_tool_with_undo_and_diagnostics` → `execute_tool_full`):
+  intercepts `task` directly; every other tool passes straight through to
+  the diagnostics wrapper unchanged. `execute_tool_full`/`exec_task_tool`
+  both picked up `#[allow(clippy::too_many_arguments)]` (8 params —
+  `call`/`cwd`/`persona`/`undo`/`db`/`lsp`/`llm`/`task_limiter`), same
+  precedent as `intent_gate.rs`/`reflect.rs`/`task_executor.rs`.
+- `regind`'s `AppState` gained a `task_limiter: subagent::TaskLimiter`
+  field (read `task.max_concurrency` at construction, default 3 on parse
+  failure); the chat loop's tool-call site now goes through
+  `execute_tool_full`, passing the already-in-scope `client` (the LLM
+  client `agentic_chat` already holds) straight through — no new LLM
+  client construction needed.
+- `persona::ALL_TOOLS` gained `"task"`.
+- 19 new tests: 12 in `subagent.rs` (built-in type shapes, resolve
+  fallback/override/custom-type/task-stripping, `effective_tools`
+  ceiling intersection, `run_subagent` text-only / tool-calling /
+  max-rounds-exhaustion via `FakeLlm` + `SpyExecutor`, `TaskLimiter`
+  concurrency) and 7 in `tools.rs` (`task` tool missing-args/
+  unknown-type/happy-path/tool-call-round-trip/persona-ceiling-escape-
+  denied/custom-type/pass-through-for-non-task-tools). Full workspace
+  build/test/clippy stays green (552 regin-core tests, up from 533; zero
+  new clippy warnings — the `tools.rs` collapsible-if hit is still the
+  same pre-existing `exec_write_file` warning at a shifted line number).
+- Next: FEAT-080 (granular tool permissions — allow/ask/deny) — Track A's
+  "safety" step, gates all tools including `task` itself.
