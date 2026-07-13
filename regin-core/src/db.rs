@@ -212,6 +212,32 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
             status TEXT NOT NULL DEFAULT 'proposed',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS intent_relations (
+            id TEXT PRIMARY KEY,
+            from_kind TEXT NOT NULL,
+            from_id TEXT NOT NULL,
+            to_kind TEXT NOT NULL,
+            to_id TEXT NOT NULL,
+            relation TEXT NOT NULL,
+            credited_at TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_intent_relations_from
+            ON intent_relations (from_kind, from_id, relation);
+        CREATE INDEX IF NOT EXISTS idx_intent_relations_to
+            ON intent_relations (to_kind, to_id, relation);
+
+        CREATE TABLE IF NOT EXISTS intent_mitigations (
+            id TEXT PRIMARY KEY,
+            winner_kind TEXT NOT NULL,
+            winner_id TEXT NOT NULL,
+            deferred_kind TEXT NOT NULL,
+            deferred_id TEXT NOT NULL,
+            note TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );",
     )
     .context("Failed to create database tables")?;

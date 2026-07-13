@@ -1170,3 +1170,55 @@ toolchain**. Read it at the start of every session; append to it at the end.
 - Next: FEAT-062 (intent dependency & conflict graph) per the milestone's
   suggested order — relates objectives and goals to each other
   (`supports`/`conflicts_with`).
+
+### 2026-07-13 — FEAT-062: Intent dependency & conflict graph (0.7.0 intent & planning plane)
+
+- New `intent.rs`: a relation store over the two intent kinds (`goal` /
+  `objective`) with two relation kinds — `supports` and `conflicts_with` —
+  persisted in a new `intent_relations` table, queryable both directions
+  (`relations_from`/`relations_to`, acceptance criterion 1).
+- **Referential integrity at the boundary**: `relation_create` validates
+  `from_kind`/`to_kind` (must parse as `goal`/`objective`), rejects a
+  dangling id (the referenced goal/objective must already exist), and
+  rejects a self-relation — same validate-at-creation convention as
+  `objective_create`/`goal_create`.
+- **Conflict arbitration (acceptance criterion 2)**: `arbitrate_conflicts`
+  scans every `conflicts_with` relation, skips any pair where either side
+  isn't currently active (a goal must be lifecycle-`active`; an objective
+  is always "standing" — it has no lifecycle of its own), and for an active
+  pair picks the winner by priority (lower number = more urgent, the same
+  convention `Objective`/`Goal::priority` already document). The deferred
+  side gets a **mitigation** recorded in a new `intent_mitigations` table.
+  Ties break deterministically on id ordering so re-runs are stable.
+  Re-arbitrating an already-mitigated pair returns the existing mitigation
+  id rather than inserting a duplicate — the same dedupe shape
+  `evaluate::raise_for_deviations` already uses for incidents.
+- **`supports` propagation without touching `Goal`/`Objective`'s schema
+  (acceptance criterion 3)**: rather than adding a `progress` field to
+  either store, a `supports` relation carries its own `credited_at`.
+  `record_achievement(kind, id)` credits every relation where that intent
+  is the `from` side; `progress_for(kind, id)` reports how many of an
+  intent's supporters are credited (`SupportProgress{ supporters,
+  achieved_supporters }`, with a `.fraction()` helper). Keeps this module
+  self-contained — no coupling to goal.rs/objective.rs internals, no
+  migration touching their tables.
+- Cross-kind relations work by construction: a goal can conflict with or
+  support an objective and vice versa, since both are addressed uniformly
+  through `IntentKind` — unit-tested
+  (`conflicts_with_between_a_goal_and_an_objective_is_detected`).
+- **No CLI/dispatch wiring, no automatic triggering** — same deliberate
+  scoping as FEAT-060/061; `arbitrate_conflicts`/`record_achievement` are
+  library calls the planning control loop (FEAT-066) and CLI verbs
+  (FEAT-069) will invoke, not wired into a live loop yet.
+- 10 new tests: reject-unknown-kind/relation/dangling-id/self-relation,
+  both-direction queryability, arbitration-ignores-inactive-pairs,
+  arbitration-selects-by-priority-and-records-a-mitigation, dedupe-on-
+  repeat-arbitration, deterministic-tie-break, achievement-advances-
+  supported-progress, progress-averages-over-multiple-supporters,
+  no-op-when-nothing-supported, cross-kind (goal vs objective) conflict
+  detection. Full workspace build/test/clippy stays green (391 regin-core
+  tests, up from 381; zero new clippy warnings — confirmed via `touch` +
+  fresh `cargo clippy --workspace --all-targets` diff).
+- Next: FEAT-063 (planner: goal → task network) — the last "model/stores"
+  ticket (FEAT-062) is done; FEAT-063 starts the "plan & schedule" phase
+  of the milestone's suggested delivery order.
