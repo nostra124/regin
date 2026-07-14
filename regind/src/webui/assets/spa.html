@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>regin</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+    background: #0f1115; color: #e6e6e6;
+  }
+  button, input, textarea {
+    font-family: inherit; font-size: 1rem; background: #1b1e26; color: #e6e6e6;
+    border: 1px solid #2c303a; border-radius: 8px; padding: 0.6rem 0.8rem;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: #4f8cff; }
+  button.primary { background: #4f8cff; border-color: #4f8cff; color: white; font-weight: 600; }
+
+  #login { flex: 1; display: flex; align-items: center; justify-content: center; }
+  #login form { display: flex; flex-direction: column; gap: 0.75rem; width: min(320px, 90vw); }
+  #login h1 { text-align: center; margin-bottom: 0.5rem; }
+  #login .error { color: #ff6b6b; min-height: 1.2em; font-size: 0.9rem; }
+
+  #app { flex: 1; display: none; flex-direction: column; min-height: 0; }
+  header { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 1rem; border-bottom: 1px solid #2c303a; }
+  header h1 { font-size: 1.1rem; margin: 0; }
+  nav#tabs { display: flex; gap: 0.4rem; padding: 0.5rem 1rem; overflow-x: auto; border-bottom: 1px solid #2c303a; }
+  nav#tabs button { white-space: nowrap; padding: 0.5rem 0.9rem; border-radius: 999px; }
+  nav#tabs button.active { background: #4f8cff; border-color: #4f8cff; color: white; }
+  main { flex: 1; min-height: 0; overflow: hidden; position: relative; }
+  .panel { position: absolute; inset: 0; display: none; flex-direction: column; padding: 0.75rem 1rem; overflow: auto; }
+  .panel.active { display: flex; }
+
+  #chat-log, #goal-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 0.6rem; }
+  .msg { padding: 0.5rem 0.7rem; border-radius: 10px; max-width: 90%; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: #4f8cff; color: white; }
+  .msg.assistant { align-self: flex-start; background: #1b1e26; }
+  .msg.tool { align-self: stretch; background: #171a21; border: 1px dashed #2c303a; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+  .msg.error { align-self: stretch; background: #3a1f1f; color: #ff9b9b; }
+  .row { display: flex; gap: 0.5rem; }
+  .row textarea, .row input { flex: 1; resize: none; }
+
+  #term-output { flex: 1; overflow-y: auto; background: #000; color: #ddd; font-family: ui-monospace, monospace; font-size: 0.85rem; white-space: pre-wrap; padding: 0.5rem; border-radius: 8px; margin-bottom: 0.6rem; }
+
+  #plan-list { margin: 0 0 0.6rem 0; padding-left: 1.2rem; }
+
+  .dashboard-tab { flex: 1; overflow: auto; }
+
+  @media (prefers-color-scheme: light) {
+    body { background: #f5f6f8; color: #1a1a1a; }
+    button, input, textarea { background: #ffffff; color: #1a1a1a; border-color: #d7d9e0; }
+    .msg.assistant, .msg.tool { background: #eef0f4; }
+    #term-output { background: #101010; color: #ddd; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login">
+  <form id="login-form">
+    <h1>regin</h1>
+    <input id="login-username" type="text" placeholder="username" autocomplete="username" required>
+    <input id="login-password" type="password" placeholder="password" autocomplete="current-password" required>
+    <button class="primary" type="submit">Log in</button>
+    <div class="error" id="login-error"></div>
+  </form>
+</div>
+
+<div id="app">
+  <header>
+    <h1>regin</h1>
+    <button id="logout">Log out</button>
+  </header>
+  <nav id="tabs"></nav>
+  <main id="panels"></main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var TOKEN_KEY = "regin_token";
+  var ACTIVE_TAB_KEY = "regin_active_tab";
+
+  var loginView = document.getElementById("login");
+  var appView = document.getElementById("app");
+  var loginForm = document.getElementById("login-form");
+  var loginError = document.getElementById("login-error");
+  var tabsNav = document.getElementById("tabs");
+  var panelsMain = document.getElementById("panels");
+
+  function token() { return localStorage.getItem(TOKEN_KEY); }
+  function setToken(t) { localStorage.setItem(TOKEN_KEY, t); }
+  function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+
+  function wsUrl(path) {
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + location.host + path + "?token=" + encodeURIComponent(token());
+  }
+
+  function authFetch(path, opts) {
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, { Authorization: "Bearer " + token() });
+    return fetch(path, opts);
+  }
+
+  // --- built-in tabs -------------------------------------------------
+
+  var builtinTabs = [
+    { id: "chat", label: "Chat" },
+    { id: "terminal", label: "Terminal" },
+    { id: "goal", label: "Goal" }
+  ];
+  var dynamicTabs = [];
+  var activeTab = null;
+
+  function renderTabs() {
+    tabsNav.innerHTML = "";
+    panelsMain.innerHTML = "";
+    var all = builtinTabs.concat(dynamicTabs.map(function (t) { return { id: "dash:" + t.name, label: (t.icon || "") + " " + t.name, dashboard: t }; }));
+    all.forEach(function (t) {
+      var btn = document.createElement("button");
+      btn.textContent = t.label;
+      btn.className = t.id === activeTab ? "active" : "";
+      btn.addEventListener("click", function () { activateTab(t.id); });
+      tabsNav.appendChild(btn);
+
+      var panel = document.createElement("div");
+      panel.className = "panel" + (t.id === activeTab ? " active" : "");
+      panel.id = "panel-" + t.id;
+      if (t.dashboard) {
+        panel.innerHTML = '<div class="dashboard-tab">' + t.dashboard.html + "</div>";
+      } else if (t.id === "chat") {
+        panel.innerHTML = '<div id="chat-log"></div><div class="row"><textarea id="chat-input" rows="2" placeholder="Message regin..."></textarea><button class="primary" id="chat-send">Send</button></div>';
+      } else if (t.id === "terminal") {
+        panel.innerHTML = '<div id="term-output"></div><div class="row"><input id="term-input" placeholder="type a command, press Enter"></div>';
+      } else if (t.id === "goal") {
+        panel.innerHTML = '<div class="row"><input id="goal-input" placeholder="Describe a goal for regin to pursue"><button class="primary" id="goal-start">Start</button></div><ol id="plan-list"></ol><div id="goal-log"></div>';
+      }
+      panelsMain.appendChild(panel);
+    });
+  }
+
+  function activateTab(id) {
+    activeTab = id;
+    localStorage.setItem(ACTIVE_TAB_KEY, id);
+    renderTabs();
+    if (id === "chat") initChat();
+    if (id === "terminal") initTerminal();
+    if (id === "goal") initGoal();
+  }
+
+  function loadDynamicTabs() {
+    return authFetch("/regin/api/tabs").then(function (r) { return r.ok ? r.json() : []; }).then(function (tabs) { dynamicTabs = tabs || []; });
+  }
+
+  // --- chat ------------------------------------------------------------
+
+  var chatSocket = null;
+
+  function appendMsg(logId, cls, text) {
+    var log = document.getElementById(logId);
+    if (!log) return;
+    var div = document.createElement("div");
+    div.className = "msg " + cls;
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function initChat() {
+    if (chatSocket) return;
+    chatSocket = new WebSocket(wsUrl("/regin/api/chat"));
+    chatSocket.onmessage = function (ev) {
+      var msg = JSON.parse(ev.data);
+      if (msg.type === "tool_call") appendMsg("chat-log", "tool", "→ " + msg.name + " " + msg.arguments);
+      else if (msg.type === "tool_result") appendMsg("chat-log", "tool", (msg.success ? "✓ " : "✗ ") + msg.name + ": " + msg.output);
+      else if (msg.type === "done") appendMsg("chat-log", "assistant", msg.text);
+      else if (msg.type === "error") appendMsg("chat-log", "error", msg.message);
+    };
+    chatSocket.onclose = function () { chatSocket = null; };
+
+    var send = document.getElementById("chat-send");
+    var input = document.getElementById("chat-input");
+    function doSend() {
+      var text = input.value.trim();
+      if (!text || !chatSocket || chatSocket.readyState !== 1) return;
+      appendMsg("chat-log", "user", text);
+      chatSocket.send(JSON.stringify({ message: text }));
+      input.value = "";
+    }
+    send.addEventListener("click", doSend);
+    input.addEventListener("keydown", function (e) { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSend(); } });
+  }
+
+  // --- terminal ----------------------------------------------------------
+
+  var termSocket = null;
+
+  function initTerminal() {
+    if (termSocket) return;
+    termSocket = new WebSocket(wsUrl("/regin/api/terminal"));
+    var out = document.getElementById("term-output");
+    termSocket.onmessage = function (ev) {
+      var msg = JSON.parse(ev.data);
+      if (msg.type === "output") { out.textContent += msg.data; out.scrollTop = out.scrollHeight; }
+      else if (msg.type === "exit") { out.textContent += "\n[process exited, code " + msg.code + "]\n"; }
+      else if (msg.type === "error") { out.textContent += "\n[error: " + msg.message + "]\n"; }
+    };
+    termSocket.onclose = function () { termSocket = null; };
+
+    var input = document.getElementById("term-input");
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        if (termSocket && termSocket.readyState === 1) termSocket.send(JSON.stringify({ type: "input", data: input.value + "\n" }));
+        input.value = "";
+      }
+    });
+  }
+
+  // --- goal ----------------------------------------------------------
+
+  function initGoal() {
+    var startBtn = document.getElementById("goal-start");
+    startBtn.addEventListener("click", function () {
+      var goalInput = document.getElementById("goal-input");
+      var goal = goalInput.value.trim();
+      if (!goal) return;
+      document.getElementById("plan-list").innerHTML = "";
+      document.getElementById("goal-log").innerHTML = "";
+      var sock = new WebSocket(wsUrl("/regin/api/goal"));
+      sock.onopen = function () { sock.send(JSON.stringify({ goal: goal })); };
+      sock.onmessage = function (ev) {
+        var msg = JSON.parse(ev.data);
+        if (msg.type === "plan") {
+          var list = document.getElementById("plan-list");
+          (msg.steps || []).forEach(function (s) { var li = document.createElement("li"); li.textContent = s; list.appendChild(li); });
+        } else if (msg.type === "tool_call") appendMsg("goal-log", "tool", "→ " + msg.name + " " + msg.arguments);
+        else if (msg.type === "tool_result") appendMsg("goal-log", "tool", (msg.success ? "✓ " : "✗ ") + msg.name + ": " + msg.output);
+        else if (msg.type === "done") appendMsg("goal-log", "assistant", msg.summary);
+        else if (msg.type === "error") appendMsg("goal-log", "error", msg.message);
+      };
+    }, { once: false });
+  }
+
+  // --- login / logout --------------------------------------------------
+
+  loginForm.addEventListener("submit", function (e) {
+    e.preventDefault();
+    loginError.textContent = "";
+    var username = document.getElementById("login-username").value;
+    var password = document.getElementById("login-password").value;
+    fetch("/regin/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: username, password: password })
+    }).then(function (r) {
+      if (!r.ok) throw new Error(r.status === 429 ? "too many attempts, try again shortly" : "invalid credentials");
+      return r.json();
+    }).then(function (data) {
+      setToken(data.token);
+      showApp();
+    }).catch(function (err) {
+      loginError.textContent = err.message;
+    });
+  });
+
+  document.getElementById("logout").addEventListener("click", function () {
+    clearToken();
+    if (chatSocket) chatSocket.close();
+    if (termSocket) termSocket.close();
+    chatSocket = null;
+    termSocket = null;
+    showLogin();
+  });
+
+  function showLogin() {
+    loginView.style.display = "flex";
+    appView.style.display = "none";
+  }
+
+  function showApp() {
+    loginView.style.display = "none";
+    appView.style.display = "flex";
+    loadDynamicTabs().then(function () {
+      var saved = localStorage.getItem(ACTIVE_TAB_KEY);
+      var valid = builtinTabs.some(function (t) { return t.id === saved; }) || dynamicTabs.some(function (t) { return "dash:" + t.name === saved; });
+      activateTab(valid ? saved : "chat");
+    });
+  }
+
+  // --- boot ------------------------------------------------------------
+
+  if (token()) {
+    authFetch("/regin/api/tabs").then(function (r) {
+      if (r.ok) showApp(); else { clearToken(); showLogin(); }
+    }).catch(function () { showLogin(); });
+  } else {
+    showLogin();
+  }
+})();
+</script>
+</body>
+</html>

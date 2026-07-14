@@ -1,7 +1,7 @@
 ---
 id: MILESTONE-0.8.0
 type: milestone
-status: planned
+status: done
 depends_on: [MILESTONE-0.7.0]
 ---
 
@@ -39,7 +39,7 @@ in 0.8.0 are orthogonal to objectives/planning, though they may converge later.
 
 | ID | Title | Complexity | From | Status |
 |----|-------|-----------|------|--------|
-| FEAT-087 | Web UI server (embedded HTTP, PAM auth, mobile-first SPA) | M | DISC-022 | open |
+| FEAT-087 | Web UI server (embedded HTTP, PAM auth, mobile-first SPA) | M | DISC-022 | done |
 
 ## Suggested delivery order
 
@@ -115,3 +115,12 @@ FEAT-087 (web UI) is independent of Track A. It can land any time:
 - `profile.md` documents the `libpam` build dependency.
 - 100% test coverage on all new code; no open design questions in any 0.8.0
    FEAT (RULE-005).
+
+## Status: done
+
+Both tracks are complete (FEAT-077 through FEAT-085, FEAT-087). This closes
+out the last open milestone on the roadmap — see `.repo/dvalin/notes.md`
+for the FEAT-087 close-out entry documenting the scope decisions made along
+the way (goal-loop reuse instead of the dormant 0.7.0 pipeline, hand-rolled
+PAM FFI, the auth-boundary reconciliation, and the musl/PAM packaging
+constraint).

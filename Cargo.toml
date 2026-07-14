@@ -31,3 +31,11 @@ globset = "0.4"
 regex = "1"
 diffy = "0.4"
 libloading = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+portable-pty = "0.8"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+tokio-tungstenite = "0.24"
+libc = "0.2"

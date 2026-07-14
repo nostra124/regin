@@ -612,6 +612,16 @@ pub fn render_checks(checks: &[DerivedCheck]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Web UI (FEAT-087)
+// ---------------------------------------------------------------------------
+
+pub fn render_webui_status(enabled: bool, port: u16, listening: bool, url: &str) -> String {
+    let state = if enabled { "enabled" } else { "disabled" };
+    let listener = if listening { "listening" } else { "not listening" };
+    format!("web UI: {state}, port {port}, {listener}\n  {url}\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1204,5 +1214,17 @@ mod tests {
         let out = render_task_result(&run);
         assert!(out.contains("Status: success"));
         assert!(out.contains("42% used"));
+    }
+
+    #[test]
+    fn render_webui_status_shows_enabled_port_and_listening_state() {
+        let on = render_webui_status(true, 8080, true, "http://127.0.0.1:8080/");
+        assert!(on.contains("enabled"));
+        assert!(on.contains("8080"));
+        assert!(on.contains("listening") && !on.contains("not listening"));
+
+        let off = render_webui_status(false, 8080, false, "http://127.0.0.1:8080/");
+        assert!(off.contains("disabled"));
+        assert!(off.contains("not listening"));
     }
 }
