@@ -296,6 +296,28 @@ enum Commands {
         #[command(subcommand)]
         action: SoulAction,
     },
+
+    /// Embedded web UI: enable/disable/status (FEAT-087). Requires regind to
+    /// have been built with `--features webui`.
+    Webui {
+        #[command(subcommand)]
+        action: WebuiAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum WebuiAction {
+    /// Enable the web UI server (takes effect on the daemon's next restart).
+    Enable {
+        /// HTTP port to bind (default 8080; persists in `webui.port`)
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Disable the web UI server.
+    Disable,
+    /// Show whether the web UI is enabled/configured and whether its HTTP
+    /// listener is bound right now.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -897,6 +919,43 @@ async fn main() -> Result<()> {
                 SoulPrinciplesAction::Reject { id } => cmd_soul_principles_reject(&t, &id).await,
             },
         },
+        Commands::Webui { action } => match action {
+            WebuiAction::Enable { port } => cmd_webui_enable(&t, port).await,
+            WebuiAction::Disable => cmd_webui_disable(&t).await,
+            WebuiAction::Status => cmd_webui_status(&t).await,
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Web UI (FEAT-087)
+
+async fn cmd_webui_enable(t: &impl Transport, port: Option<u16>) -> Result<()> {
+    match t.request(&Request::WebuiEnable { port }).await? {
+        Response::WebuiStatus { url, port, .. } => {
+            println!("regin: web UI enabled on port {port}");
+            println!("  {url}");
+            println!("  (restart regind for the HTTP listener to pick this up)");
+            Ok(())
+        }
+        resp => Err(anyhow!("Unexpected response: {resp:?}")),
+    }
+}
+
+async fn cmd_webui_disable(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::WebuiDisable).await? {
+        Response::Ok { message } => { println!("regin: {message}"); Ok(()) }
+        resp => Err(anyhow!("Unexpected response: {resp:?}")),
+    }
+}
+
+async fn cmd_webui_status(t: &impl Transport) -> Result<()> {
+    match t.request(&Request::WebuiStatus).await? {
+        Response::WebuiStatus { enabled, port, listening, url } => {
+            println!("{}", render_webui_status(enabled, port, listening, &url));
+            Ok(())
+        }
+        resp => Err(anyhow!("Unexpected response: {resp:?}")),
     }
 }
 
@@ -1893,6 +1952,10 @@ mod tests {
         parses(&["regin", "soul", "charter", "derive"]);
         parses(&["regin", "soul", "charter", "set", "integrity", "prudence"]);
         parses(&["regin", "soul", "charter", "remove", "integrity"]);
+        parses(&["regin", "webui", "enable"]);
+        parses(&["regin", "webui", "enable", "--port", "9090"]);
+        parses(&["regin", "webui", "disable"]);
+        parses(&["regin", "webui", "status"]);
     }
 
     #[test]
@@ -2387,5 +2450,27 @@ mod tests {
         let t = FakeTransport::new();
         t.push(Response::Error { message: "no principle p1".into() });
         assert!(cmd_soul_principles_reject(&t, "p1").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn cmd_webui_enable_disable_status() {
+        let t = FakeTransport::new();
+        t.push(Response::WebuiStatus { enabled: true, port: 9090, listening: false, url: "http://127.0.0.1:9090/".into() });
+        assert!(cmd_webui_enable(&t, Some(9090)).await.is_ok());
+        assert!(matches!(&t.sent()[0], Request::WebuiEnable { port: Some(9090) }));
+
+        let t = FakeTransport::new();
+        t.push(Response::Ok { message: "web UI disabled".into() });
+        assert!(cmd_webui_disable(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::WebuiDisable));
+
+        let t = FakeTransport::new();
+        t.push(Response::WebuiStatus { enabled: false, port: 8080, listening: false, url: "http://127.0.0.1:8080/".into() });
+        assert!(cmd_webui_status(&t).await.is_ok());
+        assert!(matches!(t.sent()[0], Request::WebuiStatus));
+
+        let t = FakeTransport::new();
+        t.push(Response::Error { message: "daemon down".into() });
+        assert!(cmd_webui_status(&t).await.is_err());
     }
 }

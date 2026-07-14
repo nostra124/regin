@@ -3,6 +3,13 @@ name = "regind"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# FEAT-087, acceptance criterion 11: off by default so systems without
+# libpam development headers can still build regind. Enable with
+# `cargo build -p regind --features webui`; packaging builds the shipped
+# binary with this feature on (see profile.md §3).
+webui = ["dep:axum", "dep:tower-http", "dep:portable-pty", "dep:sha2", "dep:rand", "dep:hex", "dep:libc"]
+
 [dependencies]
 regin-core = { workspace = true }
 tokio = { workspace = true }
@@ -17,3 +24,14 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 async-trait = { workspace = true }
 dirs = { workspace = true }
+axum = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+portable-pty = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }

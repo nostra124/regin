@@ -290,6 +290,20 @@ pub enum Request {
     /// Show one goal by id.
     #[serde(rename = "goal_show")]
     GoalShow { id: String },
+
+    // --- Web UI (FEAT-087) ---
+    /// Enable the embedded web UI server: sets `webui.enabled=true` and,
+    /// when given, `webui.port`. Takes effect on the daemon's next
+    /// restart (the HTTP listener is only ever started at daemon startup).
+    #[serde(rename = "webui_enable")]
+    WebuiEnable { port: Option<u16> },
+    /// Disable the embedded web UI server (`webui.enabled=false`).
+    #[serde(rename = "webui_disable")]
+    WebuiDisable,
+    /// Report whether the web UI is enabled/configured and whether its
+    /// HTTP listener is actually bound right now in *this* running daemon.
+    #[serde(rename = "webui_status")]
+    WebuiStatus,
 }
 
 /// Response from daemon to CLI.
@@ -461,6 +475,10 @@ pub enum Response {
     Goals { goals: Vec<Goal> },
     #[serde(rename = "goal_detail")]
     GoalDetail { goal: Box<Goal> },
+
+    // --- Web UI (FEAT-087) ---
+    #[serde(rename = "webui_status")]
+    WebuiStatus { enabled: bool, port: u16, listening: bool, url: String },
 }
 
 #[cfg(test)]
@@ -504,5 +522,21 @@ mod tests {
     fn itil_request_tag_is_stable() {
         let j = serde_json::to_string(&Request::IncidentClose { id: "abc".into() }).unwrap();
         assert!(j.contains("\"type\":\"incident_close\""), "got {j}");
+    }
+
+    #[test]
+    fn webui_requests_roundtrip() {
+        req_roundtrip(&Request::WebuiEnable { port: Some(9090) });
+        req_roundtrip(&Request::WebuiEnable { port: None });
+        req_roundtrip(&Request::WebuiDisable);
+        req_roundtrip(&Request::WebuiStatus);
+    }
+
+    #[test]
+    fn webui_status_response_roundtrips() {
+        let r = Response::WebuiStatus { enabled: true, port: 8080, listening: false, url: "http://127.0.0.1:8080/".into() };
+        let j = serde_json::to_string(&r).unwrap();
+        let back: Response = serde_json::from_str(&j).unwrap();
+        assert_eq!(format!("{r:?}"), format!("{back:?}"));
     }
 }

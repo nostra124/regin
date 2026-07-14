@@ -31,6 +31,12 @@ use tokio::net::UnixListener;
 use tokio::signal;
 use tracing::{error, info, warn};
 
+/// FEAT-087: the embedded web UI server, gated behind the `webui` Cargo
+/// feature (see `regind/Cargo.toml`'s doc comment) so a `regind` built
+/// without libpam development headers still compiles.
+#[cfg(feature = "webui")]
+mod webui;
+
 struct AppState {
     db: Mutex<rusqlite::Connection>,
     identity_db: Mutex<rusqlite::Connection>,
@@ -72,6 +78,12 @@ struct AppState {
     /// running daemon; `regin config set references.*` takes effect on the
     /// next restart), so a plain `Vec` needs no interior mutability.
     references: Vec<references::ResolvedReference>,
+    /// Whether the web UI's HTTP listener is actually bound right now in
+    /// *this* running daemon (FEAT-087, `Request::WebuiStatus`). Always
+    /// present (not `#[cfg(feature = "webui")]`) so `WebuiStatus` reports
+    /// correctly — and truthfully stays `false` forever — even in a regind
+    /// built without the `webui` feature.
+    webui_listening: Arc<std::sync::atomic::AtomicBool>,
 }
 
 unsafe impl Send for AppState {}
@@ -186,6 +198,7 @@ async fn main() -> Result<()> {
         mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
         plugins: plugin::PluginHost::new(),
         references: resolved_references,
+        webui_listening: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     // FEAT-082 acceptance criterion 3: load plugins from the system dir
@@ -232,6 +245,24 @@ async fn main() -> Result<()> {
 
     let mcp_state = Arc::clone(&state);
     tokio::spawn(async move { mcp_reconnect_checker(mcp_state).await });
+
+    // FEAT-087: best-effort — `maybe_start` itself checks `webui.enabled`
+    // and no-ops if unset, same fail-safe convention as plugin/MCP loading
+    // above. In a `regind` built without the `webui` feature, `webui.*`
+    // settings still exist (so `regin webui status` reports honestly) but
+    // there's no listener to start; log once so that's not silently mysterious.
+    #[cfg(feature = "webui")]
+    {
+        let webui_state = Arc::clone(&state);
+        tokio::spawn(async move { webui::maybe_start(webui_state).await });
+    }
+    #[cfg(not(feature = "webui"))]
+    {
+        let db = state.db.lock().expect("DB poisoned");
+        if db::setting_get(&db, "webui.enabled").unwrap_or_default() == "true" {
+            warn!("webui.enabled is true, but this regind binary was built without the `webui` feature — no web UI will start");
+        }
+    }
 
     let cleanup = socket_path.clone();
     let result = tokio::select! {
@@ -1235,6 +1266,54 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
             }
         }
 
+        Request::WebuiEnable { port } => {
+            let port = {
+                let db = state.db.lock().expect("DB poisoned");
+                db::setting_set(&db, "webui.enabled", "true")?;
+                let port = match port {
+                    Some(p) => p,
+                    None => db::setting_get(&db, "webui.port")?.parse().unwrap_or(8080),
+                };
+                db::setting_set(&db, "webui.port", &port.to_string())?;
+                port
+            };
+            // FEAT-087 acceptance criterion 14: `regin webui enable` must
+            // make the HTTP server reachable in *this* running daemon, not
+            // only on a future restart — so start it right now if it
+            // isn't already listening (best-effort, same convention as
+            // startup: a bind failure is logged, not fatal to the RPC).
+            #[cfg(feature = "webui")]
+            if !state.webui_listening.load(std::sync::atomic::Ordering::SeqCst) {
+                let webui_state = Arc::clone(state);
+                tokio::spawn(async move { webui::maybe_start(webui_state).await });
+            }
+            send(w, &Response::WebuiStatus {
+                enabled: true,
+                port,
+                listening: state.webui_listening.load(std::sync::atomic::Ordering::SeqCst),
+                url: format!("http://127.0.0.1:{port}/"),
+            }).await?;
+        }
+
+        Request::WebuiDisable => {
+            {
+                let db = state.db.lock().expect("DB poisoned");
+                db::setting_set(&db, "webui.enabled", "false")?;
+            }
+            send(w, &Response::Ok { message: "web UI disabled (takes effect on the daemon's next restart)".into() }).await?;
+        }
+
+        Request::WebuiStatus => {
+            let (enabled, port) = {
+                let db = state.db.lock().expect("DB poisoned");
+                let enabled = db::setting_get(&db, "webui.enabled")? == "true";
+                let port: u16 = db::setting_get(&db, "webui.port")?.parse().unwrap_or(8080);
+                (enabled, port)
+            };
+            let listening = state.webui_listening.load(std::sync::atomic::Ordering::SeqCst);
+            send(w, &Response::WebuiStatus { enabled, port, listening, url: format!("http://127.0.0.1:{port}/") }).await?;
+        }
+
         // --- Skill authoring (FEAT-007 / FEAT-009) ---
         Request::TaskCreate { name, from_prompt, force, repo, cwd } => {
             let content = match &from_prompt {
@@ -1615,6 +1694,7 @@ mod dispatch_tests {
             mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
             plugins: plugin::PluginHost::new(),
             references: Vec::new(),
+            webui_listening: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -1638,6 +1718,7 @@ mod dispatch_tests {
             mcp: mcp::McpContext::new(spawner),
             plugins: plugin::PluginHost::new(),
             references: Vec::new(),
+            webui_listening: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -1660,6 +1741,7 @@ mod dispatch_tests {
             mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
             plugins: plugin::PluginHost::new(),
             references: refs,
+            webui_listening: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
@@ -2194,6 +2276,61 @@ mod dispatch_tests {
             content.contains("helpers") && content.contains("/opt/helpers") && content.contains("shared utility functions")
         });
         assert!(found, "expected a references system message among {msgs:?}");
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-087: web UI enable/disable/status dispatch (acceptance criteria 1-3)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn webui_status_defaults_to_disabled_on_a_fresh_db() {
+        let st = state();
+        let resp = run(Request::WebuiStatus, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { enabled: false, port: 8080, listening: false, .. }]), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn webui_enable_sets_settings_and_defaults_the_port() {
+        let st = state();
+        let resp = run(Request::WebuiEnable { port: None }, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { enabled: true, port: 8080, .. }]), "{resp:?}");
+
+        let db = st.db.lock().unwrap();
+        assert_eq!(db::setting_get(&db, "webui.enabled").unwrap(), "true");
+        assert_eq!(db::setting_get(&db, "webui.port").unwrap(), "8080");
+    }
+
+    #[tokio::test]
+    async fn webui_enable_with_an_explicit_port_persists_it() {
+        let st = state();
+        let resp = run(Request::WebuiEnable { port: Some(9090) }, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { enabled: true, port: 9090, .. }]), "{resp:?}");
+
+        // status reflects the persisted port on a later call too
+        let resp = run(Request::WebuiStatus, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { enabled: true, port: 9090, .. }]), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn webui_disable_flips_the_setting_back() {
+        let st = state();
+        run(Request::WebuiEnable { port: None }, &st).await;
+        let resp = run(Request::WebuiDisable, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::Ok { .. }]), "{resp:?}");
+
+        let resp = run(Request::WebuiStatus, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { enabled: false, .. }]), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn webui_status_reports_listening_state_from_the_shared_flag() {
+        // acceptance criterion 3: "whether the listener is currently
+        // active" — driven by the same flag the (feature-gated) HTTP
+        // server flips when it actually binds.
+        let st = state();
+        st.webui_listening.store(true, std::sync::atomic::Ordering::SeqCst);
+        let resp = run(Request::WebuiStatus, &st).await;
+        assert!(matches!(resp.as_slice(), [Response::WebuiStatus { listening: true, .. }]), "{resp:?}");
     }
 
     // -----------------------------------------------------------------

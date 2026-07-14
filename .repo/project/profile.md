@@ -61,6 +61,24 @@ Key dependencies:
 - `anyhow` (error handling)
 - `chrono`, `uuid`, `dirs`, `futures-util`, `tracing` + `tracing-subscriber`
 
+**Optional `webui` feature** (`regind` only, off by default — FEAT-087):
+embeds an HTTP server (`axum`, `tower-http`) exposing a mobile-first SPA,
+REST API, and WebSocket chat/terminal/goal endpoints under PAM
+authentication. Building it in requires **libpam development headers**
+(`libpam0g-dev` on Debian/Ubuntu, `pam-devel` on Fedora/RHEL) — `regind`'s
+`build.rs` links `-lpam` only when the feature is enabled, via hand-written
+FFI bindings (`regind/src/webui/pam_auth.rs`), not the `pam`/`pam-sys`
+crates (those pull in `bindgen`/`libclang`, a much heavier build
+dependency). Enable with:
+
+```sh
+cargo build -p regind --features webui
+```
+
+A `regind` built without the feature still has `webui.*` settings and the
+`regin webui enable/disable/status` commands — they just can't start a
+listener (`regin webui status` reports `listening: false` truthfully).
+
 ## 4. Runtime architecture
 
 ```
@@ -109,7 +127,14 @@ cargo build                  # debug build
 Packaging: a Debian package layout lives under `pkg/` (`regin_<ver>_amd64/`
 with `DEBIAN/control`, `postinst`, `prerm`, the binaries, system skills under
 `usr/share/regin/skills/`, README, and man pages). Man pages: `man/regin.1`,
-`man/regind.1`. A reference systemd unit is `regind.service`.
+`man/regind.1`. A reference systemd unit is `regind.service`. The
+multi-format (`deb`/`rpm`/`apk`) build (`packaging/build.sh` +
+`packaging/nfpm.yaml`) ships `/etc/pam.d/regin`, but builds `regind` as a
+musl static-pie binary **without** the `webui` feature — PAM needs a real
+dynamic linker (it `dlopen()`s host modules at runtime), which a static
+binary can't provide. A webui-enabled `regind` is currently a from-source
+build only (`cargo build -p regind --features webui`, see §3) on a glibc
+host; packaging that as a distinct artifact is unstarted follow-up work.
 
 ### Supported platforms
 

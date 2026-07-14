@@ -1,0 +1,12 @@
+# PAM service file for `regind`'s web UI login (FEAT-087, acceptance
+# criterion 12). Installed at /etc/pam.d/regin.
+#
+# Uses pam_unix.so directly (not `@include common-auth`/`common-account`)
+# since those includes only exist on Debian-family systems with
+# libpam-runtime — this package ships for deb/rpm/apk alike (see
+# packaging/nfpm.yaml), so the service file has to work without them.
+# Defers to each host's local user/password database; adjust locally
+# (e.g. add pam_access.so to require a specific group) if "any local
+# login-capable user" is too broad for a given deployment.
+auth     required   pam_unix.so
+account  required   pam_unix.so

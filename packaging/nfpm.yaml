@@ -2,6 +2,20 @@
 # Build with packaging/build.sh, which stamps ${VERSION} from Cargo.toml,
 # (re)generates the man pages, and runs nfpm once per format. Supersedes the
 # deb-only FEAT-020 staging tree (pkg/).
+#
+# FEAT-087 scope note: the packaged `regind` binary below is the standard
+# musl static-pie build (`packaging/build.sh`'s whole point — one binary
+# runs on glibc AND musl/Alpine) and is therefore built WITHOUT the `webui`
+# Cargo feature. PAM fundamentally can't work from a static-pie binary:
+# `libpam` itself `dlopen()`s host-specific modules (`pam_unix.so` etc.) at
+# runtime, which requires a real dynamic linker — not something a static
+# binary has. A `webui`-enabled `regind` needs a separate, ordinarily
+# dynamically-linked build (`cargo build -p regind --features webui`, see
+# `profile.md` §3) on a glibc host; packaging that as a distinct artifact is
+# follow-up work, not done here. The `/etc/pam.d/regin` service file below
+# is still shipped unconditionally — it's inert (nothing reads it) unless a
+# webui-enabled `regind` is installed some other way, and it's one less
+# manual step for anyone who does.
 name: "regin"
 arch: "amd64"
 platform: "linux"
@@ -45,6 +59,12 @@ contents:
     dst: /usr/share/regin/install.sh
     file_info:
       mode: 0755
+
+  # PAM service file for the web UI (FEAT-087, acceptance criterion 12) —
+  # inert unless a webui-enabled regind is installed (see the note above).
+  - src: ./assets/pam.d/regin
+    dst: /etc/pam.d/regin
+    type: config|noreplace
 
 overrides:
   rpm:

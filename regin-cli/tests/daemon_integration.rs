@@ -236,3 +236,90 @@ fn two_sandboxes_run_independent_daemons_without_colliding() {
 fn sandbox_ping(sandbox: &Sandbox) -> bool {
     sandbox.command(&regin_bin()).arg("ping").status().unwrap().success()
 }
+
+/// Same self-heal strategy as [`regind_bin`], but built with `--features
+/// webui` into a distinct target-dir (`<target-dir>-webui`) so it doesn't
+/// fight the plain build for the same output path.
+fn regind_bin_with_webui() -> PathBuf {
+    let regin = regin_bin();
+    let target_dir = regin
+        .parent()
+        .and_then(|p| p.parent())
+        .unwrap_or_else(|| panic!("{} has no target directory ancestor", regin.display()))
+        .with_file_name(format!(
+            "{}-webui",
+            regin.parent().and_then(|p| p.parent()).and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("target")
+        ));
+    let sibling = target_dir.join("debug").join("regind");
+    if !sibling.exists() {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+        let status = Command::new(&cargo)
+            .args(["build", "-p", "regind", "--bin", "regind", "--features", "webui", "--target-dir"])
+            .arg(&target_dir)
+            .status()
+            .unwrap_or_else(|e| panic!("failed to run `{cargo} build -p regind --features webui`: {e}"));
+        assert!(status.success(), "`{cargo} build -p regind --features webui` failed");
+    }
+    assert!(sibling.exists(), "webui-enabled regind binary still missing at {} after building it", sibling.display());
+    sibling
+}
+
+/// Acceptance criterion 14: `regin webui enable --port <N>` makes the web
+/// UI reachable over real HTTP in the *same* running daemon (no restart
+/// needed — see the `Request::WebuiEnable` dispatch arm's comment in
+/// `regind/src/main.rs`), and `regin webui disable` flips `webui.enabled`
+/// back off (verified via `regin webui status`; actually tearing down an
+/// already-bound listener is out of v1's scope — same "next restart"
+/// convention documented on the `Request::WebuiDisable` response).
+#[test]
+fn webui_enable_serves_health_over_real_http() {
+    let sandbox = Sandbox::new();
+    let daemon = spawn_regind_bin(&sandbox, &regind_bin_with_webui());
+    wait_for_socket(&sandbox);
+
+    let port = free_tcp_port();
+    let enabled = sandbox.command(&regin_bin()).args(["webui", "enable", "--port", &port.to_string()]).output().unwrap();
+    assert!(enabled.status.success(), "regin webui enable: {}", String::from_utf8_lossy(&enabled.stderr));
+
+    let status_line = wait_for_http_ok(port, "/regin/api/health", Duration::from_secs(10));
+    assert!(status_line.contains(" 200 "), "got {status_line:?}");
+
+    let disabled = sandbox.command(&regin_bin()).args(["webui", "disable"]).status().unwrap();
+    assert!(disabled.success(), "regin webui disable");
+    let status = sandbox.command(&regin_bin()).args(["webui", "status"]).output().unwrap();
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("disabled") || String::from_utf8_lossy(&status.stdout).contains("enabled: false"));
+
+    terminate_and_wait_for_exit(daemon, &sandbox);
+}
+
+/// Same as [`spawn_regind`] but for an arbitrary binary path (used to run
+/// the separately-built `--features webui` binary).
+fn spawn_regind_bin(sandbox: &Sandbox, bin: &PathBuf) -> Child {
+    sandbox.command(bin).stdout(Stdio::null()).stderr(Stdio::null()).spawn().expect("failed to spawn regind")
+}
+
+fn free_tcp_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Polls a bare HTTP/1.0 GET over a raw `TcpStream` until it gets a
+/// response (no `reqwest` dev-dependency needed for one status-line
+/// check) — connection refused just means the listener hasn't bound yet,
+/// which is expected while `Request::WebuiEnable`'s spawned `maybe_start`
+/// task is still starting up.
+fn wait_for_http_ok(port: u16, path: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.write_all(format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes());
+            let mut reader = BufReader::new(stream);
+            let mut status_line = String::new();
+            if reader.read_line(&mut status_line).is_ok() && !status_line.is_empty() {
+                return status_line;
+            }
+        }
+        assert!(Instant::now() < deadline, "webui never became reachable on 127.0.0.1:{port}{path} within {timeout:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

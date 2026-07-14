@@ -70,6 +70,11 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("permission.diagnostics", "allow", "Permission level for diagnostics: allow|ask|deny (FEAT-080)"),
     ("permission.task", "allow", "Permission level for task (subagent delegation): allow|ask|deny (FEAT-080)"),
     ("permission.mcp.patterns", "[]", "JSON array of {pattern, level} glob rules for mcp_<server>_<tool> names, last match wins (FEAT-081)"),
+    ("webui.enabled", "false", "Enable the embedded web UI server, gated behind the regind `webui` build feature (FEAT-087)"),
+    ("webui.port", "8080", "Web UI HTTP port; binds 127.0.0.1:<port> (FEAT-087)"),
+    ("webui.public.artifacts", "/artifacts", "URL path for public build-artifact downloads; empty disables it (FEAT-087)"),
+    ("webui.public.repo", "/repo", "URL path for public APT/RPM package repositories; empty disables it (FEAT-087)"),
+    ("webui.artifacts_dir", "", "Filesystem directory served at webui.public.artifacts; empty uses <XDG data dir>/artifacts (FEAT-087)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
