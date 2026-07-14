@@ -410,6 +410,120 @@ impl LlmClient for MimirClient {
     }
 }
 
+/// Generic client for **any** OpenAI-compatible `/v1` chat-completions API
+/// (FEAT-083, acceptance criterion 3) — configured via `llm.base_url`/
+/// `llm.api_key`/`llm.model` rather than being tied to Mimir. Auth is the
+/// plain OpenAI convention (`Authorization: Bearer <api_key>`) instead of
+/// Mimir's client-cert-fingerprint header; everything else (request/
+/// response shape, SSE framing) is identical, so this reuses the exact
+/// same pure helpers (`build_completion_request`, `parse_completion_response`)
+/// as [`MimirClient`] rather than re-deriving them.
+#[derive(Debug, Clone)]
+pub struct OpenaiClient {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    pub client: Client,
+}
+
+impl OpenaiClient {
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>, model: impl Into<String>) -> Self {
+        Self { base_url: base_url.into(), api_key, model: model.into(), client: Client::new() }
+    }
+
+    fn authorize(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.api_key {
+            Some(k) if !k.is_empty() => req.bearer_auth(k),
+            _ => req,
+        }
+    }
+
+    pub async fn chat_turn(&self, messages: &[Value], tools: Option<&[ToolDef]>) -> Result<LlmTurn> {
+        let url = format!("{}/chat/completions", self.base_url);
+        debug!(model = %self.model, n = messages.len(), "LLM turn (openai-compatible)");
+
+        let body = build_completion_request(&self.model, messages, tools, None);
+        let response = self.authorize(self.client.post(&url).json(&body)).send().await.context("LLM request failed")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("LLM error {status}: {text}"));
+        }
+
+        let raw: Value = response.json().await.context("Failed to parse LLM response")?;
+        parse_completion_response(&raw)
+    }
+
+    pub async fn embedding(&self, input: &str, model: &str) -> Result<Vec<f32>> {
+        let url = format!("{}/embeddings", self.base_url);
+        let body = serde_json::json!({ "model": model, "input": input });
+
+        let response = self.authorize(self.client.post(&url).json(&body)).send().await.context("Embedding request failed")?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Embedding error {status}: {text}"));
+        }
+
+        let resp: EmbeddingResponse = response.json().await.context("Failed to parse embedding response")?;
+        resp.data.into_iter().next().map(|d| d.embedding).ok_or_else(|| anyhow!("No embedding data in response"))
+    }
+}
+
+#[async_trait]
+impl LlmClient for OpenaiClient {
+    async fn chat_turn(&self, messages: &[Value], tools: Option<&[ToolDef]>) -> Result<LlmTurn> {
+        self.chat_turn(messages, tools).await
+    }
+
+    async fn embedding(&self, input: &str, model: &str) -> Result<Vec<f32>> {
+        self.embedding(input, model).await
+    }
+}
+
+/// Resolve which concrete [`LlmClient`] to construct from settings
+/// (acceptance criteria 3, 4, 7). If `llm.base_url` is explicitly
+/// configured, a generic [`OpenaiClient`] is used — any OpenAI-compatible
+/// endpoint (a local model server, an alternate hosted provider, etc.).
+/// Otherwise falls back to the existing `mimir.*`-configured [`MimirClient`]
+/// path unchanged, so an install that has only ever set `mimir.*` keeps
+/// behaving exactly as before — zero migration required.
+///
+/// **Deviation from the ticket's literal wording, documented rather than
+/// silently ignored**: the ticket's acceptance criteria describe
+/// "NanoGPT" as the existing baked-in provider being generalized, and ask
+/// for `nanogpt.*` settings to keep working (mapped to `llm.*`, with a
+/// deprecation warning). This codebase's actual existing provider has
+/// always been **Mimir** (regin's own on-premise gateway, `mimir.*`
+/// settings, `MimirClient`) — there never was a `nanogpt.*` key to migrate
+/// or deprecate. `mimir.*` is not being deprecated here: it stays the
+/// zero-config default, and `llm.*` is purely additive, opted into by
+/// setting `llm.base_url`.
+pub fn resolve_provider(conn: &rusqlite::Connection) -> Result<std::sync::Arc<dyn LlmClient>> {
+    let llm_base_url = crate::db::setting_get(conn, "llm.base_url")?;
+    if !llm_base_url.trim().is_empty() {
+        let api_key = crate::db::setting_get(conn, "llm.api_key")?;
+        let model = crate::db::setting_get(conn, "llm.model")?;
+        let model = if model.trim().is_empty() { "auto".to_string() } else { model };
+        let api_key = if api_key.trim().is_empty() { None } else { Some(api_key) };
+        return Ok(std::sync::Arc::new(OpenaiClient::new(llm_base_url, api_key, model)));
+    }
+
+    let base_url = crate::db::setting_get(conn, "mimir.base_url")?;
+    let fingerprint = crate::db::setting_get(conn, "mimir.fingerprint")?;
+    let model = crate::db::setting_get(conn, "mimir.model")?;
+    if fingerprint.is_empty() {
+        return Err(anyhow!(
+            "No LLM provider configured. Set one: regin config set llm.base_url <url> \
+             (any OpenAI-compatible endpoint) or regin config set mimir.fingerprint <fingerprint> \
+             (Mimir gateway — provision via Dvalin / the Mimir console)"
+        ));
+    }
+    Ok(std::sync::Arc::new(MimirClient::new(base_url, fingerprint, model)))
+}
+
 /// A canned-response [`LlmClient`] for tests — no network (FEAT-071 /
 /// DISC-020). Not `#[cfg(test)]`-gated: `regind`'s own test suite (a
 /// different crate) needs it too.
@@ -815,5 +929,170 @@ mod mock_http_tests {
 
         let c = client(server.base_url());
         assert!(c.embedding("text", "embed-model").await.is_err());
+    }
+}
+
+/// FEAT-083: `OpenaiClient` (any OpenAI-compatible endpoint) driven against
+/// a local mock HTTP server — acceptance criterion 6's "OpenaiClient
+/// streaming with a mock HTTP server" (this codebase's completions aren't
+/// literally streamed through the trait — see `chat_completion_stream`'s
+/// own doc note that streaming isn't wired into the agent loop — so this
+/// covers the equivalent non-streaming `chat_turn`/`embedding` surface,
+/// same as `MimirClient`'s own mock-server coverage).
+#[cfg(test)]
+mod openai_client_tests {
+    use super::*;
+    use httpmock::prelude::*;
+
+    #[tokio::test]
+    async fn chat_turn_sends_bearer_auth_and_parses_the_response() {
+        let server = MockServer::start_async().await;
+        let mock = server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions").header("Authorization", "Bearer sk-test");
+            then.status(200).json_body(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "hello from openai-compatible mock"}}]
+            }));
+        }).await;
+
+        let c = OpenaiClient::new(server.base_url(), Some("sk-test".into()), "gpt-4o-mini");
+        let turn = c.chat_turn(&[serde_json::json!({"role": "user", "content": "hi"})], None).await.unwrap();
+        assert!(matches!(turn, LlmTurn::Text(t) if t == "hello from openai-compatible mock"));
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_turn_omits_the_auth_header_when_no_api_key_is_configured() {
+        // e.g. a local model server with no auth requirement.
+        let server = MockServer::start_async().await;
+        let mock = server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).json_body(serde_json::json!({"choices": [{"message": {"content": "ok"}}]}));
+        }).await;
+
+        let c = OpenaiClient::new(server.base_url(), None, "local-model");
+        let turn = c.chat_turn(&[], None).await.unwrap();
+        assert!(matches!(turn, LlmTurn::Text(t) if t == "ok"), "no api_key configured must not prevent the call from succeeding");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn chat_turn_errors_on_http_error_status() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(401).body("unauthorized");
+        }).await;
+
+        let c = OpenaiClient::new(server.base_url(), Some("bad-key".into()), "model");
+        assert!(c.chat_turn(&[], None).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn embedding_parses_via_mock_server() {
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/embeddings");
+            then.status(200).json_body(serde_json::json!({"data": [{"embedding": [0.4, 0.5]}]}));
+        }).await;
+
+        let c = OpenaiClient::new(server.base_url(), Some("sk-test".into()), "model");
+        assert_eq!(c.embedding("text", "embed-model").await.unwrap(), vec![0.4, 0.5]);
+    }
+
+    #[tokio::test]
+    async fn dyn_llm_client_dispatch_works_for_openai_client_too() {
+        // acceptance criterion 6: "trait dispatch" — both concrete clients
+        // are usable interchangeably behind `dyn LlmClient`.
+        let server = MockServer::start_async().await;
+        server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions");
+            then.status(200).json_body(serde_json::json!({"choices": [{"message": {"content": "via trait object"}}]}));
+        }).await;
+
+        let boxed: Box<dyn LlmClient> = Box::new(OpenaiClient::new(server.base_url(), None, "model"));
+        assert_eq!(boxed.chat_completion(&[]).await.unwrap(), "via trait object");
+    }
+}
+
+/// FEAT-083: provider selection (acceptance criteria 3, 4, 7).
+#[cfg(test)]
+mod resolve_provider_tests {
+    use super::*;
+
+    fn conn() -> rusqlite::Connection {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&c).unwrap();
+        c
+    }
+
+    #[test]
+    fn with_neither_provider_configured_resolution_errors() {
+        let c = conn();
+        // `Arc<dyn LlmClient>` isn't `Debug`, so `unwrap_err()` (which
+        // requires the Ok side to be Debug) doesn't work here — match instead.
+        match resolve_provider(&c) {
+            Err(e) => assert!(e.to_string().contains("No LLM provider configured"), "{e}"),
+            Ok(_) => panic!("expected an error with no provider configured"),
+        }
+    }
+
+    #[test]
+    fn mimir_settings_alone_keep_working_unchanged() {
+        // criterion 4's backward-compatibility intent, adapted to this
+        // codebase's actual provider name (see resolve_provider's doc
+        // comment): an install with only mimir.* configured is unaffected.
+        let c = conn();
+        crate::db::setting_set(&c, "mimir.fingerprint", "abc123").unwrap();
+        crate::db::setting_set(&c, "mimir.base_url", "https://mimir.example/v1").unwrap();
+        crate::db::setting_set(&c, "mimir.model", "auto").unwrap();
+        assert!(resolve_provider(&c).is_ok());
+    }
+
+    #[test]
+    fn an_explicit_llm_base_url_takes_precedence_over_mimir() {
+        // criterion 3: any OpenAI-compatible endpoint is configurable and
+        // preferred once set, even if mimir.* also happens to be set.
+        let c = conn();
+        crate::db::setting_set(&c, "mimir.fingerprint", "abc123").unwrap();
+        crate::db::setting_set(&c, "llm.base_url", "http://127.0.0.1:8080/v1").unwrap();
+        crate::db::setting_set(&c, "llm.api_key", "sk-local").unwrap();
+        crate::db::setting_set(&c, "llm.model", "llama3").unwrap();
+        // Can't downcast `Arc<dyn LlmClient>` back to `OpenaiClient` without
+        // adding `Any` to the trait just for this test — the full round
+        // trip against a real mock server (below) is the stronger check
+        // that this path is actually wired correctly end to end.
+        assert!(resolve_provider(&c).is_ok());
+    }
+
+    #[tokio::test]
+    async fn integration_llm_base_url_connects_to_a_local_mock_endpoint() {
+        // acceptance criterion 7 ("regin chat connects to a local mock
+        // endpoint"), scoped to what's testable without spawning a real
+        // CLI process: `resolve_provider` reads `llm.base_url` and the
+        // resulting client genuinely talks to that endpoint.
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let mock = server.mock_async(|when, then| {
+            when.method(POST).path("/chat/completions").header("Authorization", "Bearer sk-local");
+            then.status(200).json_body(serde_json::json!({"choices": [{"message": {"content": "hello from local mock"}}]}));
+        }).await;
+
+        let c = conn();
+        crate::db::setting_set(&c, "llm.base_url", &server.base_url()).unwrap();
+        crate::db::setting_set(&c, "llm.api_key", "sk-local").unwrap();
+        crate::db::setting_set(&c, "llm.model", "local-model").unwrap();
+
+        let client = resolve_provider(&c).unwrap();
+        let reply = client.chat_completion(&[]).await.unwrap();
+        assert_eq!(reply, "hello from local mock");
+        mock.assert_async().await;
+    }
+
+    #[test]
+    fn llm_model_and_api_key_default_sensibly_when_unset() {
+        let c = conn();
+        crate::db::setting_set(&c, "llm.base_url", "http://127.0.0.1:9/v1").unwrap();
+        // no llm.api_key / llm.model set at all
+        assert!(resolve_provider(&c).is_ok(), "an unauthenticated local endpoint with no model override must still resolve");
     }
 }

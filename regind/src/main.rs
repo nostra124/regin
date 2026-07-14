@@ -71,27 +71,19 @@ unsafe impl Sync for AppState {}
 
 impl AppState {
     /// The single seam through which the daemon obtains LLM completions.
-    /// Reads `mimir.*` settings fresh on every call (not cached on
-    /// `AppState`) so `regin config set mimir.*` takes effect without a
-    /// daemon restart — the injected override (tests) bypasses that read
-    /// entirely.
+    /// Reads settings fresh on every call (not cached on `AppState`) so
+    /// `regin config set llm.*`/`mimir.*` takes effect without a daemon
+    /// restart — the injected override (tests) bypasses that read
+    /// entirely. Provider selection itself (FEAT-083: a generic
+    /// OpenAI-compatible endpoint via `llm.base_url`, falling back to the
+    /// Mimir gateway) lives in `regin_core::llm::resolve_provider`.
     fn llm_client(&self) -> Result<Arc<dyn LlmClient>> {
         if let Some(over) = &self.llm_override {
             return Ok(over.clone());
         }
         let db = self.db.lock().expect("DB poisoned");
-        let base_url = db::setting_get(&db, "mimir.base_url")?;
-        let fingerprint = db::setting_get(&db, "mimir.fingerprint")?;
-        let model = db::setting_get(&db, "mimir.model")?;
-        if fingerprint.is_empty() {
-            return Err(anyhow!(
-                "mimir.fingerprint not set. Regin reaches its LLM through Mimir — set the \
-                 approved access credential: regin config set mimir.fingerprint <fingerprint>"
-            ));
-        }
-        Ok(Arc::new(MimirClient::new(base_url, fingerprint, model)))
+        regin_core::llm::resolve_provider(&db)
     }
-
 }
 
 #[tokio::main]
