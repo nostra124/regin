@@ -10,6 +10,7 @@ use regin_core::{
     greeting,
     mode,
     permission,
+    plugin,
     posture,
     promotion,
     protocol::{Request, Response},
@@ -60,6 +61,9 @@ struct AppState {
     /// constructed; empty until `mcp_reconnect_checker`'s startup pass (or a
     /// test) connects a configured server.
     mcp: mcp::McpContext,
+    /// Loaded plugins (FEAT-082). Always constructed; empty until the
+    /// startup `plugin::PluginHost::load_dir` pass (or a test) loads one.
+    plugins: plugin::PluginHost,
 }
 
 unsafe impl Send for AppState {}
@@ -159,7 +163,22 @@ async fn main() -> Result<()> {
         task_limiter: subagent::TaskLimiter::new(task_max_concurrency),
         pending_permissions: Mutex::new(HashMap::new()),
         mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
+        plugins: plugin::PluginHost::new(),
     });
+
+    // FEAT-082 acceptance criterion 3: load plugins from the system dir
+    // first, then the user dir (user plugins load after, so nothing about
+    // load order needs reconciling for v1 — later FEATs can add
+    // override/precedence semantics if two plugins ever collide by name).
+    for dir in [config::system_plugins_dir(), config::user_plugins_dir().unwrap_or_default()] {
+        let db = state.db.lock().expect("DB poisoned");
+        for (name, r) in state.plugins.load_dir(&dir, &db) {
+            match r {
+                Ok(()) => info!(plugin = %name, "Loaded plugin"),
+                Err(e) => warn!(plugin = %name, "Failed to load plugin: {e:#}"),
+            }
+        }
+    }
 
     // FEAT-081 acceptance criterion 3: connect every configured MCP server
     // on startup. Best-effort — one server's failure doesn't block the
@@ -345,13 +364,44 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
                         arguments: call.function.arguments.clone(),
                     }).await?;
 
-                    let result = if let Some(refused) = gate_tool_call(state, call, w, PERMISSION_ASK_TIMEOUT).await? {
-                        refused
-                    } else if mcp::is_mcp_tool_name(&call.function.name) {
-                        dispatch_mcp_tool_call(state, call).await
-                    } else {
-                        tools::execute_tool_full(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await
+                    // FEAT-082 tool.execute.before: plugins run first —
+                    // they can rewrite the args every later stage (the
+                    // permission gate, MCP dispatch, execution) sees, or
+                    // reject the call outright before any of that runs.
+                    let before = state.plugins.tool_execute_before(&call.function.name, &call.function.arguments);
+                    let mut result = match before {
+                        plugin::ToolBeforeAction::Reject { reason } => tools::ToolResult {
+                            tool_call_id: call.id.clone(),
+                            name: call.function.name.clone(),
+                            output: format!("Blocked by plugin: {reason}"),
+                            success: false,
+                        },
+                        plugin::ToolBeforeAction::Continue { args } => {
+                            let rewritten;
+                            let effective_call = if args == call.function.arguments {
+                                call
+                            } else {
+                                rewritten = tools::ToolCall {
+                                    id: call.id.clone(),
+                                    call_type: call.call_type.clone(),
+                                    function: tools::FunctionCall { name: call.function.name.clone(), arguments: args },
+                                };
+                                &rewritten
+                            };
+
+                            if let Some(refused) = gate_tool_call(state, effective_call, w, PERMISSION_ASK_TIMEOUT).await? {
+                                refused
+                            } else if mcp::is_mcp_tool_name(&effective_call.function.name) {
+                                dispatch_mcp_tool_call(state, effective_call).await
+                            } else {
+                                tools::execute_tool_full(effective_call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await
+                            }
+                        }
                     };
+                    // FEAT-082 tool.execute.after: plugins observe/rewrite
+                    // the final result before it's shown to the client or
+                    // fed back to the LLM.
+                    result.output = state.plugins.tool_execute_after(&result.name, &result.output, result.success);
 
                     send(w, &Response::ToolResultEvent {
                         name: result.name.clone(),
@@ -619,6 +669,9 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
                 } else {
                     format!("Chat reply ({} chars)", full.len())
                 };
+                // FEAT-082 session.compacting: plugins may inject additional
+                // context into the summary before it's stored.
+                let summary = state.plugins.session_compacting(&summary);
                 identity_db::session_close(
                     &idb,
                     &conversation_id,
@@ -638,6 +691,7 @@ async fn dispatch<W: tokio::io::AsyncWrite + Unpin>(
                 let idb = state.identity_db.lock().expect("DB poisoned");
                 identity_db::session_open_with_id(&idb, &id, "chat", Some(&hostname), "")?;
             }
+            state.plugins.session_created(&id); // FEAT-082 session.created
             send(w, &Response::ChatNew { conversation_id: id }).await?;
         }
 
@@ -1532,6 +1586,7 @@ mod dispatch_tests {
             task_limiter: subagent::TaskLimiter::new(3),
             pending_permissions: Mutex::new(HashMap::new()),
             mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
+            plugins: plugin::PluginHost::new(),
         })
     }
 
@@ -1553,6 +1608,7 @@ mod dispatch_tests {
             task_limiter: subagent::TaskLimiter::new(3),
             pending_permissions: Mutex::new(HashMap::new()),
             mcp: mcp::McpContext::new(spawner),
+            plugins: plugin::PluginHost::new(),
         })
     }
 
@@ -1923,6 +1979,144 @@ mod dispatch_tests {
         // by "never attempted".
         let retry_again = { st.mcp.reconnect.lock().unwrap().should_retry("flaky", t0 + chrono::Duration::seconds(10)) };
         assert!(!retry_again, "just retried at this instant, so not due again yet");
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-082: plugin system (event-driven hooks)
+    // -----------------------------------------------------------------
+
+    struct RejectingHookPlugin;
+    impl plugin::Plugin for RejectingHookPlugin {
+        fn name(&self) -> &str { "rejector" }
+        fn on_tool_execute_before(&self, tool: &str, args: &str) -> plugin::ToolBeforeAction {
+            if tool == "bash" { plugin::ToolBeforeAction::Reject { reason: "no bash allowed".into() } } else { plugin::ToolBeforeAction::Continue { args: args.to_string() } }
+        }
+    }
+
+    struct RewritingHookPlugin;
+    impl plugin::Plugin for RewritingHookPlugin {
+        fn name(&self) -> &str { "rewriter" }
+        fn on_tool_execute_before(&self, _tool: &str, args: &str) -> plugin::ToolBeforeAction {
+            let v: Value = serde_json::from_str(args).unwrap_or(serde_json::json!({}));
+            let command = v["command"].as_str().unwrap_or("").to_string();
+            plugin::ToolBeforeAction::Continue { args: serde_json::json!({"command": format!("{command} # plugin-tagged")}).to_string() }
+        }
+        fn on_tool_execute_after(&self, _tool: &str, output: &str, _success: bool) -> String {
+            format!("{output} [after-hook]")
+        }
+        fn on_session_compacting(&self, summary: &str) -> String {
+            format!("{summary} (compacted by plugin)")
+        }
+    }
+
+    /// Drives just the tool-call portion of `agentic_chat`: a `FakeLlm`
+    /// returns `calls` as a `ToolCalls` turn, then a final `Text` turn, and
+    /// this returns everything written to `w` (the raw JSON lines, same
+    /// shape `dispatch` would stream to a client) — a thin harness for
+    /// plugin-hook tests that don't need a full `ChatNew`/`ChatSend` round
+    /// trip through `dispatch`.
+    async fn run_agentic_tool_calls(plugins_setup: impl FnOnce(&plugin::PluginHost), calls: Vec<tools::ToolCall>) -> String {
+        let fake = Arc::new(FakeLlm::new());
+        fake.push_turn(LlmTurn::ToolCalls { assistant_message: serde_json::json!({"role": "assistant", "tool_calls": []}), calls });
+        fake.push_turn(LlmTurn::Text("done".into()));
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        plugins_setup(&st.plugins);
+
+        let mut sink: Vec<u8> = Vec::new();
+        agentic_chat(&st, "conv-1", &[ChatMessage::user("go")], None, &mut sink).await.unwrap();
+        String::from_utf8(sink).unwrap()
+    }
+
+    #[tokio::test]
+    async fn tool_execute_before_reject_blocks_the_tool_before_execution() {
+        // acceptance criteria 2, 4: the plugin's reject wins outright — the
+        // tool never actually runs.
+        let call = tools::ToolCall { id: "c1".into(), call_type: "function".into(), function: tools::FunctionCall { name: "bash".into(), arguments: serde_json::json!({"command": "echo hi"}).to_string() } };
+        let sent = run_agentic_tool_calls(|p| p.register("rejector", Box::new(RejectingHookPlugin)), vec![call]).await;
+        assert!(sent.contains("Blocked by plugin: no bash allowed"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn tool_execute_before_rewrites_args_seen_by_execution() {
+        // acceptance criterion 2: "can modify args"
+        let dir = std::env::temp_dir().join(format!("regin-plugin-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("marker.txt");
+        let p = path.to_str().unwrap().to_string();
+
+        let call = tools::ToolCall {
+            id: "c1".into(), call_type: "function".into(),
+            function: tools::FunctionCall { name: "bash".into(), arguments: serde_json::json!({"command": format!("echo hi > {p}")}).to_string() },
+        };
+        run_agentic_tool_calls(|p| p.register("rewriter", Box::new(RewritingHookPlugin)), vec![call]).await;
+
+        // The plugin appended a shell comment to the command; the file was
+        // still created (the rewritten command still ran, comment and all).
+        assert!(path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn tool_execute_after_rewrites_the_result() {
+        // acceptance criterion 2: "tool.execute.after — observe tool results; can modify response"
+        let call = tools::ToolCall { id: "c1".into(), call_type: "function".into(), function: tools::FunctionCall { name: "bash".into(), arguments: serde_json::json!({"command": "echo hi"}).to_string() } };
+        let sent = run_agentic_tool_calls(|p| p.register("rewriter", Box::new(RewritingHookPlugin)), vec![call]).await;
+        assert!(sent.contains("[after-hook]"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn session_created_hook_fires_on_chat_new() {
+        // acceptance criterion 2: session.created. Not directly observable
+        // via the response stream (it's a side-effecting notification hook,
+        // no return value to thread through) — asserted via a plugin that
+        // records what it saw, inspected after the call.
+        struct RecordingPlugin(std::sync::Mutex<Vec<String>>);
+        impl plugin::Plugin for RecordingPlugin {
+            fn name(&self) -> &str { "recorder" }
+            fn on_session_created(&self, session_id: &str) {
+                self.0.lock().unwrap().push(session_id.to_string());
+            }
+        }
+        let recorder = Arc::new(RecordingPlugin(std::sync::Mutex::new(Vec::new())));
+
+        // PluginHost owns `Box<dyn Plugin>`, so wrap the Arc in a thin
+        // forwarding Plugin impl to observe what was recorded afterward.
+        struct ForwardingPlugin(Arc<RecordingPlugin>);
+        impl plugin::Plugin for ForwardingPlugin {
+            fn name(&self) -> &str { "recorder" }
+            fn on_session_created(&self, session_id: &str) {
+                self.0.on_session_created(session_id);
+            }
+        }
+
+        let st = state();
+        st.plugins.register("recorder", Box::new(ForwardingPlugin(recorder.clone())));
+
+        let conv_id = match run(Request::ChatNew, &st).await.as_slice() {
+            [Response::ChatNew { conversation_id }] => conversation_id.clone(),
+            other => panic!("expected ChatNew, got {other:?}"),
+        };
+
+        assert_eq!(*recorder.0.lock().unwrap(), vec![conv_id]);
+    }
+
+    #[tokio::test]
+    async fn session_compacting_hook_can_annotate_the_stored_summary() {
+        // acceptance criterion 2: session.compacting
+        let fake = Arc::new(FakeLlm::new());
+        fake.push_turn(LlmTurn::Text("reply text".into()));
+        let st = state_with_llm(Some(fake as Arc<dyn LlmClient>));
+        st.plugins.register("rewriter", Box::new(RewritingHookPlugin));
+
+        let conv_id = match run(Request::ChatNew, &st).await.as_slice() {
+            [Response::ChatNew { conversation_id }] => conversation_id.clone(),
+            other => panic!("expected ChatNew, got {other:?}"),
+        };
+        run(Request::ChatSend { conversation_id: conv_id.clone(), messages: vec![ChatMessage::user("hi there")], cwd: None }, &st).await;
+
+        let idb = st.identity_db.lock().unwrap();
+        let session = identity_db::session_get(&idb, &conv_id).unwrap().expect("session exists");
+        assert!(session.session.summary.unwrap_or_default().contains("(compacted by plugin)"), "summary should carry the plugin's annotation");
     }
 
     // -----------------------------------------------------------------

@@ -1,0 +1,11 @@
+[package]
+name = "test-plugin-fixture"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+regin-core = { workspace = true }

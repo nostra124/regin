@@ -1,5 +1,5 @@
 [workspace]
-members = ["regind", "regin-cli", "regin-core"]
+members = ["regind", "regin-cli", "regin-core", "test-plugin-fixture"]
 resolver = "2"
 
 [workspace.package]
@@ -30,3 +30,4 @@ ignore = "0.4"
 globset = "0.4"
 regex = "1"
 diffy = "0.4"
+libloading = "0.8"
