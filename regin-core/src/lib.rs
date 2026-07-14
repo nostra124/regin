@@ -30,6 +30,7 @@ pub mod objective;
 pub mod opskill;
 pub mod permission;
 pub mod persona;
+pub mod plugin;
 pub mod planning;
 pub mod posture;
 pub mod promotion;

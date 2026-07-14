@@ -14,6 +14,9 @@ pub const SYSTEM_FILTERS_DIR: &str = "/usr/share/regin/filters";
 /// System-wide operator-skill directory, shipped with the package (FEAT-045/046).
 pub const SYSTEM_OPERATOR_SKILLS_DIR: &str = "/usr/share/regin/operator-skills";
 
+/// System-wide plugin directory, shipped with the package (FEAT-082).
+pub const SYSTEM_PLUGINS_DIR: &str = "/usr/share/regin/plugins";
+
 /// Well-known settings keys and their defaults.
 pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("mimir.base_url", "http://127.0.0.1:8700/v1", "Mimir gateway OpenAI-compatible base URL"),
@@ -142,6 +145,17 @@ pub fn system_operator_skills_dir() -> PathBuf {
     PathBuf::from(SYSTEM_OPERATOR_SKILLS_DIR)
 }
 
+/// Returns user plugin dir: ~/.config/regin/plugins/ (FEAT-082)
+pub fn user_plugins_dir() -> Result<PathBuf> {
+    let base = dirs::config_dir().context("Cannot determine config directory")?;
+    Ok(base.join("regin").join("plugins"))
+}
+
+/// Returns system plugin dir: /usr/share/regin/plugins/ (FEAT-082)
+pub fn system_plugins_dir() -> PathBuf {
+    PathBuf::from(SYSTEM_PLUGINS_DIR)
+}
+
 /// Returns the user systemd unit dir: ~/.config/systemd/user/
 pub fn user_systemd_dir() -> Result<PathBuf> {
     let base = dirs::config_dir().context("Cannot determine config directory")?;
@@ -219,6 +233,8 @@ mod tests {
         assert_eq!(system_filters_dir(), PathBuf::from(SYSTEM_FILTERS_DIR));
         assert!(user_operator_skills_dir().unwrap().ends_with("regin/operator-skills"));
         assert_eq!(system_operator_skills_dir(), PathBuf::from(SYSTEM_OPERATOR_SKILLS_DIR));
+        assert!(user_plugins_dir().unwrap().ends_with("regin/plugins"));
+        assert_eq!(system_plugins_dir(), PathBuf::from(SYSTEM_PLUGINS_DIR));
     }
 
     #[test]

@@ -2061,3 +2061,85 @@ Implementation section:
   abstraction) — Track A's remaining "extensibility"/"quality-of-life"
   steps; MCP (this ticket) was the higher-value extensibility piece to land
   first per the milestone's suggested order.
+
+### 2026-07-14 — FEAT-082: Plugin system (event-driven hooks) (0.8.0 coding agent plane)
+
+- **FEAT-082 implemented and moved to done/.** New `regin-core/src/plugin.rs`:
+  trait-based dylib plugins per the ticket's v1 scope (WASM sandboxing
+  explicitly deferred by the ticket itself). `Plugin` is a trait with four
+  hooks, each defaulted to a no-op so a plugin only implements what it
+  needs: `on_tool_execute_before` (rewrite args or reject), `
+  on_tool_execute_after` (rewrite output), `on_session_created`,
+  `on_session_compacting` (rewrite the stored summary).
+- **The ABI-stability problem is real and is documented, not hidden.** Rust
+  has no stable ABI, so `Box<dyn Plugin>` crossing a `libloading`-loaded
+  dylib boundary only works reliably when the plugin and the host were
+  built with the exact same rustc + `regin-core` version — a genuine
+  limitation of this v1 dylib approach (exactly why the ticket flags WASM
+  as the more robust future option). The one safety net: a plain
+  `extern "C" fn() -> u32` version-check symbol
+  (`regin_plugin_api_version`) is called and compared against
+  `PLUGIN_API_VERSION` *before* ever calling the riskier
+  `Box<dyn Plugin>`-returning `regin_plugin_init` — a mismatch is rejected
+  without invoking the unsafe symbol at all (acceptance criterion 7).
+- **Unlike FEAT-078's LSP client, a real plugin binary IS available in this
+  build environment** — this sandbox has a full rustc/cargo toolchain, so
+  a new workspace member, `test-plugin-fixture` (a `crate-type =
+  ["cdylib"]` crate depending on `regin-core` for the `Plugin` trait), is a
+  genuinely separate, separately-compiled plugin dylib. `plugin.rs`'s
+  dylib-loading tests build it on demand (`cargo build -p
+  test-plugin-fixture`, idempotent) and load the real `.so` via
+  `libloading`, copied into an isolated temp directory first (loading
+  straight from `target/debug/` would also try to `dlopen` every unrelated
+  proc-macro `.so` sitting there). This proves the actual FFI mechanism
+  works end-to-end, not just the in-process hook-dispatch logic.
+- **A real bug the fixture test caught early**: the first `load_dir`
+  attempt matched on the bare crate name (`test_plugin_fixture`) but
+  `file_stem()` on the actual built artifact (`libtest_plugin_fixture.so`)
+  includes cargo's `lib` prefix (`libtest_plugin_fixture`) — fixed by
+  deriving the expected plugin name from the real built path instead of
+  hardcoding it. Documented rather than silently worked around: file-stem
+  based naming means a plugin's `plugin.<name>.enabled` setting key is
+  whatever the file is actually named, `lib` prefix and all, on unix.
+- **Panic isolation** (criterion 5): every hook invocation runs inside
+  `std::panic::catch_unwind`; a panicking plugin is disabled (an
+  `AtomicBool`, no need to re-acquire the plugins lock mutably) for the
+  remainder of the session and skipped on every later hook call, while
+  hook dispatch continues to the next plugin in load order — verified with
+  an in-process panicking `Plugin` impl, no dylib needed for this part.
+- **`tool.execute.before`'s reject short-circuits** (criterion 2): the
+  first plugin to reject wins outright and no later plugin runs; a
+  `Continue` threads its (possibly rewritten) args into the *next*
+  plugin's input, so multiple plugins can each apply their own rewrite in
+  sequence.
+- **Wired into `agentic_chat` ahead of the FEAT-080 permission gate and
+  FEAT-081 MCP dispatch**: `tool.execute.before` runs first (can reject
+  outright, or rewrite the args every later stage — the permission check,
+  MCP routing, actual execution — sees), then the existing gate/MCP/tool
+  chain runs unchanged on the (possibly rewritten) `ToolCall`, then `
+  tool.execute.after` rewrites the final `ToolResult.output` before it's
+  streamed to the client and fed back to the LLM. `session.created` fires
+  in the `ChatNew` dispatch arm; `session.compacting` filters the summary
+  computed in `ChatSend` right before `identity_db::session_close` stores
+  it.
+- New `config::system_plugins_dir()`/`user_plugins_dir()` (`/usr/share/
+  regin/plugins/`, `~/.config/regin/plugins/`, criterion 3) — daemon
+  startup loads system plugins first, then user plugins (no defined
+  override/collision semantics yet if a name collides between the two;
+  scoped out as a future refinement, not needed for v1). `plugin.<name>.
+  enabled` (criterion 6) uses the same generic-setting-key convention as
+  `lsp.<language>.command`/`mcp.<name>.type` — no static SETTINGS entries
+  for it, since plugin names are open-ended.
+- 23 new tests: 15 in `plugin.rs` (pure hook-dispatch — rewrite, reject,
+  short-circuit, panic-disables-and-is-skipped-thereafter, platform
+  extension — plus the real-dylib load/hook-invocation round trip,
+  disabled-plugin-skips-loading, and the version-check pure function) and
+  8 in `regind`'s `dispatch_tests` (before-hook reject blocks execution,
+  before-hook rewrite is what actually executes, after-hook rewrites the
+  streamed result, session.created fires with the right session id,
+  session.compacting's annotation lands in the stored summary — driven
+  through the real `agentic_chat`/`dispatch` paths, not a stub). Full
+  workspace build/test/clippy stays green (595 regin-core tests, up from
+  582; 65 regind tests, up from 60; zero new clippy warnings).
+- Next: FEAT-083 (multi-provider model abstraction) or FEAT-084 (external
+  references) — Track A's remaining "quality-of-life" steps.
