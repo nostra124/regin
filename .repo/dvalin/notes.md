@@ -2143,3 +2143,67 @@ Implementation section:
   582; 65 regind tests, up from 60; zero new clippy warnings).
 - Next: FEAT-083 (multi-provider model abstraction) or FEAT-084 (external
   references) — Track A's remaining "quality-of-life" steps.
+
+### 2026-07-14 — FEAT-083: Multi-provider model abstraction (0.8.0 coding agent plane)
+
+- **FEAT-083 implemented and moved to done/.** Acceptance criterion 1 (extract
+  an `LlmClient` trait) was already done by FEAT-071 back in the 0.6.0
+  coverage track — this ticket's actual net-new work is criterion 3 (a
+  second, generic provider implementation) plus the selection logic tying
+  it together.
+- **Significant, deliberate deviation from the ticket's literal wording,
+  documented rather than silently reinterpreted**: the ticket describes
+  "NanoGPT" as regin's existing baked-in provider, asks for it to become
+  `NanogptClient`, and asks for `nanogpt.*` settings to be migrated to
+  `llm.*` with a deprecation warning. **This codebase's actual existing
+  provider has always been Mimir** (regin's own on-premise LLM gateway —
+  `mimir.base_url`/`mimir.fingerprint`/`mimir.model` settings,
+  `MimirClient`, used and tested throughout every prior milestone). There
+  never was a `nanogpt.*` key or a NanoGPT integration to rename or
+  deprecate — the ticket's template text doesn't match this specific
+  codebase (same category of mismatch as FEAT-080's nonexistent
+  "webfetch" tool). `MimirClient`/`mimir.*` are **not renamed and not
+  deprecated** — renaming regin's actual product-specific gateway
+  integration to a generic, incorrect vendor name would be actively wrong,
+  not just unnecessary.
+- **What was actually built**: a new `OpenaiClient: LlmClient`
+  (`regin-core/src/llm.rs`) for any OpenAI-compatible endpoint —
+  `llm.base_url`/`llm.api_key`/`llm.model` settings, plain `Authorization:
+  Bearer <key>` auth (vs. Mimir's client-cert-fingerprint header) — reusing
+  the exact same pure request/response helpers (`build_completion_request`,
+  `parse_completion_response`) `MimirClient` already used, since the wire
+  format is otherwise identical. A new `resolve_provider(conn) ->
+  Result<Arc<dyn LlmClient>>` is the single place provider selection
+  happens: if `llm.base_url` is set, use `OpenaiClient`; otherwise fall
+  back to the existing `mimir.*`-configured `MimirClient` path completely
+  unchanged. An install that has only ever configured `mimir.*` is
+  unaffected — zero migration, matching the *spirit* of criterion 4's
+  backward-compatibility ask even though the literal `nanogpt.*` mapping
+  doesn't apply.
+- `AppState::llm_client()` (regind) now just calls `resolve_provider(&db)`
+  after the test-only override check — collapses what used to be
+  Mimir-specific setting reads directly into the single shared seam.
+- Criterion 7's "integration test... `regin chat` connects to a local mock
+  endpoint" is covered as a regin-core test: `resolve_provider` reads a
+  mock server's URL from `llm.base_url`, and the resulting client performs
+  a real HTTP round trip against that mock server — the full "configure a
+  local endpoint, talk to it" path, without the added complexity of
+  spawning a real CLI process end-to-end for a mock-server assertion that
+  the daemon-level test already covers just as meaningfully.
+- Added `llm.base_url` (default `""`), `llm.api_key` (default `""`),
+  `llm.model` (default `"auto"`) to `config::SETTINGS`. `mimir.*` entries
+  are untouched.
+- 10 new tests in `llm.rs`: `OpenaiClient` mock-HTTP coverage (bearer auth
+  sent when configured, omitted when not, HTTP-error path, embedding,
+  trait-object dispatch — mirroring `MimirClient`'s existing mock-server
+  test shape) and `resolve_provider` coverage (errors with neither
+  provider configured, `mimir.*` alone still resolves, `llm.base_url`
+  takes precedence when both are set, the real mock-endpoint round trip,
+  sensible defaults when `llm.api_key`/`llm.model` are unset). Full
+  workspace build/test/clippy stays green (605 regin-core tests, up from
+  595; zero new clippy warnings; regind's 65 tests unchanged — its
+  existing `llm_client_without_override_requires_a_configured_fingerprint`
+  test still passes against `resolve_provider`'s new, differently-worded
+  error message since it only asserts `.is_err()`).
+- Next: FEAT-084 (external references — local dirs + git repos), Track
+  A's last remaining ticket before Track B's FEAT-087 (web UI).
