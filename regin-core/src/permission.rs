@@ -37,27 +37,39 @@ impl PermissionLevel {
     }
 }
 
-/// One glob-pattern -> level rule for `bash` command matching (acceptance
-/// criterion 2). Stored as a JSON *array* (`permission.bash.patterns`)
+/// One glob-pattern -> level rule for pattern-based matching (acceptance
+/// criterion 2, extended by FEAT-081 acceptance criterion 7 for MCP tool
+/// names). Stored as a JSON *array* (e.g. `permission.bash.patterns`)
 /// rather than a JSON object — a JSON array has an unambiguous element
 /// order to drive "last match wins" from; a JSON object's key order isn't
 /// something callers should have to rely on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BashPatternRule {
+pub struct PatternRule {
     pub pattern: String,
     pub level: PermissionLevel,
 }
 
-/// Resolve the effective permission level for `tool`. For `bash`, `command`
-/// (the command string about to run) is matched against
-/// `permission.bash.patterns` — a JSON array of [`BashPatternRule`], last
-/// match wins (criterion 2). With no match (or no patterns configured), and
-/// for every other tool, falls back to the flat `permission.<tool>` setting
-/// (default `allow` — criterion 5).
+/// Resolve the effective permission level for `tool`. Two tools get
+/// pattern-based matching before the flat fallback:
+/// - `bash`: `command` (the command string about to run) is matched against
+///   `permission.bash.patterns` (criterion 2).
+/// - any MCP tool (`mcp_<server>_<tool>`, FEAT-081): the full tool name is
+///   matched against `permission.mcp.patterns` (FEAT-081 criterion 7), e.g.
+///   a rule `{"pattern": "mcp_myserver_*", "level": "ask"}` gates every tool
+///   from `myserver`.
+///
+/// Both use a JSON array of [`PatternRule`], last match wins. With no match
+/// (or no patterns configured), and for every other tool, falls back to the
+/// flat `permission.<tool>` setting (default `allow` — criterion 5).
 pub fn resolve_permission(conn: &rusqlite::Connection, tool: &str, command: Option<&str>) -> Result<PermissionLevel> {
     if tool == "bash"
         && let Some(cmd) = command
-        && let Some(level) = resolve_bash_pattern(conn, cmd)?
+        && let Some(level) = resolve_pattern_rules(conn, "permission.bash.patterns", cmd)?
+    {
+        return Ok(level);
+    }
+    if tool.starts_with("mcp_")
+        && let Some(level) = resolve_pattern_rules(conn, "permission.mcp.patterns", tool)?
     {
         return Ok(level);
     }
@@ -66,15 +78,15 @@ pub fn resolve_permission(conn: &rusqlite::Connection, tool: &str, command: Opti
     Ok(PermissionLevel::parse(&raw).unwrap_or(PermissionLevel::Allow))
 }
 
-fn resolve_bash_pattern(conn: &rusqlite::Connection, command: &str) -> Result<Option<PermissionLevel>> {
-    let raw = crate::db::setting_get(conn, "permission.bash.patterns")?;
+fn resolve_pattern_rules(conn: &rusqlite::Connection, setting_key: &str, subject: &str) -> Result<Option<PermissionLevel>> {
+    let raw = crate::db::setting_get(conn, setting_key)?;
     if raw.trim().is_empty() || raw.trim() == "[]" {
         return Ok(None);
     }
-    let rules: Vec<BashPatternRule> = serde_json::from_str(&raw).unwrap_or_default();
+    let rules: Vec<PatternRule> = serde_json::from_str(&raw).unwrap_or_default();
     let mut matched = None;
     for rule in &rules {
-        if glob_matches(&rule.pattern, command) {
+        if glob_matches(&rule.pattern, subject) {
             matched = Some(rule.level);
         }
     }
@@ -181,6 +193,29 @@ mod tests {
         let c = conn();
         crate::db::setting_set(&c, "permission.bash.patterns", r#"[{"pattern":"*","level":"deny"}]"#).unwrap();
         assert_eq!(resolve_permission(&c, "bash", None).unwrap(), PermissionLevel::Allow, "no command to match against -> flat default");
+    }
+
+    // --- FEAT-081 criterion 7: MCP tools gated by pattern ------------------
+
+    #[test]
+    fn mcp_tools_are_gated_by_pattern_on_the_full_tool_name() {
+        let c = conn();
+        crate::db::setting_set(
+            &c, "permission.mcp.patterns",
+            r#"[{"pattern":"mcp_myserver_*","level":"ask"},{"pattern":"mcp_myserver_dangerous_op","level":"deny"}]"#,
+        ).unwrap();
+
+        assert_eq!(resolve_permission(&c, "mcp_myserver_query", None).unwrap(), PermissionLevel::Ask);
+        assert_eq!(resolve_permission(&c, "mcp_myserver_dangerous_op", None).unwrap(), PermissionLevel::Deny, "later, more specific rule wins");
+        assert_eq!(resolve_permission(&c, "mcp_othersever_query", None).unwrap(), PermissionLevel::Allow, "no matching pattern -> default allow");
+    }
+
+    #[test]
+    fn non_mcp_tools_are_unaffected_by_mcp_patterns() {
+        let c = conn();
+        crate::db::setting_set(&c, "permission.mcp.patterns", r#"[{"pattern":"*","level":"deny"}]"#).unwrap();
+        assert_eq!(resolve_permission(&c, "bash", Some("echo hi")).unwrap(), PermissionLevel::Allow);
+        assert_eq!(resolve_permission(&c, "read_file", None).unwrap(), PermissionLevel::Allow);
     }
 
     // --- criterion 7: "cache invalidation" == there is no cache -----------

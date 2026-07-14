@@ -24,6 +24,7 @@ pub mod intent_gate;
 pub mod kpi;
 pub mod llm;
 pub mod lsp;
+pub mod mcp;
 pub mod mode;
 pub mod objective;
 pub mod opskill;

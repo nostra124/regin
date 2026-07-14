@@ -4,6 +4,7 @@ use regin_core::{
     audit, bus, config, context, db, desired, filters, goal, identity_db, kpi,
     llm::{LlmClient, LlmTurn, MimirClient},
     lsp,
+    mcp,
     objective,
     opskill,
     greeting,
@@ -55,6 +56,10 @@ struct AppState {
     /// by request_id rather than tool name since multiple asks can be
     /// in-flight (e.g. across concurrent subagents) at once.
     pending_permissions: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    /// Connected MCP servers + their cached tool lists (FEAT-081). Always
+    /// constructed; empty until `mcp_reconnect_checker`'s startup pass (or a
+    /// test) connects a configured server.
+    mcp: mcp::McpContext,
 }
 
 unsafe impl Send for AppState {}
@@ -153,13 +158,39 @@ async fn main() -> Result<()> {
         lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
         task_limiter: subagent::TaskLimiter::new(task_max_concurrency),
         pending_permissions: Mutex::new(HashMap::new()),
+        mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
     });
+
+    // FEAT-081 acceptance criterion 3: connect every configured MCP server
+    // on startup. Best-effort — one server's failure doesn't block the
+    // daemon or the others; `mcp_reconnect_checker` retries it later.
+    {
+        let configs: Vec<mcp::McpServerConfig> = {
+            let db = state.db.lock().expect("DB poisoned");
+            mcp::discover_configured_servers(&db)
+                .into_iter()
+                .filter_map(|(name, r)| match r {
+                    Ok(c) => Some(c),
+                    Err(e) => { warn!(server = %name, "MCP config error: {e:#}"); None }
+                })
+                .collect()
+        };
+        for (name, r) in state.mcp.connect_all(&configs).await {
+            match r {
+                Ok(n) => info!(server = %name, tools = n, "Connected to MCP server"),
+                Err(e) => warn!(server = %name, "Failed to connect to MCP server: {e:#}"),
+            }
+        }
+    }
 
     let sched_state = Arc::clone(&state);
     tokio::spawn(async move { schedule_checker(sched_state).await });
 
     let refl_state = Arc::clone(&state);
     tokio::spawn(async move { reflection_checker(refl_state).await });
+
+    let mcp_state = Arc::clone(&state);
+    tokio::spawn(async move { mcp_reconnect_checker(mcp_state).await });
 
     let cleanup = socket_path.clone();
     let result = tokio::select! {
@@ -276,7 +307,16 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
     let client = state.llm_client()?;
     // FEAT-011: a configured persona scopes the tool ceiling + shapes the prompt.
     let persona = regin_core::persona::Persona::from_env().unwrap_or(None);
-    let tool_defs = tools::tool_definitions_for(persona.as_ref());
+    let mut tool_defs = tools::tool_definitions_for(persona.as_ref());
+    // FEAT-081: MCP tools aren't part of Persona's static capability ceiling
+    // (FEAT-011) — they're gated by FEAT-080's permission system instead
+    // (which already covers `mcp_*` names via pattern rules). Only offered
+    // to an *unscoped* persona, though: a persona that deliberately lists a
+    // specific tool set shouldn't have arbitrary extra tools silently
+    // appended to what the LLM can see.
+    if persona.as_ref().is_none_or(|p| p.tools.is_empty()) {
+        tool_defs.extend(state.mcp.tool_definitions());
+    }
 
     // Build full message list: persona preamble + system context + user conversation
     let mut msgs: Vec<Value> = Vec::new();
@@ -307,6 +347,8 @@ async fn agentic_chat<W: tokio::io::AsyncWrite + Unpin>(
 
                     let result = if let Some(refused) = gate_tool_call(state, call, w, PERMISSION_ASK_TIMEOUT).await? {
                         refused
+                    } else if mcp::is_mcp_tool_name(&call.function.name) {
+                        dispatch_mcp_tool_call(state, call).await
                     } else {
                         tools::execute_tool_full(call, cwd, persona.as_ref(), &state.undo, &state.db, &state.lsp, client.as_ref(), &state.task_limiter).await
                     };
@@ -406,6 +448,57 @@ async fn gate_tool_call<W: tokio::io::AsyncWrite + Unpin>(
                 }))
             }
         }
+    }
+}
+
+/// Routes an `mcp_<server>_<tool>` call (acceptance criterion 4) to
+/// `state.mcp` and folds the result into a [`tools::ToolResult`], the same
+/// shape every other tool produces.
+async fn dispatch_mcp_tool_call(state: &Arc<AppState>, call: &tools::ToolCall) -> tools::ToolResult {
+    let arguments: Value = serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
+    match state.mcp.dispatch(&call.function.name, arguments).await {
+        Ok(r) => tools::ToolResult { tool_call_id: call.id.clone(), name: call.function.name.clone(), output: r.text, success: !r.is_error },
+        Err(e) => tools::ToolResult { tool_call_id: call.id.clone(), name: call.function.name.clone(), output: format!("MCP call failed: {e:#}"), success: false },
+    }
+}
+
+/// One MCP reconnect pass (FEAT-081 acceptance criterion 5): for every
+/// configured server that isn't currently connected, retry it if its
+/// backoff window has elapsed and it hasn't exhausted
+/// `mcp::MAX_RECONNECT_ATTEMPTS`. Extracted from `mcp_reconnect_checker`'s
+/// loop body so it's directly testable without a real 30s timer (same
+/// pattern as `run_due_schedules`).
+async fn run_mcp_reconnect_tick(state: &Arc<AppState>, now: chrono::DateTime<chrono::Utc>) {
+    let configs: Vec<mcp::McpServerConfig> = {
+        let db = state.db.lock().expect("DB poisoned");
+        mcp::discover_configured_servers(&db).into_iter().filter_map(|(_, r)| r.ok()).collect()
+    };
+    for config in &configs {
+        if state.mcp.is_connected(&config.name) {
+            continue;
+        }
+        let should = { state.mcp.reconnect.lock().expect("poisoned").should_retry(&config.name, now) };
+        if !should {
+            continue;
+        }
+        match state.mcp.connect_one(config).await {
+            Ok(n) => {
+                state.mcp.reconnect.lock().expect("poisoned").record_success(&config.name);
+                info!(server = %config.name, tools = n, "Reconnected to MCP server");
+            }
+            Err(e) => {
+                state.mcp.reconnect.lock().expect("poisoned").record_failure(&config.name, now);
+                warn!(server = %config.name, "MCP reconnect failed: {e:#}");
+            }
+        }
+    }
+}
+
+async fn mcp_reconnect_checker(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        run_mcp_reconnect_tick(&state, chrono::Utc::now()).await;
     }
 }
 
@@ -1438,6 +1531,28 @@ mod dispatch_tests {
             lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
             task_limiter: subagent::TaskLimiter::new(3),
             pending_permissions: Mutex::new(HashMap::new()),
+            mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
+        })
+    }
+
+    /// Same as `state_with_llm`, but also with an injected `McpSpawner`
+    /// (typically a fake) instead of the real `ProcessMcpSpawner` — for
+    /// tests exercising MCP tool discovery/dispatch without a real MCP
+    /// server.
+    fn state_with_llm_and_mcp_spawner(llm: Option<Arc<dyn LlmClient>>, spawner: Arc<dyn mcp::McpSpawner>) -> Arc<AppState> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let identity_conn = rusqlite::Connection::open_in_memory().unwrap();
+        identity_db::init_identity_schema(&identity_conn).unwrap();
+        Arc::new(AppState {
+            db: Mutex::new(conn),
+            identity_db: Mutex::new(identity_conn),
+            llm_override: llm,
+            undo: Mutex::new(undo::UndoStore::new()),
+            lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
+            task_limiter: subagent::TaskLimiter::new(3),
+            pending_permissions: Mutex::new(HashMap::new()),
+            mcp: mcp::McpContext::new(spawner),
         })
     }
 
@@ -1698,6 +1813,116 @@ mod dispatch_tests {
         dispatch(Request::PermissionResponse { request_id: "no-such-id".into(), allow: true }, &st, &mut sink).await.unwrap();
         let sent = String::from_utf8(sink).unwrap();
         assert!(sent.contains("Unknown or expired permission request"), "{sent}");
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-081: MCP client protocol (local + remote)
+    // -----------------------------------------------------------------
+
+    struct FakeMcpToolClient(Vec<mcp::McpToolDef>);
+    #[async_trait::async_trait]
+    impl mcp::McpClient for FakeMcpToolClient {
+        async fn list_tools(&self, _timeout: std::time::Duration) -> Result<Vec<mcp::McpToolDef>> {
+            Ok(self.0.clone())
+        }
+        async fn call_tool(&self, name: &str, arguments: Value, _timeout: std::time::Duration) -> Result<mcp::McpToolCallResult> {
+            Ok(mcp::McpToolCallResult { text: format!("{name} called with {arguments}"), is_error: false })
+        }
+    }
+
+    struct FakeMcpToolSpawner(Vec<mcp::McpToolDef>);
+    #[async_trait::async_trait]
+    impl mcp::McpSpawner for FakeMcpToolSpawner {
+        async fn connect(&self, _config: &mcp::McpServerConfig) -> Result<Arc<dyn mcp::McpClient>> {
+            Ok(Arc::new(FakeMcpToolClient(self.0.clone())))
+        }
+    }
+
+    fn an_mcp_tool(name: &str) -> mcp::McpToolDef {
+        mcp::McpToolDef { name: name.to_string(), description: format!("{name} tool"), input_schema: serde_json::json!({"type": "object"}) }
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_are_offered_to_an_unscoped_chat_and_dispatched_on_call() {
+        // acceptance criteria 3, 4: registered under mcp_<server>_<tool>,
+        // executed through the daemon's tool-call loop end-to-end.
+        let fake = Arc::new(FakeLlm::new());
+        fake.push_turn(LlmTurn::ToolCalls {
+            assistant_message: serde_json::json!({"role": "assistant", "tool_calls": []}),
+            calls: vec![tools::ToolCall {
+                id: "c1".into(),
+                call_type: "function".into(),
+                function: tools::FunctionCall { name: "mcp_files_search".into(), arguments: serde_json::json!({"q": "x"}).to_string() },
+            }],
+        });
+        fake.push_turn(LlmTurn::Text("done".into()));
+
+        let st = state_with_llm_and_mcp_spawner(Some(fake as Arc<dyn LlmClient>), Arc::new(FakeMcpToolSpawner(vec![an_mcp_tool("search")])));
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "mcp.files.type", "local").unwrap(); db::setting_set(&db, "mcp.files.command", r#"["echo"]"#).unwrap(); }
+        st.mcp.connect_all(&[mcp::McpServerConfig { name: "files".into(), transport: mcp::McpTransportConfig::Local { command: vec!["echo".into()] }, timeout: std::time::Duration::from_secs(5) }]).await;
+
+        let conv_id = match run(Request::ChatNew, &st).await.as_slice() {
+            [Response::ChatNew { conversation_id }] => conversation_id.clone(),
+            other => panic!("expected ChatNew, got {other:?}"),
+        };
+        let resp = run(Request::ChatSend { conversation_id: conv_id, messages: vec![ChatMessage::user("search for x")], cwd: None }, &st).await;
+
+        assert!(
+            resp.iter().any(|r| matches!(r, Response::ToolResultEvent { name, success, output }
+                if name == "mcp_files_search" && *success && output.contains("search called with"))),
+            "expected the MCP tool result, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_tool_call_reports_a_clean_error_for_an_unroutable_tool() {
+        let st = state_with_mcp_only();
+        let call = tools::ToolCall { id: "c1".into(), call_type: "function".into(), function: tools::FunctionCall { name: "mcp_nosuch_tool".into(), arguments: "{}".into() } };
+        let r = dispatch_mcp_tool_call(&st, &call).await;
+        assert!(!r.success);
+        assert!(r.output.contains("MCP call failed"));
+    }
+
+    fn state_with_mcp_only() -> Arc<AppState> {
+        state_with_llm_and_mcp_spawner(None, Arc::new(FakeMcpToolSpawner(vec![])))
+    }
+
+    #[tokio::test]
+    async fn reconnect_tick_connects_a_configured_server_that_is_not_yet_connected() {
+        // acceptance criterion 5, happy path
+        let st = state_with_mcp_only();
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "mcp.files.type", "local").unwrap(); db::setting_set(&db, "mcp.files.command", r#"["echo"]"#).unwrap(); }
+        assert!(!st.mcp.is_connected("files"));
+
+        run_mcp_reconnect_tick(&st, chrono::Utc::now()).await;
+        assert!(st.mcp.is_connected("files"));
+    }
+
+    #[tokio::test]
+    async fn reconnect_tick_respects_the_backoff_window() {
+        // acceptance criterion 5: a failing server isn't hammered every tick
+        struct AlwaysFailsSpawner;
+        #[async_trait::async_trait]
+        impl mcp::McpSpawner for AlwaysFailsSpawner {
+            async fn connect(&self, _config: &mcp::McpServerConfig) -> Result<Arc<dyn mcp::McpClient>> {
+                Err(anyhow!("connection refused"))
+            }
+        }
+        let st = state_with_llm_and_mcp_spawner(None, Arc::new(AlwaysFailsSpawner));
+        { let db = st.db.lock().unwrap(); db::setting_set(&db, "mcp.flaky.type", "local").unwrap(); db::setting_set(&db, "mcp.flaky.command", r#"["echo"]"#).unwrap(); }
+
+        let t0 = chrono::Utc::now();
+        run_mcp_reconnect_tick(&st, t0).await;
+        assert!(!st.mcp.is_connected("flaky"));
+        let attempts_after_first = { st.mcp.reconnect.lock().unwrap().should_retry("flaky", t0) };
+        assert!(!attempts_after_first, "still inside the backoff window immediately after a failure");
+
+        run_mcp_reconnect_tick(&st, t0 + chrono::Duration::seconds(10)).await;
+        // Still failing (same spawner), but should have retried once more —
+        // observable via should_retry still being governed by backoff, not
+        // by "never attempted".
+        let retry_again = { st.mcp.reconnect.lock().unwrap().should_retry("flaky", t0 + chrono::Duration::seconds(10)) };
+        assert!(!retry_again, "just retried at this instant, so not due again yet");
     }
 
     // -----------------------------------------------------------------

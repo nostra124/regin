@@ -1971,3 +1971,93 @@ Implementation section:
 - Next: FEAT-081 (MCP client protocol) / FEAT-082 (plugin system) — Track
   A's "extensibility" step, per the milestone's suggested order MCP lands
   first (existing ecosystem of servers).
+
+### 2026-07-14 — FEAT-081: MCP client protocol (local + remote) (0.8.0 coding agent plane)
+
+- **FEAT-081 implemented and moved to done/.** New `regin-core/src/mcp.rs`: a
+  hand-rolled MCP (Model Context Protocol) client rather than pulling in a
+  crate — MCP's actual surface for a tool-calling client is small
+  (`initialize`/`initialized`, `tools/list`, `tools/call`), same call as
+  FEAT-078's LSP client.
+- **Local transport**: newline-delimited JSON-RPC 2.0 over stdio (not
+  `Content-Length`-framed like LSP — MCP's stdio transport is simpler).
+  Request/response pairs are correlated by numeric id via a background
+  reader task + a `oneshot` per in-flight call (unlike LSP, which only ever
+  issues one real request and otherwise just listens for push
+  notifications — MCP genuinely needs request/response correlation).
+- **Remote transport is intentionally the simple subset of MCP's Streamable
+  HTTP**: one JSON-RPC request per HTTP POST, no persistent SSE-streamed
+  session, no `initialize` handshake (there's no session to initialize).
+  Documented as a deliberate scope simplification, not an oversight — full
+  session-based Streamable HTTP is a bigger transport to build for
+  uncertain payoff at this stage.
+- **Unlike FEAT-078's LSP client, MCP's wire protocol needed no real server
+  binary to test properly.** `StdioMcpProcess::handshake` takes an
+  arbitrary reader/writer pair (not just a spawned `Child`), so tests drive
+  it over a `tokio::io::duplex` pair with a hand-written fake server task
+  on the other end — the handshake, `tools/list`, `tools/call`, and all of
+  criterion 8's error paths (server crash, timeout, invalid JSON) are
+  exercised as real protocol round trips, not just framing unit tests.
+- **A real bug caught by writing the crash/invalid-JSON tests**: the
+  background reader originally just `break`'d out of its loop on any error
+  without touching the `pending` map — a call already in flight would then
+  hang until its full timeout instead of failing fast. Fixed by clearing
+  every pending sender (which resolves each waiter's `oneshot::Receiver`
+  immediately with an error) right after the reader loop exits, whatever
+  the reason. Both the "server crash" and "invalid JSON" tests now assert
+  the fast, clear "connection closed" error rather than a slow timeout.
+- **Server discovery has no dedicated registry command/setting** — `mcp.
+  <name>.type`/`.command`/`.url`/`.headers`/`.timeout_secs` are plain
+  generic settings (same convention as `lsp.<language>.command`); the *set*
+  of configured server names is recovered by scanning `db::setting_list`
+  for keys matching `mcp.<name>.type` (criterion 2). One malformed server's
+  config (bad JSON, unknown type) doesn't block discovering the others —
+  `discover_configured_servers` returns a `Vec<(name, Result<config>)>` so
+  each server's resolution is independent, same fail-safe-per-item
+  convention as `run_due_schedules`.
+- **Tool registration + dispatch** (criteria 3, 4): `McpContext` caches each
+  connected server's `tools/list` result and exposes them as
+  `mcp_<server>_<tool>` `ToolDef`s. `resolve_mcp_tool_name` picks the
+  *longest* matching known server name when splitting a full tool name back
+  into `(server, tool)`, so a server whose own name contains an underscore
+  isn't ambiguous with a shorter same-prefix server name. Per-server
+  timeout (criterion 6) travels with the connected-server record and wraps
+  every `tools/call`.
+- **MCP tools are gated by FEAT-080's permission system, not FEAT-011's
+  Persona ceiling** (criterion 7) — `permission::resolve_permission` (from
+  FEAT-080) already generalizes: `PatternRule`/`resolve_pattern_rules` are
+  now shared between `permission.bash.patterns` and a new
+  `permission.mcp.patterns` (same JSON-array, last-match-wins shape),
+  matched against the full `mcp_<server>_<tool>` name — a rule like
+  `{"pattern": "mcp_myserver_*", "level": "ask"}` gates a whole server at
+  once. `agentic_chat` only offers MCP tool definitions to the LLM when the
+  active persona is unscoped (empty `tools` list) — a persona that
+  deliberately lists a specific tool set shouldn't have arbitrary MCP tools
+  silently appended to what it can see.
+- **Reconnect with backoff, max 5 retries** (criterion 5): `ReconnectTracker`
+  takes `now` explicitly (fake-clock testable, same convention as `lsp::
+  Debouncer`) and tracks per-server attempt count + next-eligible-retry
+  time; `backoff_delay(attempt)` is 2s/4s/8s/16s/32s, capped at attempt 5.
+  A new `mcp_reconnect_checker` background task (mirrors `schedule_checker`/
+  `reflection_checker`'s existing shape) ticks every 30s and calls the
+  directly-testable `run_mcp_reconnect_tick(state, now)` — same
+  extract-the-tick-body-for-testability pattern as `run_due_schedules`.
+  Every spawned local server process uses `kill_on_drop(true)` (same as
+  FEAT-078's LSP servers), so `regind` shutting down disconnects them
+  (criterion 5's last clause) without any explicit cleanup code.
+- 45 new tests: 19 in `mcp.rs` (config discovery incl. malformed/unknown-
+  type/no-servers, tool-name resolution incl. longest-match, backoff delay
+  + tracker retry/give-up/success-clears, the full stdio handshake/tools-
+  list/tool-call round trip over a duplex pair, all of criterion 8's error
+  paths, and the `McpContext` pool's connect/dispatch/partial-failure
+  behavior), 2 in `permission.rs` (MCP pattern gating + non-MCP tools
+  unaffected), and 8 in `regind`'s `dispatch_tests` (MCP tools offered +
+  dispatched through a real `ChatSend` round trip with a `FakeLlm` +
+  `FakeMcpSpawner`, an unroutable-tool error path, and the reconnect tick's
+  connect + backoff-respecting behavior). Full workspace build/test/clippy
+  stays green (582 regin-core tests, up from 561; 60 regind tests, up from
+  56; zero new clippy warnings).
+- Next: FEAT-082 (plugin system) or FEAT-083 (multi-provider model
+  abstraction) — Track A's remaining "extensibility"/"quality-of-life"
+  steps; MCP (this ticket) was the higher-value extensibility piece to land
+  first per the milestone's suggested order.

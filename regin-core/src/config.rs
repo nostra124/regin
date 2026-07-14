@@ -63,6 +63,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ("permission.web_search", "allow", "Permission level for web_search: allow|ask|deny (FEAT-080)"),
     ("permission.diagnostics", "allow", "Permission level for diagnostics: allow|ask|deny (FEAT-080)"),
     ("permission.task", "allow", "Permission level for task (subagent delegation): allow|ask|deny (FEAT-080)"),
+    ("permission.mcp.patterns", "[]", "JSON array of {pattern, level} glob rules for mcp_<server>_<tool> names, last match wins (FEAT-081)"),
 ];
 
 /// Returns the XDG data directory for regin: ~/.local/share/regin/
