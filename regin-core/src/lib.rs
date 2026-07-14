@@ -38,6 +38,7 @@ pub mod protocol;
 pub mod push;
 pub mod rcpsp;
 pub mod reflect;
+pub mod references;
 pub mod remediation;
 pub mod resilience;
 pub mod repo;

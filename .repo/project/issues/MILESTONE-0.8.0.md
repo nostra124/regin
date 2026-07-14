@@ -32,7 +32,7 @@ in 0.8.0 are orthogonal to objectives/planning, though they may converge later.
 | FEAT-081 | MCP client protocol (local + remote) | L | DISC-021 | done |
 | FEAT-082 | Plugin system (event-driven hooks) | L | DISC-021 | done |
 | FEAT-083 | Multi-provider model abstraction | L | DISC-021 | done |
-| FEAT-084 | External references (local dirs + git repos) | S | DISC-021 | open |
+| FEAT-084 | External references (local dirs + git repos) | S | DISC-021 | done |
 | FEAT-085 | Edit tool polish (apply_patch, undo/redo) | S | DISC-021 | done |
 
 ### Track B — Web UI (DISC-022)
