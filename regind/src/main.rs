@@ -15,7 +15,9 @@ use regin_core::{
     promotion,
     protocol::{Request, Response},
     push,
-    reflect, repo, schedule, skills, soul,
+    reflect,
+    references,
+    repo, schedule, skills, soul,
     subagent,
     tools,
     types::ChatMessage,
@@ -64,6 +66,12 @@ struct AppState {
     /// Loaded plugins (FEAT-082). Always constructed; empty until the
     /// startup `plugin::PluginHost::load_dir` pass (or a test) loads one.
     plugins: plugin::PluginHost,
+    /// External references (FEAT-084) resolved once at startup — local
+    /// directories used as-is, `repository` references shallow-cloned into
+    /// the XDG cache. Read-only afterward (no live reconfiguration within a
+    /// running daemon; `regin config set references.*` takes effect on the
+    /// next restart), so a plain `Vec` needs no interior mutability.
+    references: Vec<references::ResolvedReference>,
 }
 
 unsafe impl Send for AppState {}
@@ -146,6 +154,27 @@ async fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
 
+    // FEAT-084 acceptance criteria 2, 3: resolve every configured external
+    // reference before the daemon starts serving — a `path` reference is
+    // used as-is; a `repository` reference is shallow-cloned into the XDG
+    // cache. Best-effort, same fail-safe-per-item convention as MCP/plugin
+    // loading: one bad reference doesn't stop the daemon or the others.
+    let resolved_references = {
+        let cache_dir = config::data_dir()?.join("references");
+        let discovered = references::discover_configured_references(&conn);
+        let mut out = Vec::new();
+        for (alias, cfg) in discovered {
+            match cfg {
+                Ok(cfg) => match references::resolve_reference(&cfg, &cache_dir, &references::GitRepoCloner, dirs::home_dir().as_deref()).await {
+                    Ok(r) => { info!(reference = %alias, dir = %r.local_dir.display(), "Resolved external reference"); out.push(r); }
+                    Err(e) => warn!(reference = %alias, "Failed to resolve reference: {e:#}"),
+                },
+                Err(e) => warn!(reference = %alias, "Reference config error: {e:#}"),
+            }
+        }
+        out
+    };
+
     let state = Arc::new(AppState {
         db: Mutex::new(conn),
         identity_db: Mutex::new(identity_conn),
@@ -156,6 +185,7 @@ async fn main() -> Result<()> {
         pending_permissions: Mutex::new(HashMap::new()),
         mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
         plugins: plugin::PluginHost::new(),
+        references: resolved_references,
     });
 
     // FEAT-082 acceptance criterion 3: load plugins from the system dir
@@ -302,6 +332,11 @@ fn build_context(state: &AppState, cwd: Option<&str>) -> Vec<Value> {
     let mut msgs = Vec::new();
     if let Some(system) = context::build_system_prompt(repo_ctx.as_deref(), &memories) {
         msgs.push(serde_json::json!({ "role": "system", "content": system }));
+    }
+    // FEAT-084 acceptance criterion 4: tell the agent about any resolved
+    // external references so it knows it can read_file/glob into them.
+    if let Some(refs_context) = references::render_references_context(&state.references) {
+        msgs.push(serde_json::json!({ "role": "system", "content": refs_context }));
     }
     msgs
 }
@@ -1579,6 +1614,7 @@ mod dispatch_tests {
             pending_permissions: Mutex::new(HashMap::new()),
             mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
             plugins: plugin::PluginHost::new(),
+            references: Vec::new(),
         })
     }
 
@@ -1601,6 +1637,29 @@ mod dispatch_tests {
             pending_permissions: Mutex::new(HashMap::new()),
             mcp: mcp::McpContext::new(spawner),
             plugins: plugin::PluginHost::new(),
+            references: Vec::new(),
+        })
+    }
+
+    /// Same as `state()`, but with resolved external references (FEAT-084)
+    /// pre-populated — for tests exercising `build_context`'s reference
+    /// injection without a real config-discovery + clone pass.
+    fn state_with_references(refs: Vec<references::ResolvedReference>) -> Arc<AppState> {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let identity_conn = rusqlite::Connection::open_in_memory().unwrap();
+        identity_db::init_identity_schema(&identity_conn).unwrap();
+        Arc::new(AppState {
+            db: Mutex::new(conn),
+            identity_db: Mutex::new(identity_conn),
+            llm_override: None,
+            undo: Mutex::new(undo::UndoStore::new()),
+            lsp: lsp::LspContext::new(Arc::new(lsp::ProcessLspSpawner)),
+            task_limiter: subagent::TaskLimiter::new(3),
+            pending_permissions: Mutex::new(HashMap::new()),
+            mcp: mcp::McpContext::new(Arc::new(mcp::ProcessMcpSpawner)),
+            plugins: plugin::PluginHost::new(),
+            references: refs,
         })
     }
 
@@ -2109,6 +2168,32 @@ mod dispatch_tests {
         let idb = st.identity_db.lock().unwrap();
         let session = identity_db::session_get(&idb, &conv_id).unwrap().expect("session exists");
         assert!(session.session.summary.unwrap_or_default().contains("(compacted by plugin)"), "summary should carry the plugin's annotation");
+    }
+
+    // -----------------------------------------------------------------
+    // FEAT-084: external references (local dirs + git repos)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn build_context_has_no_references_block_when_none_are_configured() {
+        let st = state();
+        let msgs = build_context(&st, None);
+        assert!(msgs.iter().all(|m| !m["content"].as_str().unwrap_or_default().contains("External references")));
+    }
+
+    #[test]
+    fn build_context_injects_resolved_references_as_a_system_message() {
+        // acceptance criterion 4
+        let refs = vec![
+            references::ResolvedReference { alias: "helpers".into(), local_dir: "/opt/helpers".into(), description: Some("shared utility functions".into()) },
+        ];
+        let st = state_with_references(refs);
+        let msgs = build_context(&st, None);
+        let found = msgs.iter().any(|m| {
+            let content = m["content"].as_str().unwrap_or_default();
+            content.contains("helpers") && content.contains("/opt/helpers") && content.contains("shared utility functions")
+        });
+        assert!(found, "expected a references system message among {msgs:?}");
     }
 
     // -----------------------------------------------------------------

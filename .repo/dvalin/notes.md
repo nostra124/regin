@@ -2207,3 +2207,71 @@ Implementation section:
   error message since it only asserts `.is_err()`).
 - Next: FEAT-084 (external references — local dirs + git repos), Track
   A's last remaining ticket before Track B's FEAT-087 (web UI).
+
+### 2026-07-14 — FEAT-084: External references (local dirs + git repos) (0.8.0 coding agent plane)
+
+- **FEAT-084 implemented and moved to done/.** New `regin-core/src/references.rs`:
+  `references.<alias>.path|repository|branch|description` settings
+  (criterion 1); a `path` reference is used directly, a `repository`
+  reference is shallow-cloned (`git clone --depth 1`) into
+  `~/.local/share/regin/references/<alias>/` (criterion 2), with an
+  optional `branch` (criterion 3, default branch when omitted). Both kinds
+  resolve to a local, readable directory and are rendered into the system
+  prompt (criterion 4) so the agent knows it can `read_file`/`glob` into
+  them.
+- **This closes out Track A entirely** — all nine 0.8.0 coding-agent-plane
+  tickets (FEAT-077 through FEAT-085) are now done. Only Track B
+  (FEAT-087, web UI) remains before MILESTONE-0.8.0 is fully complete.
+- **Path resolution** (criterion 7): `resolve_path(raw, home_dir)` handles
+  the three named cases explicitly — `~`/`~/...` expands against a
+  supplied home directory; an absolute path passes through unchanged; a
+  bare relative path also passes through unchanged, since Rust's own
+  `std::fs` resolves a relative `PathBuf` against the process's working
+  directory the normal way — there's no reference-specific base to layer
+  on top of that.
+- **`git clone` sits behind an injectable `RepoCloner` trait**, same
+  "pure orchestration, thin real I/O behind a trait" pattern as
+  `mcp::McpSpawner`/`lsp::LspSpawner` — `resolve_reference`'s tests use a
+  `FakeCloner` recording calls; the real `GitRepoCloner` (shallow clone,
+  `owner/repo` shorthand defaults to `https://github.com/<repo>.git`,
+  anything already URL-shaped passes through so self-hosted GitLab/Gitea
+  works too) isn't exercised against a real network in tests — deliberately,
+  same call as every other "don't depend on live network/external services
+  in the test suite" decision this session.
+- **v1 scope, documented**: a `repository` reference already cloned into
+  the cache is used as-is on every subsequent resolve — no refresh/pull.
+  Acceptable for a read-only reference; revisiting this (e.g. a
+  `references.<alias>.refresh` setting) is a natural follow-up if it turns
+  out to matter, not an oversight.
+- **Criterion 5 ("references bypass the tool permission boundary
+  automatically") needed no new code** — this codebase's permission system
+  (FEAT-080) gates by *tool name* (`permission.<tool>`, plus glob patterns
+  for `bash`/`mcp_*`), not by *file path*. There is no path-scoped
+  permission concept anywhere to exempt a reference's directory from —
+  `read_file`/`glob` already work against any path they're pointed at,
+  reference or not. Documented rather than building a no-op exemption
+  mechanism for a restriction that doesn't exist.
+- **Criterion 7's "reference removal"**: this codebase's settings model has
+  no delete verb, only overwrite — clearing `references.<alias>.path`
+  (and `.repository`) to empty string is "removal": the alias still shows
+  up in raw discovery (the setting key still exists) but fails to resolve
+  (neither field is set), so it drops out of the active/resolved list.
+  Tested explicitly rather than assumed.
+- Resolved once at daemon startup into a plain `AppState.references: Vec<
+  ResolvedReference>` (no interior mutability needed — read-only after
+  construction, same as how `mcp`/`plugins` are populated *before*
+  `Arc::new(AppState {...})` for MCP, except references don't need a
+  reconnect-style background task at all since there's no persistent
+  connection to maintain). `regin config set references.*` takes effect on
+  the next daemon restart, not live — acceptable for a config surface this
+  infrequently changed.
+- 16 new tests: 14 in `references.rs` (discovery incl. malformed/removal,
+  path resolution's three cases, repo URL derivation, `resolve_reference`
+  orchestration via a fake cloner for both path and repository kinds,
+  prompt rendering with/without references) and 2 in `regind`'s
+  `dispatch_tests` (`build_context` omits the block with none configured,
+  injects it with one resolved). Full workspace build/test/clippy stays
+  green (619 regin-core tests, up from 605; 67 regind tests, up from 65;
+  zero new clippy warnings).
+- Next: FEAT-087 (web UI server) — Track B, independent of Track A,
+  the last ticket before MILESTONE-0.8.0 is fully complete.
